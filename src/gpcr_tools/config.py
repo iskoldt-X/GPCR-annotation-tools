@@ -110,6 +110,15 @@ def get_gemini_model_name() -> str:
     return os.environ.get("GPCR_GEMINI_MODEL") or GEMINI_MODEL_NAME_DEFAULT
 
 
+def model_run_subdir(model_name: str | None) -> str:
+    """Filesystem-safe per-model subdirectory name for AI run outputs.
+
+    Runs are namespaced by model (``ai_results/<pdb>/<model>/run_N.json``) so
+    annotating the same structure with different models no longer overwrites.
+    """
+    return (model_name or "default").replace("/", "_")
+
+
 # Kept for backward-compat import; prefer get_gemini_model_name() for fresh reads.
 GEMINI_MODEL_NAME: str = GEMINI_MODEL_NAME_DEFAULT
 GEMINI_API_KEY_ENV: str = "GPCR_GEMINI_API_KEY"
@@ -314,6 +323,7 @@ VALIDATION_EXCLUDED_BUFFER: str = "EXCLUDED_BUFFER"
 VALIDATION_GHOST_LIGAND: str = "GHOST_LIGAND"
 VALIDATION_RECEPTOR_MATCH: str = "RECEPTOR_MATCH"
 VALIDATION_UNIPROT_CLASH: str = "UNIPROT_CLASH"
+VALIDATION_RECEPTOR_NO_API_DATA: str = "RECEPTOR_NO_API_DATA"
 
 # ---------------------------------------------------------------------------
 # Ligand exclude list (common buffers, ions, artifacts)

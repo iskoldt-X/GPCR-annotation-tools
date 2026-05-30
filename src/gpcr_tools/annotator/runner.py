@@ -26,9 +26,9 @@ from gpcr_tools.config import (
     GEMINI_MAX_RETRIES,
     GEMINI_MAX_WORKERS,
     SLEEP_GEMINI_429,
-    TIMEOUT_BATCH_RESULT_DOWNLOAD,
     get_config,
     get_gemini_model_name,
+    model_run_subdir,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,7 +51,7 @@ def run_single_pdb(
     """
     model_name = model_name or get_gemini_model_name()
     config = get_config()
-    out_dir = config.ai_results_dir / pdb_id
+    out_dir = config.ai_results_dir / pdb_id / model_run_subdir(model_name)
 
     # Check resumability
     os.makedirs(out_dir, exist_ok=True)
@@ -205,7 +205,7 @@ def build_and_submit_batch(
             enriched_data = json.load(f)
 
         # Determine runs to do
-        out_dir = config.ai_results_dir / pdb_id
+        out_dir = config.ai_results_dir / pdb_id / model_run_subdir(model_name)
         os.makedirs(out_dir, exist_ok=True)
         runs_to_do = [n for n in range(1, num_runs + 1) if not (out_dir / f"run_{n}.json").exists()]
 
@@ -338,29 +338,50 @@ def check_batch_status() -> None:
         logger.error("Failed to get batch job %s: %s", job_name, e)
         return
 
-    logger.info("Batch Job %s is in state: %s", job_name, job.state)
+    state = job.state.name if job.state else ""
+    logger.info("Batch Job %s is in state: %s", job_name, state)
 
-    if job.state in ("SUCCEEDED", "FAILED", "PARTIALLY_SUCCEEDED"):
-        logger.info("Batch has completed. Downloading results...")
-        if hasattr(job, "output_uri") and job.output_uri:
-            import requests
+    # The SDK exposes terminal states as JOB_STATE_* on ``job.state.name``.
+    # Some terminal states carry results to download; others do not.
+    succeeded_states = ("JOB_STATE_SUCCEEDED", "JOB_STATE_PARTIALLY_SUCCEEDED")
+    failed_states = ("JOB_STATE_FAILED", "JOB_STATE_CANCELLED", "JOB_STATE_EXPIRED")
 
-            try:
-                os.makedirs(config.pipeline_runs_dir, exist_ok=True)
-                safe_name = job_name.replace("/", "_")
-                raw_out_file = config.pipeline_runs_dir / f"raw_output_{safe_name}.jsonl"
-                logger.info("Downloading from %s to %s", job.output_uri, raw_out_file)
+    if state in failed_states:
+        expired_note = (
+            " -- it ran or waited past the provider's 48-hour limit; resubmit or split the batch"
+            if state == "JOB_STATE_EXPIRED"
+            else ""
+        )
+        logger.error(
+            "Batch job %s ended without results (%s)%s: %s",
+            job_name,
+            state,
+            expired_note,
+            job.error,
+        )
+        return
 
-                response = requests.get(job.output_uri, timeout=TIMEOUT_BATCH_RESULT_DOWNLOAD)
-                response.raise_for_status()
-                with open(raw_out_file, "wb") as f_out:
-                    f_out.write(response.content)
-                logger.info("Download complete. Running recovery to parse results.")
-                recover_batch()
-            except requests.exceptions.RequestException as e:
-                logger.error("Failed to download results: %s", e)
-        else:
-            logger.info("No output URI found for this job.")
+    if state not in succeeded_states:
+        logger.info("Batch job %s is not finished yet (state %s); try again later.", job_name, state)
+        return
+
+    if not (job.dest and job.dest.file_name):
+        logger.error("Batch job %s reported %s but exposed no result file.", job_name, state)
+        return
+
+    logger.info("Batch has completed. Downloading results...")
+    try:
+        os.makedirs(config.pipeline_runs_dir, exist_ok=True)
+        safe_name = job_name.replace("/", "_")
+        raw_out_file = config.pipeline_runs_dir / f"raw_output_{safe_name}.jsonl"
+        logger.info("Downloading %s to %s", job.dest.file_name, raw_out_file)
+        content = client.files.download(file=job.dest.file_name)
+        with open(raw_out_file, "wb") as f_out:
+            f_out.write(content)
+        logger.info("Download complete. Running recovery to parse results.")
+        recover_batch()
+    except Exception as e:  # surface any download/parse failure without crashing
+        logger.error("Failed to download batch results: %s", e)
 
 
 def recover_batch() -> None:
@@ -429,7 +450,11 @@ def recover_batch() -> None:
                                 "timestamp": datetime.now(UTC).isoformat(),
                             }
 
-                            out_dir = config.ai_results_dir / pdb_id
+                            out_dir = (
+                                config.ai_results_dir
+                                / pdb_id
+                                / model_run_subdir(batch_meta.get("model_requested"))
+                            )
                             os.makedirs(out_dir, exist_ok=True)
                             out_file = out_dir / f"run_{run_num}.json"
 

@@ -11,7 +11,7 @@ from gpcr_tools.aggregator.ai_results_loader import (
     get_pending_pdb_ids,
     load_ai_runs,
 )
-from gpcr_tools.config import reset_config
+from gpcr_tools.config import model_run_subdir, reset_config
 
 
 @pytest.fixture(autouse=True)
@@ -110,3 +110,45 @@ class TestGetPendingPdbIds:
         reset_config()
         result = get_pending_pdb_ids()
         assert result == []
+
+
+class TestModelNamespacedRuns:
+    """Runs are namespaced per model; the loader reads the current model's runs
+    (or legacy flat layout) and never blends models."""
+
+    def test_loads_current_model_nested_runs(
+        self, workspace: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("GPCR_GEMINI_MODEL", "model-x")
+        model_dir = workspace / "ai_results" / "9ABC" / model_run_subdir("model-x")
+        model_dir.mkdir(parents=True)
+        (model_dir / "run_01.json").write_text(json.dumps({"m": "x"}), encoding="utf-8")
+        runs = load_ai_runs("9ABC")
+        assert len(runs) == 1
+        assert runs[0]["m"] == "x"
+
+    def test_does_not_blend_other_models(
+        self, workspace: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("GPCR_GEMINI_MODEL", "model-x")
+        pdb_dir = workspace / "ai_results" / "9ABC"
+        for model, tag in (("model-x", "x"), ("model-y", "y")):
+            md = pdb_dir / model_run_subdir(model)
+            md.mkdir(parents=True)
+            (md / "run_01.json").write_text(json.dumps({"m": tag}), encoding="utf-8")
+        runs = load_ai_runs("9ABC")
+        # Only the current model's runs, never the other model's.
+        assert len(runs) == 1
+        assert runs[0]["m"] == "x"
+
+    def test_falls_back_to_legacy_flat_layout(
+        self, workspace: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("GPCR_GEMINI_MODEL", "model-x")
+        pdb_dir = workspace / "ai_results" / "9ABC"
+        pdb_dir.mkdir()
+        # Flat run file from before model-namespacing -- still discoverable.
+        (pdb_dir / "run_01.json").write_text(json.dumps({"legacy": True}), encoding="utf-8")
+        runs = load_ai_runs("9ABC")
+        assert len(runs) == 1
+        assert runs[0]["legacy"] is True

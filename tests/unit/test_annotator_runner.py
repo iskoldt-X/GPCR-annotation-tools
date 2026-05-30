@@ -3,7 +3,12 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from gpcr_tools.annotator import runner
-from gpcr_tools.config import get_config, reset_config
+from gpcr_tools.config import (
+    get_config,
+    get_gemini_model_name,
+    model_run_subdir,
+    reset_config,
+)
 
 
 def test_run_single_pdb_skips_if_done(tmp_path, monkeypatch):
@@ -15,7 +20,7 @@ def test_run_single_pdb_skips_if_done(tmp_path, monkeypatch):
     config = get_config()
 
     pdb_id = "7W55"
-    out_dir = config.ai_results_dir / pdb_id
+    out_dir = config.ai_results_dir / pdb_id / model_run_subdir(get_gemini_model_name())
     out_dir.mkdir(parents=True)
 
     # Create 2 runs
@@ -123,7 +128,7 @@ def test_recover_batch(tmp_path, monkeypatch):
 
     runner.recover_batch()
 
-    out_file = config.ai_results_dir / "7W55" / "run_1.json"
+    out_file = config.ai_results_dir / "7W55" / model_run_subdir(None) / "run_1.json"
     assert out_file.exists()
 
     data = json.loads(out_file.read_text())
@@ -165,7 +170,9 @@ def test_run_single_pdb_writes_provenance(tmp_path, monkeypatch):
         prompt_id="v5",
     )
 
-    data = json.loads((config.ai_results_dir / "7W55" / "run_1.json").read_text())
+    data = json.loads(
+        (config.ai_results_dir / "7W55" / model_run_subdir("gemini-2.5-pro") / "run_1.json").read_text()
+    )
     prov = data["_provenance"]
     assert prov["model_requested"] == "gemini-2.5-pro"
     assert prov["model_served"] == "gemini-2.5-pro-002"
@@ -214,10 +221,122 @@ def test_recover_batch_writes_provenance(tmp_path, monkeypatch):
 
     runner.recover_batch()
 
-    data = json.loads((config.ai_results_dir / "7W55" / "run_1.json").read_text())
+    data = json.loads(
+        (config.ai_results_dir / "7W55" / model_run_subdir("gemini-2.5-pro") / "run_1.json").read_text()
+    )
     prov = data["_provenance"]
     assert prov["mode"] == "batch"
     assert prov["model_requested"] == "gemini-2.5-pro"
     assert prov["prompt"] == "v5"
     assert prov["model_served"] == "gemini-2.5-pro-002"
     assert prov["run"] == 1
+
+
+def _setup_batch_state(tmp_path, monkeypatch, job_name="batchJobs/mock_job"):
+    monkeypatch.setenv("GPCR_STATE_PATH", str(tmp_path / "state"))
+    monkeypatch.setenv("GPCR_AI_RESULTS_PATH", str(tmp_path / "ai_results"))
+    reset_config()
+    config = get_config()
+    (tmp_path / "state").mkdir(exist_ok=True)
+    config.current_batch_job_file.write_text(job_name)
+    return config
+
+
+def _mock_batch_job(state_name, file_name="files/result.jsonl", error=None):
+    job = MagicMock()
+    job.state.name = state_name
+    if file_name is None:
+        job.dest = None
+    else:
+        job.dest.file_name = file_name
+    job.error = error
+    return job
+
+
+def test_check_batch_status_downloads_on_success(tmp_path, monkeypatch):
+    """A succeeded job downloads its result file via the SDK and recovers it."""
+    config = _setup_batch_state(tmp_path, monkeypatch)
+    client = MagicMock()
+    client.batches.get.return_value = _mock_batch_job("JOB_STATE_SUCCEEDED")
+    client.files.download.return_value = b'{"id": "x"}\n'
+    monkeypatch.setattr("gpcr_tools.annotator.runner.get_client", lambda: client)
+    monkeypatch.setattr("gpcr_tools.annotator.runner.recover_batch", lambda: None)
+
+    runner.check_batch_status()
+
+    client.files.download.assert_called_once_with(file="files/result.jsonl")
+    raw = config.pipeline_runs_dir / "raw_output_batchJobs_mock_job.jsonl"
+    assert raw.read_bytes() == b'{"id": "x"}\n'
+
+
+def test_check_batch_status_partial_success_also_downloads(tmp_path, monkeypatch):
+    _setup_batch_state(tmp_path, monkeypatch)
+    client = MagicMock()
+    client.batches.get.return_value = _mock_batch_job("JOB_STATE_PARTIALLY_SUCCEEDED")
+    client.files.download.return_value = b"{}\n"
+    monkeypatch.setattr("gpcr_tools.annotator.runner.get_client", lambda: client)
+    monkeypatch.setattr("gpcr_tools.annotator.runner.recover_batch", lambda: None)
+
+    runner.check_batch_status()
+
+    client.files.download.assert_called_once()
+
+
+def test_check_batch_status_no_download_on_terminal_failure(tmp_path, monkeypatch):
+    """Failed / cancelled / expired jobs carry no results -- do not attempt download."""
+    for state in ("JOB_STATE_FAILED", "JOB_STATE_CANCELLED", "JOB_STATE_EXPIRED"):
+        _setup_batch_state(tmp_path, monkeypatch)
+        client = MagicMock()
+        client.batches.get.return_value = _mock_batch_job(state, error="boom")
+        monkeypatch.setattr("gpcr_tools.annotator.runner.get_client", lambda c=client: c)
+
+        runner.check_batch_status()
+
+        client.files.download.assert_not_called()
+
+
+def test_check_batch_status_no_download_while_pending(tmp_path, monkeypatch):
+    _setup_batch_state(tmp_path, monkeypatch)
+    client = MagicMock()
+    client.batches.get.return_value = _mock_batch_job("JOB_STATE_PENDING")
+    monkeypatch.setattr("gpcr_tools.annotator.runner.get_client", lambda: client)
+
+    runner.check_batch_status()
+
+    client.files.download.assert_not_called()
+
+
+def test_run_outputs_namespaced_by_model(tmp_path, monkeypatch):
+    """Annotating one PDB with two models writes to separate subdirectories
+    instead of overwriting."""
+    monkeypatch.setenv("GPCR_AI_RESULTS_PATH", str(tmp_path / "ai_results"))
+    reset_config()
+    config = get_config()
+    pdb_id = "7W55"
+
+    # Pre-seed model-a's run so any collision would be visible.
+    a_dir = config.ai_results_dir / pdb_id / model_run_subdir("model-a")
+    a_dir.mkdir(parents=True)
+    (a_dir / "run_1.json").write_text('{"from": "a"}')
+
+    mock_client = MagicMock()
+    fc = MagicMock()
+    fc.name = runner.ANNOTATOR_FUNCTION_NAME
+    fc.args = {"receptor_info": {}}
+    mock_response = MagicMock()
+    mock_response.function_calls = [fc]
+    mock_response.model_version = "model-b-001"
+    mock_client.models.generate_content.return_value = mock_response
+    monkeypatch.setattr("gpcr_tools.annotator.runner.get_client", lambda: mock_client)
+    monkeypatch.setattr("gpcr_tools.annotator.runner.compress_pdf_if_needed", lambda a, b: a)
+    monkeypatch.setattr("gpcr_tools.annotator.runner.build_prompt_parts", lambda *a: ["ctx"])
+    monkeypatch.setattr(
+        "gpcr_tools.annotator.runner.post_process_annotation", lambda args: {"ok": True}
+    )
+
+    runner.run_single_pdb(pdb_id, {}, "Prompt", Path("dummy.pdf"), num_runs=1, model_name="model-b")
+
+    b_file = config.ai_results_dir / pdb_id / model_run_subdir("model-b") / "run_1.json"
+    assert b_file.exists()
+    # model-a's run is untouched.
+    assert json.loads((a_dir / "run_1.json").read_text()) == {"from": "a"}
