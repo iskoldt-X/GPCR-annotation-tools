@@ -33,6 +33,7 @@ from gpcr_tools.aggregator.ground_truth import inject_ground_truth
 from gpcr_tools.aggregator.voting import (
     extract_ai_g_protein,
     find_discrepancies,
+    flag_low_confidence_consensus,
     get_majority_votes,
     select_best_run,
 )
@@ -47,6 +48,7 @@ from gpcr_tools.config import (
     CHIMERA_STATUS_SKIPPED,
     CHIMERA_STATUS_SUCCESS,
     EMPTY_VALUES,
+    LOW_CONFIDENCE_LEVELS,
     get_config,
 )
 from gpcr_tools.validator.cache import SequenceCache, ValidationCache
@@ -360,6 +362,12 @@ def aggregate_pdb(
 
         # 9. Compute discrepancies
         discrepancies = find_discrepancies(best_run_data, majority_votes, all_votes)
+        # Also surface unanimous-but-low-confidence decision units for review
+        # (consensus is not correctness); dedupe by path so a field already
+        # flagged as a real disagreement or near-tie is not duplicated.
+        low_conf = flag_low_confidence_consensus(best_run_data, LOW_CONFIDENCE_LEVELS)
+        seen_paths = {d["path"] for d in discrepancies}
+        discrepancies.extend(d for d in low_conf if d["path"] not in seen_paths)
 
         # 10. Chimera analysis
         chimera_result: dict[str, Any] = {
