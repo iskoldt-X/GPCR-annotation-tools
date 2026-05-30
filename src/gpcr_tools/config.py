@@ -270,6 +270,10 @@ SOFT_FIELD_KEYS: frozenset[str] = frozenset(
 # as settled, even when the selected value equals the majority.
 VOTE_NEAR_TIE_MARGIN: int = 1
 
+# Self-reported confidence levels that should be promoted to human review even
+# when all runs agree — a unanimous low-confidence inference is still a guess.
+LOW_CONFIDENCE_LEVELS: frozenset[str] = frozenset({"Low"})
+
 GROUND_TRUTH_PATHS: frozenset[str] = frozenset(
     {
         "structure_info.method",

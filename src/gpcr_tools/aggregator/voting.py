@@ -78,6 +78,21 @@ def _is_empty_key(value: Any) -> bool:
     return not value
 
 
+def _list_item_identity(item: dict[str, Any], key_field: str, idx: int) -> str:
+    """Stable grouping identity for a list item — the key field when usable,
+    else a namespaced fallback (name -> type -> index).
+
+    Shared by ``get_majority_votes`` and ``find_discrepancies`` so both group
+    the same items the same way; otherwise placeholder keys like ``"None"``
+    cross-wire distinct entities during discrepancy detection.
+    """
+    group_key = item.get(key_field)
+    if not _is_empty_key(group_key):
+        return str(group_key)
+    fallback_id = item.get("name") or item.get("type") or f"idx{idx}"
+    return f"__keyless__:{fallback_id}"
+
+
 def get_majority_votes(
     values: list[Any],
     path: str = "",
@@ -114,19 +129,11 @@ def get_majority_votes(
                 for idx, item in enumerate(run_list):
                     if not isinstance(item, dict):
                         continue
-                    group_key = item.get(key_field)
-                    if not _is_empty_key(group_key):
-                        grouped_items[str(group_key)].append(item)
-                    else:
-                        # Items lacking a usable key must neither be silently
-                        # dropped nor collapsed under a placeholder like
-                        # "None".  Fall back to a stable identity
-                        # (name -> type -> index) so distinct entities stay
-                        # separate and still survive aggregation.  The
-                        # "__keyless__:" prefix cannot collide with a real
-                        # chem_comp_id / name.
-                        fallback_id = item.get("name") or item.get("type") or f"idx{idx}"
-                        grouped_items[f"__keyless__:{fallback_id}"].append(item)
+                    # Items lacking a usable key must neither be silently
+                    # dropped nor collapsed under a placeholder like "None":
+                    # group them under a stable fallback identity so distinct
+                    # entities stay separate and still survive aggregation.
+                    grouped_items[_list_item_identity(item, key_field, idx)].append(item)
 
             majority_list: list[Any] = []
             counts_list: list[Any] = []
@@ -279,15 +286,17 @@ def find_discrepancies(
         key_field = _resolve_key_field(path)
 
         if key_field:
-            best_run_map: dict[str | None, dict[str, Any]] = {
-                item.get(key_field): item for item in best_run_data if isinstance(item, dict)
+            # Group by the same stable identity as get_majority_votes so
+            # keyless items (placeholder "None") map 1:1 instead of collapsing.
+            best_run_map: dict[str, dict[str, Any]] = {
+                _list_item_identity(item, key_field, idx): item
+                for idx, item in enumerate(best_run_data)
+                if isinstance(item, dict)
             }
             for i, maj_item in enumerate(majority_data):
                 if not isinstance(maj_item, dict):
                     continue
-                item_key = maj_item.get(key_field)
-                if not item_key:
-                    continue
+                item_key = _list_item_identity(maj_item, key_field, i)
                 run_item = best_run_map.get(item_key)
                 votes_item = (
                     all_votes_data[i]
@@ -324,3 +333,49 @@ def find_discrepancies(
         return discrepancies
 
     return []
+
+
+def flag_low_confidence_consensus(
+    best_run_data: Any,
+    low_levels: frozenset[str],
+) -> list[dict[str, Any]]:
+    """Flag decision units whose self-reported confidence is in *low_levels*.
+
+    Cross-run agreement is not correctness: a unanimous but low-confidence call
+    is still a guess, so surface it for human review.  Records share the shape
+    and ``.value`` path of discrepancies so the curate UI picks them up with no
+    extra wiring.
+    """
+    flags: list[dict[str, Any]] = []
+    if not isinstance(best_run_data, dict):
+        return flags
+
+    def _is_low(node: Any) -> bool:
+        return isinstance(node, dict) and node.get("confidence") in low_levels
+
+    def _record(node_path: str, node: Any) -> dict[str, Any]:
+        value = node.get("value")
+        return {
+            "path": node_path,
+            "best_run_value": value,
+            "majority_vote_value": value,
+            "all_votes": {},
+            "needs_review": True,
+            "low_confidence": node.get("confidence"),
+        }
+
+    state = (best_run_data.get("structure_info") or {}).get("state")
+    if _is_low(state):
+        flags.append(_record("structure_info.state.value", state))
+
+    for idx, lig in enumerate(best_run_data.get("ligands") or []):
+        if isinstance(lig, dict) and _is_low(lig.get("role")):
+            key = _list_item_identity(lig, "chem_comp_id", idx)
+            flags.append(_record(f"ligands[{key}].role.value", lig["role"]))
+
+    for idx, aux in enumerate(best_run_data.get("auxiliary_proteins") or []):
+        if isinstance(aux, dict) and _is_low(aux.get("type")):
+            key = _list_item_identity(aux, "name", idx)
+            flags.append(_record(f"auxiliary_proteins[{key}].type.value", aux["type"]))
+
+    return flags
