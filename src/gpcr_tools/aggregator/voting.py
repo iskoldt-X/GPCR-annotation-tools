@@ -11,6 +11,7 @@ from collections import Counter, defaultdict
 from typing import Any
 
 from gpcr_tools.config import (
+    EMPTY_VALUES,
     GROUND_TRUTH_PATHS,
     LIST_ITEM_KEY_FIELDS,
     SOFT_FIELD_KEYS,
@@ -61,6 +62,21 @@ def _resolve_key_field(path: str) -> str | None:
     return None
 
 
+def _is_empty_key(value: Any) -> bool:
+    """True if *value* cannot serve as a grouping key.
+
+    Guards against the placeholder strings the schema injects for keyless
+    items (protein / Apo ligands get ``chem_comp_id="None"``) and blanks — see
+    ``config.EMPTY_VALUES``.  Without this, ``"None"`` is truthy and every
+    protein ligand would collapse into a single bogus ``"None"`` group.
+    """
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in EMPTY_VALUES
+    return not value
+
+
 def get_majority_votes(
     values: list[Any],
     path: str = "",
@@ -90,7 +106,6 @@ def get_majority_votes(
 
         if key_field:
             grouped_items: dict[str, list[dict[str, Any]]] = defaultdict(list)
-            index_items: list[tuple[int, dict[str, Any]]] = []
 
             for run_list in values:
                 if not isinstance(run_list, list):
@@ -99,14 +114,18 @@ def get_majority_votes(
                     if not isinstance(item, dict):
                         continue
                     group_key = item.get(key_field)
-                    if group_key:
-                        grouped_items[group_key].append(item)
+                    if not _is_empty_key(group_key):
+                        grouped_items[str(group_key)].append(item)
                     else:
-                        # Fallback: index-based matching for items missing
-                        # the key field (e.g. hallucinated ligands without
-                        # chem_comp_id).  This matches legacy behaviour and
-                        # was explicitly mandated — do NOT remove.
-                        index_items.append((idx, item))
+                        # Items lacking a usable key must neither be silently
+                        # dropped nor collapsed under a placeholder like
+                        # "None".  Fall back to a stable identity
+                        # (name -> type -> index) so distinct entities stay
+                        # separate and still survive aggregation.  The
+                        # "__keyless__:" prefix cannot collide with a real
+                        # chem_comp_id / name.
+                        fallback_id = item.get("name") or item.get("type") or f"idx{idx}"
+                        grouped_items[f"__keyless__:{fallback_id}"].append(item)
 
             majority_list: list[Any] = []
             counts_list: list[Any] = []
