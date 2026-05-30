@@ -7,7 +7,21 @@ COPY src/ src/
 RUN pip install --no-cache-dir build \
     && python -m build --wheel
 
-# ── Stage 2: Runtime ────────────────────────────────────────────────────
+# ── Stage 2: Test ───────────────────────────────────────────────────────
+# Hermetic pytest environment. Built with `--target test` (compose `test`
+# service). Live src/ and tests/ are bind-mounted at run time so edits are
+# picked up without a rebuild (editable install). Kept BEFORE the runtime
+# stage so a plain `docker build .` still yields the production image.
+FROM python:3.12-slim AS test
+
+WORKDIR /app
+COPY pyproject.toml README.md LICENSE ./
+COPY src/ src/
+COPY tests/ tests/
+RUN pip install --no-cache-dir -e ".[dev]"
+CMD ["pytest", "tests", "-q"]
+
+# ── Stage 3: Runtime ────────────────────────────────────────────────────
 FROM python:3.12-slim
 
 LABEL org.opencontainers.image.title="GPCR Annotation Tools"

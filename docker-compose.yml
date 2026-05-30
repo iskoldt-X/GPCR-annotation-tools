@@ -7,3 +7,17 @@ services:
       - GPCR_WORKSPACE=/workspace
     stdin_open: true
     tty: true
+
+  # Dockerized pytest. Build once (`docker compose build test`); live src/ and
+  # tests/ are mounted so code edits are tested without rebuilding.
+  #   docker compose run --rm test                      # full suite
+  #   docker compose run --rm test pytest tests -k voting -q
+  test:
+    build:
+      context: .
+      target: test
+    volumes:
+      - ./src:/app/src
+      - ./tests:/app/tests
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
