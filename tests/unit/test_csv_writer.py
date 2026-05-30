@@ -7,7 +7,11 @@ import csv
 from dataclasses import replace
 from unittest.mock import patch
 
-from gpcr_tools.config import CSV_SCHEMA
+from gpcr_tools.config import (
+    CSV_SCHEMA,
+    VALIDATION_GHOST_LIGAND,
+    VALIDATION_MATCHED_SMALL_MOLECULE,
+)
 from gpcr_tools.csv_generator.csv_writer import (
     append_to_csvs,
     sanitize_value,
@@ -338,3 +342,61 @@ class TestAppendToCSVs:
 
         assert len(rows) == 2  # header + 1 data row
         assert rows[1][0] == "TEST1"
+
+
+class TestGhostLigandExport:
+    """A ligand the validator could not find in the structure (GHOST_LIGAND) is
+    excluded from ligands.csv unless a curator explicitly confirmed it."""
+
+    def test_ghost_ligand_excluded_by_default(self, sample_pdb_data):
+        sample_pdb_data["ligands"] = [
+            {
+                "name": "Real",
+                "chem_comp_id": "ATP",
+                "chain_id": "A",
+                "validation_status": VALIDATION_MATCHED_SMALL_MOLECULE,
+                "role": {"value": "Agonist"},
+            },
+            {
+                "name": "Sucralose",
+                "chem_comp_id": "SUL",
+                "chain_id": "None",
+                "validation_status": VALIDATION_GHOST_LIGAND,
+                "role": {"value": "Agonist"},
+            },
+        ]
+        rows = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"]
+        assert [r["Name"] for r in rows] == ["Real"]
+
+    def test_ghost_ligand_kept_when_curator_confirms(self, sample_pdb_data):
+        sample_pdb_data["ligands"] = [
+            {
+                "name": "Sucralose",
+                "chem_comp_id": "SUL",
+                "chain_id": "None",
+                "validation_status": VALIDATION_GHOST_LIGAND,
+                "curator_kept_ghost": True,
+                "role": {"value": "Agonist"},
+            },
+        ]
+        rows = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"]
+        assert [r["Name"] for r in rows] == ["Sucralose"]
+
+    def test_non_ghost_ligands_unaffected(self, sample_pdb_data):
+        sample_pdb_data["ligands"] = [
+            {
+                "name": "Matched",
+                "chem_comp_id": "ATP",
+                "chain_id": "A",
+                "validation_status": VALIDATION_MATCHED_SMALL_MOLECULE,
+                "role": {"value": "Agonist"},
+            },
+            {
+                "name": "NoStatus",
+                "chem_comp_id": "GTP",
+                "chain_id": "B",
+                "role": {"value": "Agonist"},
+            },
+        ]
+        rows = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"]
+        assert {r["Name"] for r in rows} == {"Matched", "NoStatus"}

@@ -136,6 +136,22 @@ class TestGhostLigand:
         assert "Mystery" in warnings[0]
         assert _WARNING_REGEX.search(warnings[0]) is not None
 
+    def test_ghost_ligand_is_flagged_not_removed(self) -> None:
+        # The validator only flags; it never drops the entry. Deciding whether
+        # an unverified ligand reaches the export is left to the curator and the
+        # CSV writer, so the flagged ligand must survive validation intact.
+        data: dict[str, Any] = {
+            "ligands": [
+                {"chem_comp_id": "ATP", "name": "Adenosine"},
+                {"chem_comp_id": "XYZ", "name": "Fake Drug"},
+            ]
+        }
+        enriched = _make_enriched(nonpolymer=[_np_entity("ATP")])
+        validate_and_enrich_ligands("TEST", data, enriched)
+        assert len(data["ligands"]) == 2
+        assert data["ligands"][1]["name"] == "Fake Drug"
+        assert data["ligands"][1]["validation_status"] == VALIDATION_GHOST_LIGAND
+
 
 class TestBufferExclusion:
     def test_excluded_buffer(self) -> None:

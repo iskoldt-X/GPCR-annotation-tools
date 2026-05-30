@@ -7,7 +7,12 @@ Converts reviewed JSON data into tabular CSV rows and appends them to disk.
 import csv
 from typing import Any
 
-from gpcr_tools.config import AUX_PROTEIN_DISPATCH, CSV_SCHEMA, get_config
+from gpcr_tools.config import (
+    AUX_PROTEIN_DISPATCH,
+    CSV_SCHEMA,
+    VALIDATION_GHOST_LIGAND,
+    get_config,
+)
 
 
 def sanitize_value(value: Any) -> str:
@@ -74,6 +79,17 @@ def transform_for_csv(pdb_id: str, data: dict) -> dict[str, list[dict[str, str]]
 
     # ── ligands.csv ────────────────────────────────────────────────
     for lig in data.get("ligands") or []:
+        # Fail-safe: a ligand the validator could not find in the structure
+        # (GHOST_LIGAND) is left out of the export unless a curator explicitly
+        # confirmed it.  The model sometimes annotates a ligand the paper
+        # discusses but that this deposition does not actually model; writing it
+        # would record an interaction for a molecule absent from the structure.
+        if (
+            isinstance(lig, dict)
+            and lig.get("validation_status") == VALIDATION_GHOST_LIGAND
+            and not lig.get("curator_kept_ghost")
+        ):
+            continue
         smiles = lig.get("SMILES_stereo") or lig.get("SMILES") or ""
         lig_chain = sanitize_value(lig.get("chain_id"))
         rows_map["ligands.csv"].append(
