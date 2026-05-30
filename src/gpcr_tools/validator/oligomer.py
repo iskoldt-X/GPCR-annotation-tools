@@ -23,6 +23,7 @@ from gpcr_tools.config import (
     ALERT_CONFIRMED_OLIGOMER,
     ALERT_HALLUCINATION,
     ALERT_MISSED_PROTOMER,
+    ALERT_MULTI_COPY_LIGAND,
     ALERT_SUSPICIOUS_7TM,
     EMPTY_VALUES,
     GPCR_SLUG_NEGATIVE_PREFIXES,
@@ -810,6 +811,31 @@ def analyze_oligomer(
     # 8. label_asym_id map + small-molecule instance index
     label_map = _build_label_asym_id_map(enriched_entry)
     nonpolymer_instance_index = build_nonpolymer_instance_index(enriched_entry)
+
+    # 8b. Flag annotated ligands modelled in more than one copy, so a curator can
+    # check whether the copies sit at distinct sites or play distinct roles --
+    # something a single annotation row cannot carry.  Only components the model
+    # actually annotated as ligands are flagged; repeated glycosylation or ions
+    # the model did not call out stay silent.
+    multi_copy = find_multi_copy_components(nonpolymer_instance_index)
+    annotated_comp_ids = {
+        (lig.get("chem_comp_id") or "").strip() for lig in ligands_data if isinstance(lig, dict)
+    }
+    for comp_id in sorted(multi_copy):
+        if comp_id not in annotated_comp_ids:
+            continue
+        labels = ", ".join(rec["label_asym_id"] for rec in nonpolymer_instance_index[comp_id])
+        alerts.append(
+            {
+                "type": ALERT_MULTI_COPY_LIGAND,
+                "message": (
+                    f"[{ALERT_MULTI_COPY_LIGAND}] at 'ligands[{comp_id}]': modelled in "
+                    f"{multi_copy[comp_id]} copies (instances {labels}); one annotation row "
+                    f"may hide copies at distinct sites or with distinct roles. "
+                    f"Human review recommended."
+                ),
+            }
+        )
 
     # 9. Assembly cross-check (informational only)
     assembly_info = _get_assembly_cross_check(enriched_entry)

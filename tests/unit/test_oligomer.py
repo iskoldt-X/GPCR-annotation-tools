@@ -21,6 +21,7 @@ from gpcr_tools.config import (
     ALERT_CONFIRMED_OLIGOMER,
     ALERT_HALLUCINATION,
     ALERT_MISSED_PROTOMER,
+    ALERT_MULTI_COPY_LIGAND,
     ALERT_SUSPICIOUS_7TM,
     OLIGOMER_HETEROMER,
     OLIGOMER_HOMOMER,
@@ -958,3 +959,65 @@ class TestAnalyzeOligomerAttachesInstanceIndex:
                 {"auth_asym_id": "A", "label_asym_id": "E", "auth_seq_id": "202"},
             ]
         }
+
+
+class TestMultiCopyLigandAlert:
+    """analyze_oligomer raises a review alert when a component the model
+    annotated as a ligand is modelled in more than one copy."""
+
+    def _enriched(self, comps: dict[str, list[tuple[str, str, str]]]) -> dict[str, Any]:
+        nonpolymer = [
+            {
+                "rcsb_nonpolymer_entity_container_identifiers": {"nonpolymer_comp_id": comp_id},
+                "nonpolymer_entity_instances": [
+                    {
+                        "rcsb_nonpolymer_entity_instance_container_identifiers": {
+                            "auth_asym_id": auth,
+                            "asym_id": label,
+                            "auth_seq_id": seq,
+                        }
+                    }
+                    for (auth, label, seq) in insts
+                ],
+            }
+            for comp_id, insts in comps.items()
+        ]
+        # No GPCR polymer chains -> no 7TM scan -> the test stays offline.
+        return {"polymer_entities": [], "nonpolymer_entities": nonpolymer}
+
+    def _multi_copy_alerts(self, data: dict[str, Any]) -> list[dict[str, Any]]:
+        return [
+            a for a in data["oligomer_analysis"]["alerts"] if a["type"] == ALERT_MULTI_COPY_LIGAND
+        ]
+
+    def test_annotated_multi_copy_emits_alert(self) -> None:
+        enriched = self._enriched({"CA": [("A", "D", "201"), ("A", "E", "202")]})
+        data: dict[str, Any] = {
+            "receptor_info": {},
+            "ligands": [{"chem_comp_id": "CA", "name": "Calcium ion"}],
+        }
+        analyze_oligomer("TEST", data, enriched)
+        alerts = self._multi_copy_alerts(data)
+        assert len(alerts) == 1
+        msg = alerts[0]["message"]
+        assert "ligands[CA]" in msg
+        assert "2 copies" in msg
+
+    def test_unannotated_multi_copy_stays_silent(self) -> None:
+        # NAG is modelled twice but the model did not annotate it as a ligand.
+        enriched = self._enriched({"NAG": [("A", "D", "301"), ("A", "E", "302")]})
+        data: dict[str, Any] = {
+            "receptor_info": {},
+            "ligands": [{"chem_comp_id": "CA", "name": "Calcium ion"}],
+        }
+        analyze_oligomer("TEST", data, enriched)
+        assert self._multi_copy_alerts(data) == []
+
+    def test_single_instance_no_alert(self) -> None:
+        enriched = self._enriched({"CA": [("A", "D", "201")]})
+        data: dict[str, Any] = {
+            "receptor_info": {},
+            "ligands": [{"chem_comp_id": "CA", "name": "Calcium ion"}],
+        }
+        analyze_oligomer("TEST", data, enriched)
+        assert self._multi_copy_alerts(data) == []
