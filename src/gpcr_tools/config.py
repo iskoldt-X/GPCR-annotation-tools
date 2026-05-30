@@ -255,8 +255,17 @@ SOFT_FIELD_KEYS: frozenset[str] = frozenset(
         "key_findings",
         "synonyms",
         "confidence",
+        # Provenance label (paper vs PDB metadata): explanatory, never an
+        # ingested decision value — excluded from cross-run voting like its
+        # sibling evidence fields above so it produces no vote churn.
+        "source",
     }
 )
+
+# Scalar majority votes whose top two candidates are within this many votes of
+# each other are flagged for human review: a near-tie is too fragile to present
+# as settled, even when the selected value equals the majority.
+VOTE_NEAR_TIE_MARGIN: int = 1
 
 GROUND_TRUTH_PATHS: frozenset[str] = frozenset(
     {
