@@ -129,3 +129,95 @@ def test_recover_batch(tmp_path, monkeypatch):
     data = json.loads(out_file.read_text())
     assert data["sanitized"] is True
     assert data["receptor_info"]["uniprot_entry_name"] == "OPSD_BOVIN"
+
+
+def test_run_single_pdb_writes_provenance(tmp_path, monkeypatch):
+    """Each single-mode result records which model/prompt/run produced it."""
+    monkeypatch.setenv("GPCR_AI_RESULTS_PATH", str(tmp_path / "ai_results"))
+    reset_config()
+    config = get_config()
+
+    mock_client = MagicMock()
+    mock_client.files.upload.return_value = MagicMock(uri="u", name="f")
+    fc = MagicMock()
+    fc.name = runner.ANNOTATOR_FUNCTION_NAME
+    fc.args = {"receptor_info": {"uniprot_entry_name": "OPSD_BOVIN"}}
+    mock_response = MagicMock()
+    mock_response.function_calls = [fc]
+    mock_response.model_version = "gemini-2.5-pro-002"
+    mock_client.models.generate_content.return_value = mock_response
+
+    monkeypatch.setattr("gpcr_tools.annotator.runner.get_client", lambda: mock_client)
+    monkeypatch.setattr("gpcr_tools.annotator.runner.compress_pdf_if_needed", lambda a, b: a)
+    monkeypatch.setattr("gpcr_tools.annotator.runner.build_prompt_parts", lambda *a: ["ctx"])
+    monkeypatch.setattr(
+        "gpcr_tools.annotator.runner.post_process_annotation",
+        lambda args: {"receptor_info": args.get("receptor_info")},
+    )
+
+    runner.run_single_pdb(
+        "7W55",
+        {},
+        "Prompt",
+        Path("dummy.pdf"),
+        num_runs=1,
+        model_name="gemini-2.5-pro",
+        prompt_id="v5",
+    )
+
+    data = json.loads((config.ai_results_dir / "7W55" / "run_1.json").read_text())
+    prov = data["_provenance"]
+    assert prov["model_requested"] == "gemini-2.5-pro"
+    assert prov["model_served"] == "gemini-2.5-pro-002"
+    assert prov["prompt"] == "v5"
+    assert prov["run"] == 1
+    assert prov["mode"] == "single"
+
+
+def test_recover_batch_writes_provenance(tmp_path, monkeypatch):
+    """Recovered batch results record model/prompt from the submission sidecar."""
+    monkeypatch.setenv("GPCR_STATE_PATH", str(tmp_path / "state"))
+    monkeypatch.setenv("GPCR_AI_RESULTS_PATH", str(tmp_path / "ai_results"))
+    reset_config()
+    config = get_config()
+    config.pipeline_runs_dir.mkdir(parents=True)
+
+    (config.pipeline_runs_dir / "_batch_provenance.json").write_text(
+        json.dumps({"model_requested": "gemini-2.5-pro", "prompt": "v5"})
+    )
+
+    raw_output = config.pipeline_runs_dir / "raw_output_testjob.jsonl"
+    mock_resp = {
+        "id": "7W55__run_01",
+        "response": {
+            "modelVersion": "gemini-2.5-pro-002",
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {
+                                "functionCall": {
+                                    "name": "annotate_gpcr_db_structure",
+                                    "args": {"receptor_info": {}},
+                                }
+                            }
+                        ]
+                    }
+                }
+            ],
+        },
+    }
+    raw_output.write_text(json.dumps(mock_resp) + "\n")
+    monkeypatch.setattr(
+        "gpcr_tools.annotator.runner.post_process_annotation", lambda args: {"ok": True}
+    )
+
+    runner.recover_batch()
+
+    data = json.loads((config.ai_results_dir / "7W55" / "run_1.json").read_text())
+    prov = data["_provenance"]
+    assert prov["mode"] == "batch"
+    assert prov["model_requested"] == "gemini-2.5-pro"
+    assert prov["prompt"] == "v5"
+    assert prov["model_served"] == "gemini-2.5-pro-002"
+    assert prov["run"] == 1
