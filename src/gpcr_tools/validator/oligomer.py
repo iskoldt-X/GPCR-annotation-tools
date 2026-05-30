@@ -350,6 +350,70 @@ def _build_label_asym_id_map(
     return mapping
 
 
+def build_nonpolymer_instance_index(
+    enriched_entry: dict[str, Any],
+) -> dict[str, list[dict[str, str]]]:
+    """Index every modelled copy of each small-molecule (non-polymer) component.
+
+    An annotation records a ligand by its chemical component, but a structure can
+    contain several modelled copies of the same component -- ions, lipids such as
+    cholesterol, or a ligand bound at more than one site.  Copies are told apart
+    only by their PDB instance identifier (``label_asym_id``): the author chain
+    (``auth_asym_id``) is frequently shared between copies, so it cannot
+    distinguish them on its own.
+
+    Returns ``{component_id: [{"auth_asym_id", "label_asym_id", "auth_seq_id"}, ...]}``,
+    with each component's instance list sorted by ``label_asym_id`` for stable
+    output.  Instances missing a usable identifier, and entities missing a
+    component id, are skipped.
+
+    RCSB names the per-instance label identifier ``asym_id`` inside the instance
+    container identifiers (``auth_asym_id`` is the author chain) -- the same
+    convention :func:`_build_label_asym_id_map` relies on for polymer chains.
+    """
+    index: dict[str, list[dict[str, str]]] = {}
+    for entity in enriched_entry.get("nonpolymer_entities") or []:
+        if not isinstance(entity, dict):
+            continue
+        entity_ids = entity.get("rcsb_nonpolymer_entity_container_identifiers") or {}
+        comp_id = entity_ids.get("nonpolymer_comp_id")
+        if not comp_id:
+            continue
+        for inst in entity.get("nonpolymer_entity_instances") or []:
+            if not isinstance(inst, dict):
+                continue
+            cid = inst.get("rcsb_nonpolymer_entity_instance_container_identifiers") or {}
+            label_asym_id = cid.get("asym_id")
+            if not label_asym_id:
+                continue
+            index.setdefault(comp_id, []).append(
+                {
+                    "auth_asym_id": cid.get("auth_asym_id") or "",
+                    "label_asym_id": label_asym_id,
+                    "auth_seq_id": cid.get("auth_seq_id") or "",
+                }
+            )
+    for instances in index.values():
+        instances.sort(key=lambda rec: rec["label_asym_id"])
+    return index
+
+
+def find_multi_copy_components(
+    instance_index: dict[str, list[dict[str, str]]],
+) -> dict[str, int]:
+    """Return ``{component_id: copy_count}`` for components modelled more than once.
+
+    A copy count above one means a single ligand entry stands for several modelled
+    copies -- the signal a reviewer needs when deciding whether those copies play
+    distinct roles.
+    """
+    return {
+        comp_id: len(instances)
+        for comp_id, instances in instance_index.items()
+        if len(instances) > 1
+    }
+
+
 def _get_assembly_cross_check(
     enriched_entry: dict[str, Any],
 ) -> dict[str, Any]:
@@ -743,8 +807,9 @@ def analyze_oligomer(
         alerts,
     )
 
-    # 8. label_asym_id map
+    # 8. label_asym_id map + small-molecule instance index
     label_map = _build_label_asym_id_map(enriched_entry)
+    nonpolymer_instance_index = build_nonpolymer_instance_index(enriched_entry)
 
     # 9. Assembly cross-check (informational only)
     assembly_info = _get_assembly_cross_check(enriched_entry)
@@ -758,4 +823,5 @@ def analyze_oligomer(
         "alerts": alerts,
         "chain_id_override": override_info,
         "label_asym_id_map": label_map,
+        "nonpolymer_instance_index": nonpolymer_instance_index,
     }
