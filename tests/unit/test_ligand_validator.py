@@ -163,6 +163,36 @@ class TestApoHandling:
         assert warnings == []
         assert data["ligands"][0]["validation_status"] == VALIDATION_SKIPPED_APO
 
+    def test_warns_when_apo_coexists_with_real_ligand(self) -> None:
+        # An apo (ligand-free) placeholder alongside a real ligand is
+        # contradictory; surface it for the curator, do not silently edit.
+        data: dict[str, Any] = {
+            "ligands": [
+                {"name": "apo", "chem_comp_id": ""},
+                {"name": "ATP", "chem_comp_id": "ATP"},
+            ]
+        }
+        warnings = validate_and_enrich_ligands("TEST", data, _make_enriched())
+        assert any("apo" in w.lower() and "coexist" in w.lower() for w in warnings)
+        # warning-only: the apo entry must NOT be removed
+        assert len(data["ligands"]) == 2
+
+    def test_no_apo_coexistence_warning_for_pure_apo(self) -> None:
+        data: dict[str, Any] = {"ligands": [{"name": "apo", "chem_comp_id": ""}]}
+        warnings = validate_and_enrich_ligands("TEST", data, _make_enriched())
+        assert not any("coexist" in w.lower() for w in warnings)
+
+    def test_no_apo_coexistence_warning_with_only_buffer(self) -> None:
+        # Apo + an excluded buffer (glycerol) is normal, not contradictory.
+        data: dict[str, Any] = {
+            "ligands": [
+                {"name": "apo", "chem_comp_id": ""},
+                {"name": "glycerol", "chem_comp_id": "GOL"},
+            ]
+        }
+        warnings = validate_and_enrich_ligands("TEST", data, _make_enriched())
+        assert not any("coexist" in w.lower() for w in warnings)
+
 
 class TestNoneSafety:
     def test_null_chem_comp_id(self) -> None:

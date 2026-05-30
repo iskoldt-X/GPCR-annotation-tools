@@ -82,7 +82,8 @@ def validate_and_enrich_ligands(
     """Validate AI-reported ligands and inject chemical identifiers.
 
     Mutates *best_run_data* ligand dicts in-place.
-    Returns a list of warning strings for ``GHOST_LIGAND`` detections.
+    Returns a list of warning strings (``GHOST_LIGAND`` detections, plus apo
+    placeholders that coexist with real ligands).
 
     Blood Lesson 3 — Warning format:
         ``f"GHOST_LIGAND at 'ligands[{label}]': '{name}' ({cid}) not found in API entities."``
@@ -153,4 +154,34 @@ def validate_and_enrich_ligands(
             f"'{ai_name}' ({cid_display}) not found in API entities."
         )
 
+    _warn_on_apo_with_real_ligands(ligands, warnings)
     return warnings
+
+
+def _warn_on_apo_with_real_ligands(ligands: list[Any], warnings: list[str]) -> None:
+    """Flag (for the curator) an apo placeholder sitting alongside real ligands
+    — a contradiction worth a human's eye.  Emits a warning only; the data is
+    left untouched so the curator decides what is correct.  A buffer/solvent
+    next to an apo entry is normal and does not warn.
+    """
+    real_statuses = {
+        VALIDATION_MATCHED_SMALL_MOLECULE,
+        VALIDATION_MATCHED_POLYMER,
+        VALIDATION_GHOST_LIGAND,
+    }
+    has_apo = any(
+        isinstance(lig, dict) and lig.get("validation_status") == VALIDATION_SKIPPED_APO
+        for lig in ligands
+    )
+    real = [
+        lig
+        for lig in ligands
+        if isinstance(lig, dict) and lig.get("validation_status") in real_statuses
+    ]
+    if has_apo and real:
+        names = ", ".join(str(lig.get("name") or lig.get("chem_comp_id") or "?") for lig in real)
+        warnings.append(
+            f"APO_WITH_LIGANDS at 'ligands': an apo (ligand-free) placeholder "
+            f"coexists with {len(real)} real ligand(s) [{names}] — verify whether "
+            f"this structure is truly apo."
+        )
