@@ -252,6 +252,28 @@ class TestSoftFieldExclusion:
         assert majority["info"]["value"] == "A"
         assert majority["info"]["note"] is None
 
+    def test_source_excluded(self) -> None:
+        # The evidence "source" field is explanatory provenance (paper vs PDB
+        # metadata), not an ingested decision value; like reasoning/quote it
+        # must not drive cross-run voting.
+        runs = [
+            {"value": "X", "source": "Paper"},
+            {"value": "X", "source": "Both Paper and PDB Metadata"},
+        ]
+        majority, _ = get_majority_votes(runs)
+        assert majority["value"] == "X"
+        assert majority["source"] is None
+
+    def test_source_not_a_discrepancy(self) -> None:
+        best = {"value": "X", "source": "Paper"}
+        majority = {"value": "X", "source": "Both Paper and PDB Metadata"}
+        votes = {
+            "value": {"X": 2},
+            "source": {"Paper": 1, "Both Paper and PDB Metadata": 1},
+        }
+        discs = find_discrepancies(best, majority, votes)
+        assert all(not d["path"].endswith("source") for d in discs)
+
 
 # ===================================================================
 # Truthiness — Blood Lesson 5
@@ -358,6 +380,43 @@ class TestDiscrepancies:
     def test_no_discrepancy_on_match(self) -> None:
         data = {"a": 1, "b": 2}
         assert find_discrepancies(data, data, {}) == []
+
+    def test_near_tie_flagged_even_when_best_matches_majority(self) -> None:
+        # A 6:5 majority is a near coin-flip — surface it for review even
+        # though the best run agrees with the majority.
+        best = {"a": "Y"}
+        majority = {"a": "Y"}
+        votes = {"a": {"Y": 6, "X": 5}}
+        discs = find_discrepancies(best, majority, votes)
+        flagged = [d for d in discs if d["path"] == "a"]
+        assert flagged and flagged[0].get("needs_review") is True
+        assert flagged[0].get("vote_margin") == 1
+
+    def test_exact_tie_flagged(self) -> None:
+        best = {"a": "Y"}
+        majority = {"a": "Y"}
+        votes = {"a": {"Y": 5, "X": 5}}
+        discs = find_discrepancies(best, majority, votes)
+        assert any(d.get("needs_review") for d in discs)
+
+    def test_clear_majority_not_flagged(self) -> None:
+        best = {"a": "Y"}
+        majority = {"a": "Y"}
+        votes = {"a": {"Y": 9, "X": 1}}
+        assert find_discrepancies(best, majority, votes) == []
+
+    def test_moderate_margin_not_flagged(self) -> None:
+        # 6:4 (margin 2) is a clear enough majority; conservative — no flag.
+        best = {"a": "Y"}
+        majority = {"a": "Y"}
+        votes = {"a": {"Y": 6, "X": 4}}
+        assert find_discrepancies(best, majority, votes) == []
+
+    def test_single_candidate_no_crash_no_flag(self) -> None:
+        best = {"a": "Y"}
+        majority = {"a": "Y"}
+        votes = {"a": {"Y": 3}}
+        assert find_discrepancies(best, majority, votes) == []
 
     def test_scalar_discrepancy(self) -> None:
         best = {"a": "X"}

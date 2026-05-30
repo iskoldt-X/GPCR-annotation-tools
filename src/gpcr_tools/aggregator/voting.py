@@ -15,6 +15,7 @@ from gpcr_tools.config import (
     GROUND_TRUTH_PATHS,
     LIST_ITEM_KEY_FIELDS,
     SOFT_FIELD_KEYS,
+    VOTE_NEAR_TIE_MARGIN,
 )
 
 # ---------------------------------------------------------------------------
@@ -227,6 +228,20 @@ def select_best_run(
 # ---------------------------------------------------------------------------
 
 
+def _vote_margin(all_votes: Any) -> int | None:
+    """Return ``top1 - top2`` vote counts for a scalar vote-count mapping.
+
+    Returns ``None`` when there are fewer than two candidates or the counts are
+    unusable, so a single-candidate vote is never treated as a near-tie.
+    """
+    if not isinstance(all_votes, dict):
+        return None
+    counts = sorted((c for c in all_votes.values() if isinstance(c, int)), reverse=True)
+    if len(counts) < 2:
+        return None
+    return counts[0] - counts[1]
+
+
 def find_discrepancies(
     best_run_data: Any,
     majority_data: Any,
@@ -293,6 +308,19 @@ def find_discrepancies(
                     "all_votes": all_votes_data,
                 }
             )
+        else:
+            margin = _vote_margin(all_votes_data)
+            if margin is not None and margin <= VOTE_NEAR_TIE_MARGIN:
+                discrepancies.append(
+                    {
+                        "path": path,
+                        "best_run_value": best_run_data,
+                        "majority_vote_value": majority_data,
+                        "all_votes": all_votes_data,
+                        "needs_review": True,
+                        "vote_margin": margin,
+                    }
+                )
         return discrepancies
 
     return []
