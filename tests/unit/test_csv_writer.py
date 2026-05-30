@@ -7,11 +7,67 @@ import csv
 from dataclasses import replace
 from unittest.mock import patch
 
+from gpcr_tools.config import CSV_SCHEMA
 from gpcr_tools.csv_generator.csv_writer import (
     append_to_csvs,
     sanitize_value,
     transform_for_csv,
 )
+
+
+class TestGpcrdbColumnContract:
+    """The annotation CSVs are read positionally by the downstream build, so the
+    leading columns must match its contract exactly; our extra columns
+    (label_asym_id, chemistry fields) are appended after, never inserted.
+    """
+
+    def test_structures_core_columns(self):
+        assert CSV_SCHEMA["structures.csv"][:8] == (
+            "PDB",
+            "Receptor_UniProt",
+            "Method",
+            "Resolution",
+            "State",
+            "ChainID",
+            "Note",
+            "Date",
+        )
+        assert "label_asym_id" in CSV_SCHEMA["structures.csv"][8:]
+
+    def test_ligands_core_columns(self):
+        assert CSV_SCHEMA["ligands.csv"][:9] == (
+            "PDB",
+            "ChainID",
+            "Name",
+            "PubChemID",
+            "Role",
+            "Title",
+            "Type",
+            "Date",
+            "In structure",
+        )
+        assert {"label_asym_id", "SMILES", "InChIKey", "Sequence"} <= set(
+            CSV_SCHEMA["ligands.csv"][9:]
+        )
+
+    def test_g_proteins_core_columns(self):
+        assert CSV_SCHEMA["g_proteins.csv"][:8] == (
+            "PDB",
+            "Alpha_UniProt",
+            "Alpha_ChainID",
+            "Beta_UniProt",
+            "Beta_ChainID",
+            "Gamma_UniProt",
+            "Gamma_ChainID",
+            "Note",
+        )
+        assert {"Alpha_label_asym_id", "Beta_label_asym_id", "Gamma_label_asym_id"} <= set(
+            CSV_SCHEMA["g_proteins.csv"][8:]
+        )
+
+    def test_arrestins_core_columns(self):
+        assert CSV_SCHEMA["arrestins.csv"][:4] == ("PDB", "UniProt", "ChainID", "Note")
+        assert "label_asym_id" in CSV_SCHEMA["arrestins.csv"][4:]
 
 
 class TestSanitizeValue:
