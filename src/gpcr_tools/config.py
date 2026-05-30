@@ -443,6 +443,7 @@ ALERT_CONFIRMED_OLIGOMER: str = "CONFIRMED_OLIGOMER"
 ALERT_CHAIN_ID_OVERRIDDEN: str = "CHAIN_ID_OVERRIDDEN"
 ALERT_7TM_UPGRADE: str = "7TM_UPGRADE"
 ALERT_SUSPICIOUS_7TM: str = "SUSPICIOUS_7TM"
+ALERT_MULTI_COPY_LIGAND: str = "MULTI_COPY_LIGAND"
 
 # ---------------------------------------------------------------------------
 # 7TM statuses & detection constants

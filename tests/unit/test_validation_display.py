@@ -119,6 +119,25 @@ class TestInjectOligomerAlerts:
             "CHAIN_ID CORRECTED at 'receptor_info': G -> R (HALLUCINATION). Human confirmation required."
         ]
 
+    def test_promotes_multi_copy_ligand_with_ligand_path(self):
+        from gpcr_tools.config import ALERT_MULTI_COPY_LIGAND
+        from gpcr_tools.csv_generator.validation_display import inject_oligomer_alerts
+
+        msg = (
+            "[MULTI_COPY_LIGAND] at 'ligands[CA]': modelled in 2 copies (instances D, E); "
+            "one annotation row may hide copies at distinct sites or with distinct roles. "
+            "Human review recommended."
+        )
+        oligo = {
+            "alerts": [{"type": ALERT_MULTI_COPY_LIGAND, "message": msg}],
+            "all_gpcr_chains": [],
+        }
+        validation: dict = {}
+        inject_oligomer_alerts(oligo, validation)
+        # Promoted verbatim, keeping its own 'ligands[...]' path (not wrapped as
+        # a receptor_info alert) so it buckets with the ligand block.
+        assert msg in validation["critical_warnings"]
+
 
 class TestAnalyzeValidationImpact:
     def test_no_warnings_returns_none(self):
