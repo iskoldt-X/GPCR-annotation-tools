@@ -30,6 +30,12 @@ LABEL org.opencontainers.image.source="https://github.com/protwis/GPCR-annotatio
 
 WORKDIR /app
 
+# Ghostscript ('gs') is required to compress PDFs over the size limit before
+# sending them to the model; without it large PDFs fail at runtime.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ghostscript \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=builder /build/dist/*.whl /tmp/
 RUN pip install --no-cache-dir /tmp/*.whl \
     && rm -rf /tmp/*.whl
