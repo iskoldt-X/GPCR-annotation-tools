@@ -259,6 +259,9 @@ SOFT_FIELD_KEYS: frozenset[str] = frozenset(
         # ingested decision value — excluded from cross-run voting like its
         # sibling evidence fields above so it produces no vote churn.
         "source",
+        # Per-run provenance block (model / prompt / run metadata): an internal
+        # record stamped at write time, never a voted value.
+        "_provenance",
     }
 )
 
