@@ -11,11 +11,31 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from gpcr_tools.config import get_config
+from gpcr_tools.config import get_config, get_gemini_model_name, model_run_subdir
 
 logger = logging.getLogger(__name__)
 
 _RUN_GLOB_PATTERN = "run_*.json"
+
+
+def _discover_run_files(pdb_dir: Path) -> list[Path]:
+    """Run files for *pdb_dir*: the current model's namespaced runs if present,
+    else the legacy flat layout (pre-model-namespacing).
+
+    Runs annotated under a different model are not mixed into the result, so a
+    single aggregation never blends models.
+    """
+    model_dir = pdb_dir / model_run_subdir(get_gemini_model_name())
+    nested = sorted(model_dir.glob(_RUN_GLOB_PATTERN))
+    if nested:
+        return nested
+    return sorted(pdb_dir.glob(_RUN_GLOB_PATTERN))
+
+
+def pdb_has_runs(pdb_dir: Path) -> bool:
+    """True if *pdb_dir* has run files for the current model (namespaced) or in
+    the legacy flat layout."""
+    return pdb_dir.is_dir() and bool(_discover_run_files(pdb_dir))
 
 
 def load_ai_runs(pdb_id: str) -> list[dict[str, Any]]:
@@ -31,7 +51,7 @@ def load_ai_runs(pdb_id: str) -> list[dict[str, Any]]:
         logger.warning("[%s] AI results directory not found: %s", pdb_id, pdb_dir)
         return []
 
-    run_files = sorted(pdb_dir.glob(_RUN_GLOB_PATTERN))
+    run_files = _discover_run_files(pdb_dir)
     if not run_files:
         logger.warning("[%s] No run files found in %s", pdb_id, pdb_dir)
         return []
@@ -66,9 +86,7 @@ def get_pending_pdb_ids() -> list[str]:
     if not ai_dir.is_dir():
         return []
 
-    all_ids = sorted(
-        d.name for d in ai_dir.iterdir() if d.is_dir() and list(d.glob(_RUN_GLOB_PATTERN))
-    )
+    all_ids = sorted(d.name for d in ai_dir.iterdir() if pdb_has_runs(d))
 
     aggregate_log = _load_aggregate_log(cfg.state_dir / "aggregate_log.json")
     return [pid for pid in all_ids if pid not in aggregate_log]

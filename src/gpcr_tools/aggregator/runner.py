@@ -27,7 +27,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from gpcr_tools.aggregator.ai_results_loader import get_pending_pdb_ids, load_ai_runs
+from gpcr_tools.aggregator.ai_results_loader import (
+    get_pending_pdb_ids,
+    load_ai_runs,
+    pdb_has_runs,
+)
 from gpcr_tools.aggregator.enriched_loader import load_enriched_data
 from gpcr_tools.aggregator.ground_truth import inject_ground_truth
 from gpcr_tools.aggregator.voting import (
@@ -445,9 +449,7 @@ def aggregate_all(
         ai_dir = cfg.ai_results_dir
         if not ai_dir.is_dir():
             return []
-        pending = sorted(
-            d.name for d in ai_dir.iterdir() if d.is_dir() and list(d.glob("run_*.json"))
-        )
+        pending = sorted(d.name for d in ai_dir.iterdir() if pdb_has_runs(d))
     else:
         pending = get_pending_pdb_ids()
 
