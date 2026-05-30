@@ -41,6 +41,7 @@ from gpcr_tools.config import (
     AGG_STATUS_COMPLETED,
     AGG_STATUS_FAILED,
     ALERT_PREFIX_ALGO_WARNING,
+    ALERT_PREFIX_CHIMERIC_REVIEW,
     ALERT_PREFIX_HALLUCINATION,
     ALERT_PREFIX_TIE_BREAKER_ALIGNED,
     ALERT_PREFIX_TIE_BREAKER_OVERRIDE,
@@ -113,6 +114,17 @@ def _build_validation_report(
     # Integrity checks (ghost chain, fake UniProt/PubChem, ghost ligand, method)
     integrity_warnings = validate_all(pdb_id, best_run_data, enriched_entry, cache=validation_cache)
     report["critical_warnings"].extend(integrity_warnings)
+
+    # A chimeric G-protein's alpha-subunit identity cannot be resolved reliably
+    # from sequence alone (the tail is degenerate across subtypes), so force a
+    # human to confirm it instead of trusting the model or the tie-break.
+    g_protein = (best_run_data.get("signaling_partners") or {}).get("g_protein") or {}
+    if g_protein.get("is_chimeric") is True:
+        report["critical_warnings"].append(
+            f"{ALERT_PREFIX_CHIMERIC_REVIEW} at "
+            f"'signaling_partners.g_protein.alpha_subunit': chimeric G-protein — "
+            f"confirm the alpha-subunit identity manually."
+        )
 
     # Chimera vs AI comparison (Review 4 A-2, Review 7)
     status = chimera_result.get("status") or CHIMERA_STATUS_SKIPPED
