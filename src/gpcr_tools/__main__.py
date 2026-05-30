@@ -272,6 +272,9 @@ def cli() -> None:
                     sys.exit(1)
                 prompt_text = cfg.default_prompt_file.read_text(encoding="utf-8")
 
+            # Prompt identifier (filename stem) recorded in each result's provenance.
+            prompt_id = Path(args.prompt).stem if args.prompt else cfg.default_prompt_file.stem
+
             # Resolve model name: --model flag > GPCR_GEMINI_MODEL env > config default
             from gpcr_tools.config import get_gemini_model_name
 
@@ -281,7 +284,11 @@ def cli() -> None:
                 from gpcr_tools.annotator.runner import build_and_submit_batch
 
                 build_and_submit_batch(
-                    pdb_ids, prompt_text, num_runs=args.runs, model_name=model_name
+                    pdb_ids,
+                    prompt_text,
+                    num_runs=args.runs,
+                    model_name=model_name,
+                    prompt_id=prompt_id,
                 )
             else:
                 from gpcr_tools.annotator.runner import run_single_pdb
@@ -314,6 +321,7 @@ def cli() -> None:
                         pdf_path=pdf_path,
                         num_runs=args.runs,
                         model_name=model_name,
+                        prompt_id=prompt_id,
                     )
 
     elif args.command == "csv-generator":

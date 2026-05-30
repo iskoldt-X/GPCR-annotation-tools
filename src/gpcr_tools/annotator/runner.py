@@ -8,6 +8,7 @@ import logging
 import os
 import tempfile
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,7 @@ def run_single_pdb(
     pdf_path: Path,
     num_runs: int = GEMINI_DEFAULT_RUNS,
     model_name: str | None = None,
+    prompt_id: str | None = None,
 ) -> None:
     """Run annotation for a single PDB entry using parallel Gemini calls.
 
@@ -114,6 +116,14 @@ def run_single_pdb(
 
                         # Process and save
                         final_data = post_process_annotation(args)
+                        final_data["_provenance"] = {
+                            "model_requested": model_name,
+                            "model_served": getattr(response, "model_version", None),
+                            "prompt": prompt_id,
+                            "run": run_num,
+                            "mode": "single",
+                            "timestamp": datetime.now(UTC).isoformat(),
+                        }
 
                         # Atomic write
                         tmp_out = out_file.with_suffix(".tmp")
@@ -163,6 +173,7 @@ def build_and_submit_batch(
     prompt_text: str,
     num_runs: int = GEMINI_DEFAULT_RUNS,
     model_name: str | None = None,
+    prompt_id: str | None = None,
 ) -> None:
     """Build a JSONL payload for all *targets* and submit it to the Gemini Batch API."""
     model_name = model_name or get_gemini_model_name()
@@ -271,6 +282,14 @@ def build_and_submit_batch(
 
     # Write JSONL
     os.makedirs(config.pipeline_runs_dir, exist_ok=True)
+    # Record submission provenance so recover_batch can stamp each result with
+    # the model and prompt it came from (the batch response carries only the
+    # served model version).
+    batch_prov_file = config.pipeline_runs_dir / "_batch_provenance.json"
+    tmp_prov = batch_prov_file.with_suffix(".tmp")
+    with open(tmp_prov, "w") as f:
+        json.dump({"model_requested": model_name, "prompt": prompt_id}, f, indent=2)
+    os.replace(tmp_prov, batch_prov_file)
     with tempfile.NamedTemporaryFile("w", delete=False, suffix=".jsonl") as f:
         for req in requests:
             f.write(json.dumps(req) + "\n")
@@ -353,6 +372,14 @@ def recover_batch() -> None:
         logger.info("No pipeline runs directory found.")
         return
 
+    batch_meta: dict = {}
+    prov_file = runs_dir / "_batch_provenance.json"
+    if prov_file.exists():
+        try:
+            batch_meta = json.loads(prov_file.read_text())
+        except (json.JSONDecodeError, OSError):
+            batch_meta = {}
+
     for raw_file in runs_dir.glob("raw_output_*.jsonl"):
         logger.info("Processing %s...", raw_file.name)
         with open(raw_file) as f:
@@ -393,6 +420,14 @@ def recover_batch() -> None:
                                 )
                                 break
                             final_data = post_process_annotation(args)
+                            final_data["_provenance"] = {
+                                "model_requested": batch_meta.get("model_requested"),
+                                "model_served": response_obj.get("modelVersion"),
+                                "prompt": batch_meta.get("prompt"),
+                                "run": run_num,
+                                "mode": "batch",
+                                "timestamp": datetime.now(UTC).isoformat(),
+                            }
 
                             out_dir = config.ai_results_dir / pdb_id
                             os.makedirs(out_dir, exist_ok=True)
