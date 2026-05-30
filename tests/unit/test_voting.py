@@ -159,18 +159,72 @@ class TestListOfDictVoting:
         assert "GTP" in ids
 
     def test_missing_grouping_key_fallback(self) -> None:
-        """Items without the key field fall back to index-based matching.
+        """Items without the key field fall back to identity/index grouping.
 
-        This is explicitly mandated by the migration plan — hallucinated
-        ligands may lack chem_comp_id.  They should not crash voting.
+        Hallucinated ligands may lack chem_comp_id.  They must not be silently
+        dropped — they survive through the fallback path.
         """
         runs = [
             [{"chem_comp_id": "ATP", "role": "agonist"}, {"role": "unknown"}],
             [{"chem_comp_id": "ATP", "role": "agonist"}],
         ]
         majority, _ = get_majority_votes(runs, path="ligands")
-        # ATP should still appear — the keyless item is silently skipped
         assert any(isinstance(m, dict) and m.get("chem_comp_id") == "ATP" for m in majority)
+        # the keyless item must survive, not be silently skipped
+        assert any(isinstance(m, dict) and m.get("role") == "unknown" for m in majority)
+
+
+class TestEmptyAndPlaceholderKeys:
+    """Placeholder/empty grouping keys must neither collapse distinct entities
+    nor silently drop keyless items.
+    """
+
+    def test_placeholder_none_string_does_not_collapse_protein_ligands(self) -> None:
+        # The schema fills chem_comp_id="None" (a string) for protein ligands.
+        # Treating the literal "None" as a real key would collapse every
+        # protein ligand into one bogus group, even when they are distinct.
+        runs = [
+            [
+                {"chem_comp_id": "None", "name": "R-spondin-2", "type": "protein"},
+                {"chem_comp_id": "None", "name": "ZNRF3", "type": "protein"},
+            ],
+            [
+                {"chem_comp_id": "None", "name": "R-spondin-2", "type": "protein"},
+                {"chem_comp_id": "None", "name": "ZNRF3", "type": "protein"},
+            ],
+        ]
+        majority, _ = get_majority_votes(runs, path="ligands")
+        names = {m.get("name") for m in majority if isinstance(m, dict)}
+        assert names == {"R-spondin-2", "ZNRF3"}
+
+    def test_empty_value_variants_not_used_as_key(self) -> None:
+        # Every EMPTY_VALUES variant must be treated as empty, so two distinct
+        # items are not merged under it.
+        runs = [
+            [
+                {"chem_comp_id": "n/a", "name": "Alpha", "type": "protein"},
+                {"chem_comp_id": "null", "name": "Beta", "type": "protein"},
+            ],
+        ]
+        majority, _ = get_majority_votes(runs, path="ligands")
+        names = {m.get("name") for m in majority if isinstance(m, dict)}
+        assert names == {"Alpha", "Beta"}
+
+    def test_keyless_item_not_silently_dropped(self) -> None:
+        # An item without chem_comp_id must survive voting, not vanish.
+        runs = [
+            [
+                {"chem_comp_id": "ATP", "role": "agonist"},
+                {"name": "mystery-ligand", "role": "unknown"},
+            ],
+            [
+                {"chem_comp_id": "ATP", "role": "agonist"},
+                {"name": "mystery-ligand", "role": "unknown"},
+            ],
+        ]
+        majority, _ = get_majority_votes(runs, path="ligands")
+        assert any(m.get("chem_comp_id") == "ATP" for m in majority if isinstance(m, dict))
+        assert any(m.get("name") == "mystery-ligand" for m in majority if isinstance(m, dict))
 
 
 # ===================================================================
