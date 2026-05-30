@@ -21,6 +21,7 @@ from gpcr_tools.config import (
     BLACKLISTED_KEYS,
     LIST_ITEM_KEY_FIELDS,
     TOPLEVEL_BLOCK_KEYS,
+    VALIDATION_GHOST_LIGAND,
 )
 from gpcr_tools.csv_generator.audit import log_audit_trail
 from gpcr_tools.csv_generator.ui import (
@@ -532,6 +533,39 @@ def review_node(
 # ── Top-Level Block Review ──────────────────────────────────────────────
 
 
+def _confirm_ghost_ligands(pdb_id: str, ligands: Any) -> None:
+    """Ask the curator, per unverified (GHOST) ligand, whether to keep it.
+
+    A ghost ligand is one the model named but the structure does not model, so
+    it is excluded from the export by default; the curator must explicitly
+    confirm to keep it.  Confirmed ligands get ``curator_kept_ghost = True``,
+    which the CSV writer honours.  Ligands with a real structure match are left
+    untouched.  No prompt appears when there are no ghosts.
+    """
+    if not isinstance(ligands, list):
+        return
+    ghosts = [
+        lig
+        for lig in ligands
+        if isinstance(lig, dict) and lig.get("validation_status") == VALIDATION_GHOST_LIGAND
+    ]
+    for lig in ghosts:
+        name = lig.get("name") or lig.get("chem_comp_id") or "?"
+        keep = Confirm.ask(
+            f"[bold red]GHOST[/] ligand '[cyan]{name}[/]' is not modelled in the structure "
+            f"and will be EXCLUDED from the export. Keep it anyway?",
+            default=False,
+        )
+        lig["curator_kept_ghost"] = keep
+        log_audit_trail(
+            pdb_id,
+            "ligands",
+            "keep_ghost_ligand" if keep else "drop_ghost_ligand",
+            name,
+            "KEPT" if keep else "DROPPED",
+        )
+
+
 def review_toplevel_blocks(
     pdb_id: str,
     main_data: dict,
@@ -583,6 +617,7 @@ def review_toplevel_blocks(
         # Ligand validation panel
         if key == "ligands" and isinstance(block_data, list):
             display_ligand_validation_panel(block_data)
+            _confirm_ghost_ligands(pdb_id, block_data)
 
         # Receptor identity clash
         if key == "receptor_info" and isinstance(block_data, dict):
