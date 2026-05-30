@@ -11,6 +11,10 @@ roles, so any future edit to the enum that breaks the mapping fails loudly.
 The enum naming is deliberate: "Agonist (partial)" slugifies to "agonist-partial"
 (a used role), NOT "partial-agonist" (unused); "PAM" / "NAM" stay abbreviated
 rather than spelling out to unused slugs.
+
+One role is deliberately new: "Co-agonist" (slug "co-agonist") is not yet used
+downstream and will be created on first use; it is pinned separately so the
+drift guard still distinguishes an intentional addition from an accidental one.
 """
 
 from __future__ import annotations
@@ -35,6 +39,13 @@ ROLE_TO_USED_SLUG = {
     "Agonist (partial)": "agonist-partial",
     "Cofactor": "cofactor",
     "unknown": "unknown",
+}
+
+# Deliberately new role(s): not yet used downstream, created on first use. Pinned
+# separately from ROLE_TO_USED_SLUG so an intentional addition is distinguishable
+# from accidental drift onto a dead slug.
+INTENTIONAL_NEW_ROLE_SLUG = {
+    "Co-agonist": "co-agonist",
 }
 
 # Spelled-out / reordered forms that look natural but are NOT used downstream;
@@ -86,11 +97,13 @@ def _extract_role_enum() -> list[str]:
 class TestLigandRoleVocabularyContract:
     def test_enum_matches_pinned_vocabulary(self) -> None:
         # If this fails the role enum drifted: re-verify every new value against
-        # the live role table before updating ROLE_TO_USED_SLUG.
-        assert set(_extract_role_enum()) == set(ROLE_TO_USED_SLUG)
+        # the live role table before adding it to ROLE_TO_USED_SLUG (already used)
+        # or INTENTIONAL_NEW_ROLE_SLUG (a deliberate new role).
+        pinned = set(ROLE_TO_USED_SLUG) | set(INTENTIONAL_NEW_ROLE_SLUG)
+        assert set(_extract_role_enum()) == pinned
 
-    def test_every_role_slugifies_to_a_used_slug(self) -> None:
-        for role, expected_slug in ROLE_TO_USED_SLUG.items():
+    def test_every_role_slugifies_as_pinned(self) -> None:
+        for role, expected_slug in {**ROLE_TO_USED_SLUG, **INTENTIONAL_NEW_ROLE_SLUG}.items():
             assert _slugify(role) == expected_slug
 
     def test_no_role_slugifies_to_an_unused_lookalike(self) -> None:
