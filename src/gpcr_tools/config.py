@@ -551,6 +551,7 @@ ALERT_PREFIX_TIE_BREAKER_OVERRIDE: str = "[TIE-BREAKER OVERRIDE]"
 ALERT_PREFIX_HALLUCINATION: str = "[HALLUCINATION ALERT]"
 ALERT_PREFIX_ALGO_WARNING: str = "[ALGO WARNING]"
 ALERT_PREFIX_API_UNAVAILABLE: str = "[API_UNAVAILABLE]"
+ALERT_PREFIX_CHIMERIC_REVIEW: str = "[CHIMERIC G-PROTEIN]"
 
 # ---------------------------------------------------------------------------
 # Annotator function call name
