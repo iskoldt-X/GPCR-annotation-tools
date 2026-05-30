@@ -14,6 +14,7 @@ from typing import Any
 
 from gpcr_tools.config import (
     VALIDATION_RECEPTOR_MATCH,
+    VALIDATION_RECEPTOR_NO_API_DATA,
     VALIDATION_UNIPROT_CLASH,
 )
 
@@ -75,10 +76,7 @@ def validate_receptor_identity(
     if not chain_slugs:
         return warnings
 
-    # Determine match / clash per chain
-    clashed_chains = [c for c, s in chain_slugs.items() if ai_uniprot not in s]
-
-    # Aggregate all unique slugs across matched entities for api_reality
+    # Aggregate all unique slugs the API exposes (across chains that carry any).
     all_slugs: list[str] = []
     seen: set[str] = set()
     for s_list in chain_slugs.values():
@@ -87,15 +85,32 @@ def validate_receptor_identity(
                 seen.add(s)
                 all_slugs.append(s)
 
-    if not clashed_chains:
-        receptor_info["validation_status"] = VALIDATION_RECEPTOR_MATCH
-        receptor_info["api_reality"] = all_slugs
-    else:
+    # A chain the API has no UniProt slug for cannot be checked -- that is "no
+    # data", not a clash. Validate only against chains that actually carry a slug;
+    # surface the unverifiable chains as a soft note for the curator.
+    chains_with_slugs = {c: s for c, s in chain_slugs.items() if s}
+    no_data_chains = sorted(c for c, s in chain_slugs.items() if not s)
+    if no_data_chains:
+        warnings.append(
+            f"RECEPTOR_NO_API_DATA at 'receptor_info': the API exposes no UniProt slug for "
+            f"chain(s) {', '.join(no_data_chains)}; receptor identity is not verifiable there."
+        )
+
+    clashed_chains = [c for c, s in chains_with_slugs.items() if ai_uniprot not in s]
+
+    if clashed_chains:
         receptor_info["validation_status"] = VALIDATION_UNIPROT_CLASH
         receptor_info["api_reality"] = all_slugs
-        clash_detail = ", ".join(f"Chain {c} -> {chain_slugs[c]}" for c in clashed_chains)
+        clash_detail = ", ".join(f"Chain {c} -> {chains_with_slugs[c]}" for c in clashed_chains)
         warnings.append(
             f"UNIPROT_CLASH at 'receptor_info': '{ai_uniprot}' clashes on {clash_detail}."
         )
+    elif chains_with_slugs:
+        receptor_info["validation_status"] = VALIDATION_RECEPTOR_MATCH
+        receptor_info["api_reality"] = all_slugs
+    else:
+        # No chain carried any slug at all -> nothing to validate against.
+        receptor_info["validation_status"] = VALIDATION_RECEPTOR_NO_API_DATA
+        receptor_info["api_reality"] = all_slugs
 
     return warnings

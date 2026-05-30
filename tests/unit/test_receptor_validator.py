@@ -11,6 +11,7 @@ from typing import Any
 
 from gpcr_tools.config import (
     VALIDATION_RECEPTOR_MATCH,
+    VALIDATION_RECEPTOR_NO_API_DATA,
     VALIDATION_UNIPROT_CLASH,
 )
 from gpcr_tools.validator.receptor_validator import validate_receptor_identity
@@ -142,9 +143,12 @@ class TestEdgeCases:
             ]
         )
         warnings = validate_receptor_identity("TEST", data, enriched)
-        # Chain found but no slugs -> clash with empty api_reality
+        # Chain found but the API has no slug -> a soft "no data" note, NOT a clash:
+        # an absent slug means "cannot verify", not "identity disagrees".
         assert len(warnings) == 1
-        assert data["receptor_info"]["validation_status"] == VALIDATION_UNIPROT_CLASH
+        assert "RECEPTOR_NO_API_DATA" in warnings[0]
+        assert "UNIPROT_CLASH" not in warnings[0]
+        assert data["receptor_info"]["validation_status"] == VALIDATION_RECEPTOR_NO_API_DATA
 
     def test_multiple_slugs_match(self) -> None:
         data: dict[str, Any] = {
