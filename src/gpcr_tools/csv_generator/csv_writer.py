@@ -46,6 +46,7 @@ def transform_for_csv(pdb_id: str, data: dict) -> dict[str, list[dict[str, str]]
     r_info = data.get("receptor_info") or {}
     oligo = data.get("oligomer_analysis") or {}
     label_map = oligo.get("label_asym_id_map") or {}
+    nonpolymer_instances = oligo.get("nonpolymer_instance_index") or {}
 
     receptor_chain = sanitize_value(r_info.get("chain_id"))
     receptor_uniprot = sanitize_value(r_info.get("uniprot_entry_name"))
@@ -92,11 +93,22 @@ def transform_for_csv(pdb_id: str, data: dict) -> dict[str, list[dict[str, str]]
             continue
         smiles = lig.get("SMILES_stereo") or lig.get("SMILES") or ""
         lig_chain = sanitize_value(lig.get("chain_id"))
+        # Prefer the small molecule's own instance identifier when exactly one
+        # copy is modelled.  The polymer chain map does not cover non-polymer
+        # ligands, so without this they fall through to a protein chain id.  When
+        # several copies are modelled the single-row representation is deferred,
+        # so fall back rather than pick an arbitrary copy.
+        comp_id = sanitize_value(lig.get("chem_comp_id"))
+        instances = nonpolymer_instances.get(comp_id) if comp_id else None
+        if instances and len(instances) == 1:
+            lig_label = sanitize_value(instances[0].get("label_asym_id"))
+        else:
+            lig_label = map_label_asym_id(lig_chain, label_map)
         rows_map["ligands.csv"].append(
             {
                 "PDB": pdb_id,
                 "ChainID": lig_chain,
-                "label_asym_id": map_label_asym_id(lig_chain, label_map),
+                "label_asym_id": lig_label,
                 "Name": sanitize_value(lig.get("name")),
                 "PubChemID": sanitize_value(lig.get("pubchem_id")),
                 "Role": sanitize_value((lig.get("role") or {}).get("value")),

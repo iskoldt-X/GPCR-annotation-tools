@@ -400,3 +400,53 @@ class TestGhostLigandExport:
         ]
         rows = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"]
         assert {r["Name"] for r in rows} == {"Matched", "NoStatus"}
+
+
+class TestLigandLabelAsymId:
+    """A single-copy small molecule gets its own mmCIF instance label; the
+    polymer chain map (which does not cover non-polymer ligands) is only a
+    fallback for multi-copy or unindexed ligands."""
+
+    def _ligand(self, **extra):
+        base = {
+            "name": "Octylglucoside",
+            "chem_comp_id": "SOG",
+            "chain_id": "A",
+            "validation_status": VALIDATION_MATCHED_SMALL_MOLECULE,
+            "role": {"value": "Agonist"},
+        }
+        base.update(extra)
+        return base
+
+    def test_single_instance_uses_true_instance_label(self, sample_pdb_data):
+        sample_pdb_data["oligomer_analysis"] = {
+            "label_asym_id_map": {},
+            "nonpolymer_instance_index": {
+                "SOG": [{"auth_asym_id": "A", "label_asym_id": "F", "auth_seq_id": "501"}]
+            },
+        }
+        sample_pdb_data["ligands"] = [self._ligand()]
+        row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
+        # 'F' is the ligand's own label, not its author chain 'A'.
+        assert row["label_asym_id"] == "F"
+
+    def test_multi_instance_falls_back(self, sample_pdb_data):
+        sample_pdb_data["oligomer_analysis"] = {
+            "label_asym_id_map": {},
+            "nonpolymer_instance_index": {
+                "SOG": [
+                    {"auth_asym_id": "A", "label_asym_id": "F", "auth_seq_id": "501"},
+                    {"auth_asym_id": "A", "label_asym_id": "G", "auth_seq_id": "502"},
+                ]
+            },
+        }
+        sample_pdb_data["ligands"] = [self._ligand()]
+        row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
+        # Two copies -> representative selection deferred -> fall back (chain 'A').
+        assert row["label_asym_id"] == "A"
+
+    def test_no_index_falls_back(self, sample_pdb_data):
+        sample_pdb_data["oligomer_analysis"] = {"label_asym_id_map": {}}
+        sample_pdb_data["ligands"] = [self._ligand()]
+        row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
+        assert row["label_asym_id"] == "A"
