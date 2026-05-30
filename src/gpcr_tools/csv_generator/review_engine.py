@@ -46,6 +46,13 @@ def _resolve_list_key_field(path: str) -> str | None:
     return None
 
 
+def _confidence_style(confidence: Any) -> str:
+    """Rich style for a model confidence level (the "High"/"Medium"/"Low" enum):
+    high confidence reads as success, everything else as a warning.
+    """
+    return "success" if confidence == "High" else "warning"
+
+
 # ── Type Coercion ──────────────────────────────────────────────────────
 
 
@@ -160,8 +167,8 @@ def review_decision_unit(
     grid.add_column(style="bold cyan", width=12)
     grid.add_column(style="value")
     grid.add_row("Value:", str(d_node.get("value", "N/A")))
-    conf = d_node.get("confidence", 0)
-    conf_style = "success" if isinstance(conf, int | float) and conf >= 0.8 else "warning"
+    conf = d_node.get("confidence", "")
+    conf_style = _confidence_style(conf)
     grid.add_row("Confidence:", f"[{conf_style}]{conf}[/{conf_style}]")
 
     content = Group(

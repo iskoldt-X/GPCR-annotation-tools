@@ -274,6 +274,19 @@ class TestSoftFieldExclusion:
         discs = find_discrepancies(best, majority, votes)
         assert all(not d["path"].endswith("source") for d in discs)
 
+    def test_provenance_excluded(self) -> None:
+        # The per-run _provenance block (model/prompt/run metadata) must never
+        # enter cross-run voting or produce discrepancies.
+        runs = [
+            {"value": "X", "_provenance": {"model_served": "a", "run": 1}},
+            {"value": "X", "_provenance": {"model_served": "b", "run": 2}},
+        ]
+        majority, _ = get_majority_votes(runs)
+        assert majority["value"] == "X"
+        assert majority["_provenance"] is None
+        discs = find_discrepancies(runs[0], majority, {})
+        assert all(not d["path"].endswith("_provenance") for d in discs)
+
 
 # ===================================================================
 # Truthiness — Blood Lesson 5
@@ -566,3 +579,88 @@ class TestEdgeCases:
         majority, votes = get_majority_votes([None, None])
         assert majority is None
         assert votes == {None: 2}
+
+
+class TestKeylessDiscrepancyDetection:
+    def test_keyless_ligands_not_cross_wired(self) -> None:
+        # Two protein ligands both with chem_comp_id="None" must stay distinct
+        # in discrepancy detection (they collapsed under "None" before).
+        best = {
+            "ligands": [
+                {"chem_comp_id": "None", "name": "Alpha", "role": "X"},
+                {"chem_comp_id": "None", "name": "Beta", "role": "Y"},
+            ]
+        }
+        majority = {
+            "ligands": [
+                {"chem_comp_id": "None", "name": "Alpha", "role": "Z"},
+                {"chem_comp_id": "None", "name": "Beta", "role": "Y"},
+            ]
+        }
+        votes = {"ligands": [{}, {}]}
+        discs = find_discrepancies(best, majority, votes)
+        paths = [d["path"] for d in discs]
+        # Alpha's role disagreement surfaces on Alpha's own path, never ligands[None]
+        assert any("Alpha" in p and p.endswith(".role") for p in paths)
+        assert not any(p == "ligands[None].role" for p in paths)
+
+
+class TestLowConfidenceConsensus:
+    def test_low_confidence_state_flagged(self) -> None:
+        from gpcr_tools.aggregator.voting import flag_low_confidence_consensus
+
+        best = {"structure_info": {"state": {"value": "active", "confidence": "Low"}}}
+        flags = flag_low_confidence_consensus(best, frozenset({"Low"}))
+        assert any(
+            f["path"] == "structure_info.state.value" and f.get("needs_review") for f in flags
+        )
+
+    def test_high_confidence_not_flagged(self) -> None:
+        from gpcr_tools.aggregator.voting import flag_low_confidence_consensus
+
+        best = {"structure_info": {"state": {"value": "active", "confidence": "High"}}}
+        assert flag_low_confidence_consensus(best, frozenset({"Low"})) == []
+
+    def test_low_confidence_ligand_role_flagged(self) -> None:
+        from gpcr_tools.aggregator.voting import flag_low_confidence_consensus
+
+        best = {
+            "ligands": [{"chem_comp_id": "ATP", "role": {"value": "agonist", "confidence": "Low"}}]
+        }
+        flags = flag_low_confidence_consensus(best, frozenset({"Low"}))
+        assert any(f["path"] == "ligands[ATP].role.value" for f in flags)
+
+    def test_low_confidence_aux_type_flagged(self) -> None:
+        from gpcr_tools.aggregator.voting import flag_low_confidence_consensus
+
+        best = {
+            "auxiliary_proteins": [
+                {"name": "Nb35", "type": {"value": "nanobody", "confidence": "Low"}}
+            ]
+        }
+        flags = flag_low_confidence_consensus(best, frozenset({"Low"}))
+        assert any(f["path"] == "auxiliary_proteins[Nb35].type.value" for f in flags)
+
+
+class TestObjectListScoring:
+    def test_object_list_scored_by_structured_match(self) -> None:
+        # An object list (ligands) must contribute to the score via per-item
+        # match; whole-object equality fails once soft fields are None.
+        majority = {"ligands": [{"chem_comp_id": "ATP", "role": "agonist", "reasoning": None}]}
+        run = {"ligands": [{"chem_comp_id": "ATP", "role": "agonist", "reasoning": "text"}]}
+        assert score_run(run, majority) >= 1
+
+    def test_scalar_list_membership_preserved(self) -> None:
+        # Plain scalar lists keep whole-item membership scoring.
+        assert score_run([1, 2, 99], [1, 2, 3]) == 2
+
+    def test_best_run_counts_ligand_match(self) -> None:
+        # The run whose ligand role matches the majority is selected, even
+        # though both runs tie on scalar fields.
+        majority = {"ligands": [{"chem_comp_id": "ATP", "role": "agonist", "reasoning": None}]}
+        runs = [
+            {"ligands": [{"chem_comp_id": "ATP", "role": "antagonist", "reasoning": "a"}]},
+            {"ligands": [{"chem_comp_id": "ATP", "role": "agonist", "reasoning": "b"}]},
+        ]
+        idx, _ = select_best_run(runs, majority)
+        assert idx == 1

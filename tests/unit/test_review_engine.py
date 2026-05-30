@@ -112,3 +112,20 @@ class TestGetVerifiedPaths:
 
     def test_empty_data(self):
         assert get_verified_paths({}) == set()
+
+
+class TestConfidenceStyle:
+    def test_high_is_success(self):
+        from gpcr_tools.csv_generator.review_engine import _confidence_style
+
+        assert _confidence_style("High") == "success"
+
+    def test_low_is_warning(self):
+        from gpcr_tools.csv_generator.review_engine import _confidence_style
+
+        assert _confidence_style("Low") == "warning"
+
+    def test_medium_is_warning(self):
+        from gpcr_tools.csv_generator.review_engine import _confidence_style
+
+        assert _confidence_style("Medium") == "warning"

@@ -188,23 +188,43 @@ def get_majority_votes(
 def score_run(
     run_data: Any,
     majority_votes: Any,
+    path: str = "",
 ) -> int:
     """Score *run_data* against *majority_votes*.
 
-    One point for each scalar leaf that matches the majority value.
+    One point for each scalar leaf that matches the majority value.  Object
+    lists (ligands, auxiliary_proteins) are matched item-by-item on their key
+    field and scored field-by-field, instead of requiring whole-object
+    equality — which never holds once soft fields are normalised to ``None``,
+    so those lists would otherwise contribute nothing to best-run selection.
     """
     if isinstance(majority_votes, dict):
         if not isinstance(run_data, dict):
             return 0
         score = 0
         for key, maj_val in majority_votes.items():
-            run_val = run_data.get(key)
-            score += score_run(run_val, maj_val)
+            child_path = f"{path}.{key}" if path else key
+            score += score_run(run_data.get(key), maj_val, child_path)
         return score
 
     if isinstance(majority_votes, list):
         if not isinstance(run_data, list):
             return 0
+        key_field = _resolve_key_field(path)
+        if key_field and majority_votes and isinstance(majority_votes[0], dict):
+            run_map = {
+                _list_item_identity(item, key_field, idx): item
+                for idx, item in enumerate(run_data)
+                if isinstance(item, dict)
+            }
+            score = 0
+            for idx, maj_item in enumerate(majority_votes):
+                if not isinstance(maj_item, dict):
+                    continue
+                run_item = run_map.get(_list_item_identity(maj_item, key_field, idx))
+                if run_item is not None:
+                    score += score_run(run_item, maj_item, f"{path}[item]")
+            return score
         return sum(1 for item in run_data if item in majority_votes)
 
     if majority_votes is not None:
