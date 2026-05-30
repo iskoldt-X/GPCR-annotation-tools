@@ -16,18 +16,35 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 from rich.text import Text
 
-from gpcr_tools.config import AUTO_RESOLVE_KEYS, BLACKLISTED_KEYS, TOPLEVEL_BLOCK_KEYS
+from gpcr_tools.config import (
+    AUTO_RESOLVE_KEYS,
+    BLACKLISTED_KEYS,
+    LIST_ITEM_KEY_FIELDS,
+    TOPLEVEL_BLOCK_KEYS,
+)
 from gpcr_tools.csv_generator.audit import log_audit_trail
 from gpcr_tools.csv_generator.ui import (
     console,
     create_display_copy,
     display_ligand_validation_panel,
+    display_pdb_footer,
 )
 from gpcr_tools.csv_generator.validation_display import (
     analyze_validation_impact,
     display_validation_alert,
     get_relevant_validation_warnings,
 )
+
+
+def _resolve_list_key_field(path: str) -> str | None:
+    """Return the list-item navigation key for *path* from the shared field
+    map, so review paths match the ones produced during vote aggregation.
+    """
+    for segment, field in LIST_ITEM_KEY_FIELDS.items():
+        if segment in path:
+            return field
+    return None
+
 
 # ── Type Coercion ──────────────────────────────────────────────────────
 
@@ -480,11 +497,7 @@ def review_node(
             return d_node
 
         new_list = []
-        key_field = (
-            "chem_comp_id"
-            if "ligands" in path
-            else ("name" if "auxiliary_proteins" in path else None)
-        )
+        key_field = _resolve_list_key_field(path)
         for idx, item in enumerate(d_node):
             curr_path = (
                 f"{path}[{item.get(key_field, idx)}]"
@@ -527,6 +540,10 @@ def review_toplevel_blocks(
         if key not in main_data:
             continue
         block_data = main_data[key]
+
+        # Quiet reminder of which PDB this block belongs to (the header
+        # scrolls off-screen during a long review).
+        display_pdb_footer(pdb_id)
 
         has_alert = bool(get_relevant_validation_warnings(key, validation_data))
         has_contra = has_downstream_controversy(key, controversies)

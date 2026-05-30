@@ -3,11 +3,35 @@
 Tests focus on controversy detection, auto-resolve, and significance checks.
 """
 
+import pytest
+
+from gpcr_tools import config
 from gpcr_tools.csv_generator.review_engine import (
+    _resolve_list_key_field,
     get_verified_paths,
     has_downstream_controversy,
     is_controversy_significant,
 )
+
+
+class TestListKeyFieldResolution:
+    @pytest.mark.parametrize("segment,field", list(config.LIST_ITEM_KEY_FIELDS.items()))
+    def test_resolves_from_shared_config(self, segment, field):
+        # List-item review keys must come from the shared config map (not a
+        # private hardcoded copy) so review paths line up with vote aggregation.
+        assert _resolve_list_key_field(f"root.{segment}.child") == field
+
+    def test_follows_config_changes(self, monkeypatch):
+        # Proves resolution reads config rather than a hardcoded literal.
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.LIST_ITEM_KEY_FIELDS",
+            {"widgets": "widget_id"},
+        )
+        assert _resolve_list_key_field("root.widgets.x") == "widget_id"
+        assert _resolve_list_key_field("root.ligands.x") is None
+
+    def test_none_for_unknown_path(self):
+        assert _resolve_list_key_field("root.unknown.child") is None
 
 
 class TestHasDownstreamControversy:

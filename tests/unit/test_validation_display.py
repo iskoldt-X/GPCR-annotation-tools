@@ -9,6 +9,16 @@ from gpcr_tools.csv_generator.validation_display import (
 )
 
 
+class TestDisplayPdbFooter:
+    def test_shows_pdb_id(self, capsys):
+        from gpcr_tools.csv_generator.ui import display_pdb_footer
+
+        display_pdb_footer("6CMO")
+        out = capsys.readouterr().out
+        assert "6CMO" in out
+        assert "PDB" in out
+
+
 class TestCanonicalizePath:
     def test_dots_stripped(self):
         assert canonicalize_path(".receptor_info.chain_id") == "receptor_info.chain_id"
