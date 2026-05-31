@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -77,9 +78,11 @@ def test_build_and_submit_batch(tmp_path, monkeypatch):
     assert mock_files.upload.call_count == 2  # Once for PDF, once for JSONL
     assert mock_batches.create.call_count == 1
 
-    # Check registry updated
+    # Check registry updated (now stores the URI with an upload timestamp so a
+    # stale cached upload can be detected and re-uploaded).
     registry = json.loads(config.uploaded_files_registry_file.read_text())
-    assert registry[pdb_id] == "http://mock.uri"
+    assert registry[pdb_id]["uri"] == "http://mock.uri"
+    assert "uploaded_at" in registry[pdb_id]
 
     # Check job updated
     assert config.current_batch_job_file.read_text() == "batchJobs/mock_job_name"
@@ -432,3 +435,17 @@ def test_discover_annotation_targets_is_model_aware(tmp_path, monkeypatch):
 
     assert runner.discover_annotation_targets(2, "model-x") == ["BBB"]
     assert "AAA" in runner.discover_annotation_targets(2, "model-y")
+
+
+def test_registry_fresh_uri_expiry():
+    """A cached upload URI is reused only within the Files-API TTL; a stale or
+    legacy entry returns None so the caller re-uploads."""
+    now = datetime(2026, 5, 31, 12, 0, tzinfo=UTC)
+    fresh = {"uri": "files/abc", "uploaded_at": (now - timedelta(hours=1)).isoformat()}
+    stale = {"uri": "files/old", "uploaded_at": (now - timedelta(hours=50)).isoformat()}
+
+    assert runner._registry_fresh_uri(fresh, now) == "files/abc"
+    assert runner._registry_fresh_uri(stale, now) is None
+    assert runner._registry_fresh_uri("files/legacy-bare-string", now) is None
+    assert runner._registry_fresh_uri(None, now) is None
+    assert runner._registry_fresh_uri({"uri": "files/x"}, now) is None  # no timestamp

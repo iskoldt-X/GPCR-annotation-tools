@@ -226,6 +226,12 @@ def cli() -> None:
         help="Annotate via the Batch API (the pipeline stops after submission).",
     )
     pipe_parser.add_argument(
+        "--runs",
+        type=_positive_int,
+        default=GEMINI_DEFAULT_RUNS,
+        help=f"Number of annotation runs per PDB (default: {GEMINI_DEFAULT_RUNS}).",
+    )
+    pipe_parser.add_argument(
         "--skip-fetch-papers",
         action="store_true",
         default=False,
@@ -357,6 +363,7 @@ def cli() -> None:
             pdb_id=args.pdb_id,
             dry_run=args.dry_run,
             batch=args.batch,
+            num_runs=args.runs,
             skip_fetch_papers=args.skip_fetch_papers,
             skip_api_checks=args.skip_api_checks,
         )

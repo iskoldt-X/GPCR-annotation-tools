@@ -8,7 +8,7 @@ import logging
 import os
 import tempfile
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +23,7 @@ from gpcr_tools.config import (
     ANNOTATOR_FUNCTION_NAME,
     GEMINI_BASE_BACKOFF,
     GEMINI_DEFAULT_RUNS,
+    GEMINI_FILE_TTL_HOURS,
     GEMINI_MAX_RETRIES,
     GEMINI_MAX_WORKERS,
     SLEEP_GEMINI_429,
@@ -32,6 +33,27 @@ from gpcr_tools.config import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _registry_fresh_uri(entry: Any, now: datetime) -> str | None:
+    """Return a still-valid cached upload URI from a registry *entry*, or None.
+
+    Entries are ``{"uri": ..., "uploaded_at": <iso>}``. A URI older than the
+    Files-API TTL — or a legacy bare-string entry whose age is unknown — is
+    treated as expired so the caller re-uploads instead of embedding a dead
+    fileUri into the batch request.
+    """
+    if isinstance(entry, dict):
+        uri = entry.get("uri")
+        uploaded_at = entry.get("uploaded_at")
+        if uri and uploaded_at:
+            try:
+                age = now - datetime.fromisoformat(uploaded_at)
+            except ValueError:
+                return None
+            if age < timedelta(hours=GEMINI_FILE_TTL_HOURS):
+                return uri
+    return None
 
 
 def run_single_pdb(
@@ -160,7 +182,9 @@ def run_single_pdb(
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=min(num_runs, GEMINI_MAX_WORKERS)
             ) as executor:
-                executor.map(do_run, range(1, num_runs + 1))
+                # Consume the iterator so any exception escaping a worker
+                # surfaces here instead of being silently discarded.
+                list(executor.map(do_run, range(1, num_runs + 1)))
 
         finally:
             import contextlib
@@ -183,6 +207,7 @@ def build_and_submit_batch(
     client = get_client()
 
     # Prepare batch requests
+    now = datetime.now(UTC)
     requests = []
     registry = {}
 
@@ -203,8 +228,13 @@ def build_and_submit_batch(
             logger.warning("[%s] Missing enriched data or PDF, skipping batch prep.", pdb_id)
             continue
 
-        with open(enriched_file) as f:
-            enriched_data = json.load(f)
+        try:
+            with open(enriched_file) as f:
+                enriched_data = json.load(f)
+        except (json.JSONDecodeError, OSError) as exc:
+            # One unreadable enriched file must not abort the whole batch.
+            logger.warning("[%s] Skipping — unreadable enriched JSON: %s", pdb_id, exc)
+            continue
 
         # Determine runs to do
         out_dir = config.ai_results_dir / pdb_id / model_run_subdir(model_name)
@@ -214,8 +244,8 @@ def build_and_submit_batch(
         if not runs_to_do:
             continue
 
-        # Upload or get PDF
-        pdf_uri = registry.get(pdb_id)
+        # Reuse a cached upload only if it is still within the Files-API TTL.
+        pdf_uri = _registry_fresh_uri(registry.get(pdb_id), now)
         if not pdf_uri:
             with tempfile.TemporaryDirectory() as tmp_dir:
                 tmp_pdf = Path(tmp_dir) / f"{pdb_id}_compressed.pdf"
@@ -225,7 +255,7 @@ def build_and_submit_batch(
                         file=str(actual_pdf), config={"mime_type": "application/pdf"}
                     )
                     pdf_uri = uploaded_file.uri
-                    registry[pdb_id] = pdf_uri
+                    registry[pdb_id] = {"uri": pdf_uri, "uploaded_at": now.isoformat()}
                     logger.info("[%s] Uploaded PDF to %s", pdb_id, pdf_uri)
                 except Exception as e:
                     logger.error("[%s] Failed to upload PDF: %s", pdb_id, e)
@@ -436,8 +466,10 @@ def recover_batch() -> None:
                     if not req_id or "__run_" not in req_id:
                         continue
 
-                    pdb_id, run_part = req_id.split("__")
-                    run_num = int(run_part.replace("run_", ""))
+                    # rpartition (not split("__")) so a PDB id that itself
+                    # contains "__" doesn't unpack-error and drop the run.
+                    pdb_id, _, run_part = req_id.rpartition("__run_")
+                    run_num = int(run_part)
 
                     response_obj = data.get("response", {})
                     candidates = response_obj.get("candidates") or []
@@ -583,8 +615,12 @@ def run_annotation_stage(
         if not enriched_path.exists():
             logger.warning("Skipping %s: no enriched data at %s", pid, enriched_path)
             continue
-        with open(enriched_path, encoding="utf-8") as fh:
-            enriched_data = json.load(fh)
+        try:
+            with open(enriched_path, encoding="utf-8") as fh:
+                enriched_data = json.load(fh)
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Skipping %s: unreadable enriched JSON: %s", pid, exc)
+            continue
         pdf_path = config.papers_dir / f"{pid}.pdf"
         if not pdf_path.exists():
             logger.warning("Skipping %s: no PDF at %s", pid, pdf_path)

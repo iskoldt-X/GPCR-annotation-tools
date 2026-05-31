@@ -45,7 +45,11 @@ def run_pipeline(
 
     if dry_run:
         target = pdb_id or "all targets (targets.txt / auto-discovery)"
-        logger.info("[pipeline] dry run -- would run: %s", " -> ".join(stages))
+        # In batch mode the pipeline submits the batch and stops; aggregate is a
+        # later, separate step — so don't list it in the planned sequence.
+        planned = stages[:-1] if batch else stages
+        suffix = "  (batch: stops after annotate; aggregate runs later)" if batch else ""
+        logger.info("[pipeline] dry run -- would run: %s%s", " -> ".join(planned), suffix)
         logger.info(
             "[pipeline] target=%s, annotate mode=%s, runs=%d",
             target,
@@ -90,10 +94,19 @@ def run_pipeline(
 
     # 4. aggregate ---------------------------------------------------------
     logger.info("[pipeline] stage: aggregate")
-    from gpcr_tools.aggregator.runner import aggregate_all
+    # Aggregate only the requested PDB when one was given — mirroring the
+    # standalone `aggregate <PDB>` command — instead of sweeping every pending
+    # PDB in the workspace (which would also mark unrelated ones processed).
+    if pdb_id:
+        from gpcr_tools.aggregator.runner import aggregate_pdb
 
-    results = aggregate_all(skip_api_checks=skip_api_checks, force=False)
-    ok = sum(1 for r in results if r.success)
-    fail = sum(1 for r in results if not r.success)
+        result = aggregate_pdb(pdb_id, skip_api_checks=skip_api_checks)
+        ok, fail = (1, 0) if result.success else (0, 1)
+    else:
+        from gpcr_tools.aggregator.runner import aggregate_all
+
+        results = aggregate_all(skip_api_checks=skip_api_checks, force=False)
+        ok = sum(1 for r in results if r.success)
+        fail = sum(1 for r in results if not r.success)
     logger.info("[pipeline] aggregate complete: %d succeeded, %d failed.", ok, fail)
     logger.info("[pipeline] done -- next: 'gpcr-tools curate' to review.")
