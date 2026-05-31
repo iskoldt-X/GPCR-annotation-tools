@@ -16,7 +16,6 @@ from pathlib import Path
 import pytest
 
 from gpcr_tools.config import (
-    DL_STATUS_ABSTRACT_ONLY,
     DL_STATUS_FAILED_NO_DATA,
     DL_STATUS_FAILED_NO_DOI,
     DL_STATUS_MANUAL,
@@ -99,7 +98,6 @@ class TestFetchPapersLive:
             DL_STATUS_FAILED_NO_DOI,
             DL_STATUS_FAILED_NO_DATA,
             DL_STATUS_PAYWALLED,
-            DL_STATUS_ABSTRACT_ONLY,
             DL_STATUS_MANUAL,
             DL_STATUS_SKIPPED_NO_PAPER,
         }

@@ -34,7 +34,6 @@ CROSSREF_API_URL: str = "https://api.crossref.org/works"
 UNPAYWALL_API_URL: str = "https://api.unpaywall.org/v2"
 
 NCBI_PMC_OA_URL: str = "https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi"
-NCBI_EUTILS_EFETCH_URL: str = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 
 # ---------------------------------------------------------------------------
 # HTTP User-Agent strings
@@ -73,7 +72,6 @@ TIMEOUT_PUBCHEM_VALIDATION: int = 5
 TIMEOUT_CROSSREF: int = 15
 TIMEOUT_UNPAYWALL: int = 15
 TIMEOUT_NCBI_PMC_OA: int = 20
-TIMEOUT_NCBI_EUTILS: int = 20
 TIMEOUT_PDF_DOWNLOAD: int = 60
 TIMEOUT_BATCH_RESULT_DOWNLOAD: int = 60
 
@@ -593,7 +591,6 @@ DL_STATUS_FAILED_NO_DOI: str = "failed_no_doi"
 DL_STATUS_FAILED_NO_DATA: str = "failed_no_data"
 DL_STATUS_PAYWALLED: str = "fallback_paywalled"
 DL_STATUS_MANUAL: str = "manual_user_provided"
-DL_STATUS_ABSTRACT_ONLY: str = "fallback_abstract_only"
 DL_STATUS_SKIPPED_NO_PAPER: str = "skipped_no_paper"
 
 # ---------------------------------------------------------------------------
