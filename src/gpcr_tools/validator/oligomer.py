@@ -26,6 +26,7 @@ from gpcr_tools.config import (
     ALERT_MULTI_COPY_LIGAND,
     ALERT_SUSPICIOUS_7TM,
     EMPTY_VALUES,
+    GPCR_MIN_ANNOTATED_TM,
     GPCR_SLUG_NEGATIVE_PREFIXES,
     OLIGOMER_HETEROMER,
     OLIGOMER_HOMOMER,
@@ -739,12 +740,26 @@ def analyze_oligomer(
     # 3. Refine fusion slugs using per-UniProt TM features
     _refine_fusion_slugs(gpcr_roster, enriched_entry, graphql_entry)
 
-    # 4. Classify (after refinement so slugs are correct)
-    unique_slugs = {info["slug"] for info in gpcr_roster.values()}
+    # 3b. Validated protomer roster: a chain whose UniProt annotation is not 7TM
+    # (a single-pass partner, a soluble ligand, etc. mis-mapped to a GPCR slug)
+    # is not a protomer for classification or the missed-protomer check. Gate on
+    # the annotated TM count so a truncated-but-real GPCR (few resolved TMs, full
+    # annotation) is kept. Fall back to the full roster if the 7TM scan produced
+    # nothing (e.g. no GraphQL) so missing data never over-prunes.
+    classify_roster = {
+        chain: info
+        for chain, info in gpcr_roster.items()
+        if (tm_roster.get(chain) or {}).get("total_tms", 0) >= GPCR_MIN_ANNOTATED_TM
+    }
+    if not classify_roster:
+        classify_roster = dict(gpcr_roster)
 
-    if len(gpcr_roster) == 0:
+    # 4. Classify (after refinement so slugs are correct)
+    unique_slugs = {info["slug"] for info in classify_roster.values()}
+
+    if len(classify_roster) == 0:
         classification = OLIGOMER_NO_GPCR
-    elif len(gpcr_roster) == 1:
+    elif len(classify_roster) == 1:
         classification = OLIGOMER_MONOMER
     elif len(unique_slugs) == 1:
         classification = OLIGOMER_HOMOMER
@@ -776,7 +791,7 @@ def analyze_oligomer(
     ligands_data = best_run_data.get("ligands") or []
 
     suggestion = _suggest_primary_protomer(
-        gpcr_roster,
+        classify_roster,
         tm_roster,
         classification,
         ai_chain,
@@ -784,9 +799,10 @@ def analyze_oligomer(
         ligands_data,
     )
 
-    # 6. Alerts
+    # 6. Alerts — use the validated roster so non-7TM partners don't trigger a
+    # false MISSED_PROTOMER / inflate the heteromer chain list.
     alerts = _generate_alerts(
-        gpcr_roster,
+        classify_roster,
         classification,
         ai_chain,
         best_run_data,

@@ -252,6 +252,58 @@ class TestClassification:
         assert result["classification"] == OLIGOMER_HETEROMER
 
 
+class TestRosterTmGating:
+    """A chain mis-mapped to a GPCR slug but whose annotation is not 7TM (a
+    peptide ligand, single-pass partner, soluble protein) must not count as a
+    protomer — no false HETEROMER, no false MISSED_PROTOMER."""
+
+    def _analyze(self, entities, tm_roster, ai_chain="A"):
+        enriched = _make_enriched_with_entities(entities)
+        data: dict[str, Any] = {"receptor_info": {"chain_id": ai_chain}}
+        with patch(
+            "gpcr_tools.validator.oligomer.scan_all_chains_7tm",
+            return_value=(tm_roster, None),
+        ):
+            analyze_oligomer("TEST", data, enriched)
+        return data["oligomer_analysis"]
+
+    def test_zero_tm_peptide_ligand_chain_excluded(self) -> None:
+        # 8XGR-shape: endothelin-1 peptide (0 TM) sharing the roster with EDNRB.
+        o = self._analyze(
+            [_make_entity("ednrb_human", "R"), _make_entity("edn1_human", "L")],
+            {
+                "R": {"resolved_tms": 7, "total_tms": 7, "status": TM_STATUS_COMPLETE},
+                "L": {"resolved_tms": 0, "total_tms": 0, "status": TM_STATUS_UNKNOWN},
+            },
+            ai_chain="R",
+        )
+        assert o["classification"] == OLIGOMER_MONOMER
+        assert not any(a["type"] == ALERT_MISSED_PROTOMER for a in o.get("alerts") or [])
+
+    def test_single_pass_partner_excluded(self) -> None:
+        # 8XFS-shape: single-pass E3 ligase ZNRF3 (1 TM) alongside 7TM LGR4.
+        o = self._analyze(
+            [_make_entity("lgr4_human", "A"), _make_entity("znrf3_human", "C")],
+            {
+                "A": {"resolved_tms": 7, "total_tms": 7, "status": TM_STATUS_COMPLETE},
+                "C": {"resolved_tms": 1, "total_tms": 1, "status": TM_STATUS_INCOMPLETE},
+            },
+        )
+        assert o["classification"] == OLIGOMER_MONOMER
+        assert not any(a["type"] == ALERT_MISSED_PROTOMER for a in o.get("alerts") or [])
+
+    def test_two_real_gpcrs_stay_heteromer(self) -> None:
+        # Guard against over-pruning: two genuine 7TM GPCRs remain a heteromer.
+        o = self._analyze(
+            [_make_entity("drd2_human", "A"), _make_entity("oprm_human", "B")],
+            {
+                "A": {"resolved_tms": 7, "total_tms": 7, "status": TM_STATUS_COMPLETE},
+                "B": {"resolved_tms": 7, "total_tms": 7, "status": TM_STATUS_COMPLETE},
+            },
+        )
+        assert o["classification"] == OLIGOMER_HETEROMER
+
+
 # ===================================================================
 # _suggest_primary_protomer
 # ===================================================================
