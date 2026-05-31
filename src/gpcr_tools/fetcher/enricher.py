@@ -125,14 +125,31 @@ def enrich_single_pdb(
 
     sess = session or _build_session()
 
+    # Tally external-lookup outcomes so a total outage is not silently written
+    # as a successful enrichment.
+    stats: dict[str, int] = {"attempted": 0, "hard_failed": 0}
+
     # 1. UniProt enrichment
-    _enrich_uniprot(pdb_data, sess, uniprot_cache)
+    _enrich_uniprot(pdb_data, sess, uniprot_cache, stats=stats)
 
     # 2. Ligand type + PubChem enrichment
-    _enrich_ligands(pdb_data, sess, pubchem_cache, synonyms_cache, smiles_cache)
+    _enrich_ligands(pdb_data, sess, pubchem_cache, synonyms_cache, smiles_cache, stats=stats)
 
     # 3. Sibling PDB discovery
-    _enrich_siblings(pdb_data, pdb_id, sess, doi_cache)
+    _enrich_siblings(pdb_data, pdb_id, sess, doi_cache, stats=stats)
+
+    # Enrichment normally succeeds; if EVERY lookup we attempted hard-failed
+    # (network down / all retries exhausted) it is a transient outage, not a
+    # real "no data" result. Don't persist a hollow record or report success —
+    # leave the PDB unwritten so the next run retries it (the raw JSON is kept).
+    if stats["attempted"] > 0 and stats["hard_failed"] == stats["attempted"]:
+        logger.error(
+            "[%s] All %d enrichment lookup(s) failed (transient outage?) — "
+            "not writing enriched JSON; rerun to retry",
+            pdb_id,
+            stats["attempted"],
+        )
+        return False
 
     # Write enriched output atomically. The existence-based resume skip treats
     # enriched/{id}.json as a completed checkpoint, so a half-written file from
@@ -162,6 +179,7 @@ def _enrich_uniprot(
     pdb_data: dict[str, Any],
     session: requests.Session,
     cache: JsonCache | None,
+    stats: dict[str, int] | None = None,
 ) -> None:
     """Add ``gpcrdb_entry_name_slug`` to each UniProt on polymer entities."""
     polymers = ((pdb_data.get("data") or {}).get("entry") or {}).get("polymer_entities") or []
@@ -180,7 +198,7 @@ def _enrich_uniprot(
         return
 
     # Resolve all at once
-    slug_map = _resolve_uniprot_slugs(all_accessions, session, cache)
+    slug_map = _resolve_uniprot_slugs(all_accessions, session, cache, stats=stats)
 
     # Inject back into polymers
     for poly in polymers:
@@ -194,6 +212,7 @@ def _resolve_uniprot_slugs(
     accessions: list[str],
     session: requests.Session,
     cache: JsonCache | None,
+    stats: dict[str, int] | None = None,
 ) -> dict[str, str | None]:
     """Resolve UniProt accessions to entry name slugs via API + cache."""
     result: dict[str, str | None] = {}
@@ -212,6 +231,8 @@ def _resolve_uniprot_slugs(
     api_url = f"{UNIPROT_REST_URL}/accessions"
     params = {"accessions": ",".join(to_fetch), "fields": "accession,id"}
 
+    if stats is not None:
+        stats["attempted"] += 1
     try:
         response = session.post(api_url, params=params, timeout=TIMEOUT_UNIPROT_BATCH)
         response.raise_for_status()
@@ -235,6 +256,8 @@ def _resolve_uniprot_slugs(
 
     except requests.exceptions.RequestException as exc:
         logger.error("UniProt API request failed: %s", exc)
+        if stats is not None:
+            stats["hard_failed"] += 1
         for acc in to_fetch:
             result[acc] = None
 
@@ -252,6 +275,7 @@ def _enrich_ligands(
     pubchem_cache: JsonCache | None,
     synonyms_cache: JsonCache | None,
     smiles_cache: JsonCache | None,
+    stats: dict[str, int] | None = None,
 ) -> None:
     """Add type, PubChem CID, synonyms, and SMILES to nonpolymer entities."""
     non_polymers = ((pdb_data.get("data") or {}).get("entry") or {}).get(
@@ -269,12 +293,12 @@ def _enrich_ligands(
 
         # PubChem CID from InChIKey
         inchikey = descriptor.get("InChIKey")
-        pubchem_id = _get_pubchem_cid(inchikey, session, pubchem_cache)
+        pubchem_id = _get_pubchem_cid(inchikey, session, pubchem_cache, stats=stats)
         comp["gpcrdb_pubchem_cid"] = pubchem_id
 
         # PubChem synonyms
         if pubchem_id:
-            synonyms = _get_pubchem_synonyms(pubchem_id, session, synonyms_cache)
+            synonyms = _get_pubchem_synonyms(pubchem_id, session, synonyms_cache, stats=stats)
             comp["gpcrdb_pubchem_synonyms"] = synonyms if synonyms else []
         else:
             comp["gpcrdb_pubchem_synonyms"] = []
@@ -282,7 +306,7 @@ def _enrich_ligands(
         # SMILES/InChIKey for non-excluded ligands
         comp_id = chem_comp.get("id")
         if comp_id and comp_id not in LIGAND_EXCLUDE_LIST:
-            smiles_data = _fetch_chem_comp_descriptors(comp_id, session, smiles_cache)
+            smiles_data = _fetch_chem_comp_descriptors(comp_id, session, smiles_cache, stats=stats)
             if smiles_data:
                 descriptor["SMILES"] = smiles_data.get("SMILES")
                 descriptor["SMILES_stereo"] = smiles_data.get("SMILES_stereo")
@@ -304,6 +328,7 @@ def _get_pubchem_cid(
     inchikey: str | None,
     session: requests.Session,
     cache: JsonCache | None,
+    stats: dict[str, int] | None = None,
 ) -> str | None:
     """Resolve an InChIKey to a PubChem CID."""
     if not inchikey:
@@ -314,6 +339,8 @@ def _get_pubchem_cid(
     logger.info("Querying PubChem for InChIKey: %s...", inchikey[:15])
     url = f"{PUBCHEM_REST_URL}/inchikey/{inchikey}/cids/JSON"
     pubchem_id: str | None = None
+    if stats is not None:
+        stats["attempted"] += 1
     try:
         response = session.get(url, timeout=TIMEOUT_PUBCHEM_CID)
         if response.status_code == 200:
@@ -332,6 +359,8 @@ def _get_pubchem_cid(
                 cache.set(inchikey, pubchem_id)
     except requests.exceptions.RequestException as exc:
         logger.error("PubChem CID lookup failed for %s: %s", inchikey, exc)
+        if stats is not None:
+            stats["hard_failed"] += 1
 
     return pubchem_id
 
@@ -340,6 +369,7 @@ def _get_pubchem_synonyms(
     cid: str,
     session: requests.Session,
     cache: JsonCache | None,
+    stats: dict[str, int] | None = None,
 ) -> list[str] | None:
     """Fetch PubChem synonyms for a CID."""
     if cache and cache.has(cid):
@@ -348,6 +378,8 @@ def _get_pubchem_synonyms(
     logger.info("Querying PubChem synonyms for CID: %s", cid)
     url = f"{PUBCHEM_REST_URL}/cid/{cid}/synonyms/JSON"
     synonyms: list[str] | None = None
+    if stats is not None:
+        stats["attempted"] += 1
     try:
         response = session.get(url, timeout=TIMEOUT_PUBCHEM_SYNONYMS)
         if response.status_code == 200:
@@ -359,6 +391,8 @@ def _get_pubchem_synonyms(
                 cache.set(cid, synonyms)
     except requests.exceptions.RequestException as exc:
         logger.error("PubChem synonyms lookup failed for CID %s: %s", cid, exc)
+        if stats is not None:
+            stats["hard_failed"] += 1
 
     return synonyms
 
@@ -367,12 +401,15 @@ def _fetch_chem_comp_descriptors(
     comp_id: str,
     session: requests.Session,
     cache: JsonCache | None,
+    stats: dict[str, int] | None = None,
 ) -> dict[str, Any] | None:
     """Fetch SMILES/InChIKey via RCSB ``chem_comp`` GraphQL."""
     if cache and cache.has(comp_id):
         return cache.get(comp_id)  # type: ignore[return-value]
 
     result: dict[str, Any] = {}
+    if stats is not None:
+        stats["attempted"] += 1
     try:
         resp = session.post(
             RCSB_GRAPHQL_URL,
@@ -388,6 +425,8 @@ def _fetch_chem_comp_descriptors(
                 cache.set(comp_id, result)
     except requests.exceptions.RequestException as exc:
         logger.error("RCSB chem_comp query failed for %s: %s", comp_id, exc)
+        if stats is not None:
+            stats["hard_failed"] += 1
 
     return result if result else None
 
@@ -402,6 +441,7 @@ def _enrich_siblings(
     pdb_id: str,
     session: requests.Session,
     cache: JsonCache | None,
+    stats: dict[str, int] | None = None,
 ) -> None:
     """Add ``sibling_pdbs`` list to the entry."""
     entry = (pdb_data.get("data") or {}).get("entry") or {}
@@ -411,7 +451,7 @@ def _enrich_siblings(
         entry["sibling_pdbs"] = []
         return
 
-    siblings = _get_pdbs_from_doi(doi, session, cache)
+    siblings = _get_pdbs_from_doi(doi, session, cache, stats=stats)
     entry["sibling_pdbs"] = sorted(pid for pid in siblings if pid != pdb_id.upper())
 
 
@@ -419,6 +459,7 @@ def _get_pdbs_from_doi(
     doi: str,
     session: requests.Session,
     cache: JsonCache | None,
+    stats: dict[str, int] | None = None,
 ) -> list[str]:
     """Query RCSB Search API for PDB IDs sharing a DOI."""
     if cache and cache.has(doi):
@@ -439,6 +480,8 @@ def _get_pdbs_from_doi(
         "request_options": {"return_all_hits": True},
     }
 
+    if stats is not None:
+        stats["attempted"] += 1
     try:
         logger.info("Querying RCSB Search API for DOI: %s", doi)
         response = session.post(api_url, json=query, timeout=TIMEOUT_RCSB_SEARCH)
@@ -452,4 +495,6 @@ def _get_pdbs_from_doi(
         return pdb_ids
     except requests.exceptions.RequestException as exc:
         logger.error("RCSB Search API failed for DOI %s: %s", doi, exc)
+        if stats is not None:
+            stats["hard_failed"] += 1
         return []

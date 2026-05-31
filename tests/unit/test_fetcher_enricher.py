@@ -214,6 +214,22 @@ class TestEnrichSinglePdb:
         data = json.loads(enriched_path.read_text())
         assert data["data"]["entry"]["rcsb_id"] == "7W55"
 
+    def test_all_lookups_failed_returns_false_and_writes_nothing(self, workspace: Path) -> None:
+        """If every external lookup hard-fails (transient outage), don't persist
+        a hollow enriched file or report success — leave it for the next run."""
+        enriched = workspace / "enriched" / "7W55.json"
+        if enriched.exists():
+            enriched.unlink()
+
+        session = MagicMock()
+        session.post.side_effect = requests.exceptions.ConnectionError("down")
+        session.get.side_effect = requests.exceptions.ConnectionError("down")
+
+        result = enrich_single_pdb("7W55", session=session, force=True)
+
+        assert result is False
+        assert not enriched.exists()
+
 
 class TestEnrichmentCacheNotPoisoned:
     """A transient lookup failure must never be written to the shared cache —
