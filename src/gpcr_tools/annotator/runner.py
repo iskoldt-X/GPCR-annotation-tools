@@ -77,7 +77,9 @@ def run_single_pdb(
 
         # Upload PDF
         try:
-            uploaded_file = client.files.upload(file=str(actual_pdf))
+            uploaded_file = client.files.upload(
+                file=str(actual_pdf), config={"mime_type": "application/pdf"}
+            )
         except Exception as e:
             logger.error("[%s] Failed to upload PDF: %s", pdb_id, e)
             return
@@ -219,7 +221,9 @@ def build_and_submit_batch(
                 tmp_pdf = Path(tmp_dir) / f"{pdb_id}_compressed.pdf"
                 try:
                     actual_pdf = compress_pdf_if_needed(pdf_file, tmp_pdf)
-                    uploaded_file = client.files.upload(file=str(actual_pdf))
+                    uploaded_file = client.files.upload(
+                        file=str(actual_pdf), config={"mime_type": "application/pdf"}
+                    )
                     pdf_uri = uploaded_file.uri
                     registry[pdb_id] = pdf_uri
                     logger.info("[%s] Uploaded PDF to %s", pdb_id, pdf_uri)
@@ -260,9 +264,11 @@ def build_and_submit_batch(
 
             requests.append(
                 {
-                    "id": req_id,
+                    # Per-request identifier echoed back in the output ("key", not
+                    # "id"). The model is set once at the batch-job level below;
+                    # repeating it per request is rejected as a mismatch.
+                    "key": req_id,
                     "request": {
-                        "model": model_name,
                         "contents": contents_batch,
                         "tools": [tool_dict],
                         "toolConfig": {"functionCallingConfig": {"mode": "ANY"}},
@@ -297,7 +303,9 @@ def build_and_submit_batch(
 
     try:
         # Upload JSONL to Gemini
-        batch_src_file = client.files.upload(file=str(tmp_jsonl))
+        batch_src_file = client.files.upload(
+            file=str(tmp_jsonl), config={"mime_type": "application/jsonl"}
+        )
         if not batch_src_file.name:
             raise ValueError("Uploaded file has no name")
         logger.info("Uploaded batch JSONL source: %s", batch_src_file.name)
@@ -409,7 +417,7 @@ def recover_batch() -> None:
             for line_no, line in enumerate(f, 1):
                 try:
                     data = json.loads(line)
-                    req_id = data.get("id")
+                    req_id = data.get("key") or data.get("id")
                     if not req_id or "__run_" not in req_id:
                         continue
 

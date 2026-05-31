@@ -97,7 +97,7 @@ def test_recover_batch(tmp_path, monkeypatch):
 
     # Construct a mock batch response lines
     mock_resp = {
-        "id": "7W55__run_01",
+        "key": "7W55__run_01",
         "response": {
             "candidates": [
                 {
@@ -170,6 +170,9 @@ def test_run_single_pdb_writes_provenance(tmp_path, monkeypatch):
         prompt_id="v5",
     )
 
+    # Large PDFs upload via the resumable path, which needs an explicit mime type.
+    assert mock_client.files.upload.call_args.kwargs["config"]["mime_type"] == "application/pdf"
+
     data = json.loads(
         (
             config.ai_results_dir / "7W55" / model_run_subdir("gemini-2.5-pro") / "run_1.json"
@@ -197,7 +200,7 @@ def test_recover_batch_writes_provenance(tmp_path, monkeypatch):
 
     raw_output = config.pipeline_runs_dir / "raw_output_testjob.jsonl"
     mock_resp = {
-        "id": "7W55__run_01",
+        "key": "7W55__run_01",
         "response": {
             "modelVersion": "gemini-2.5-pro-002",
             "candidates": [
