@@ -362,7 +362,9 @@ def check_batch_status() -> None:
         return
 
     if state not in succeeded_states:
-        logger.info("Batch job %s is not finished yet (state %s); try again later.", job_name, state)
+        logger.info(
+            "Batch job %s is not finished yet (state %s); try again later.", job_name, state
+        )
         return
 
     if not (job.dest and job.dest.file_name):
@@ -480,3 +482,96 @@ def recover_batch() -> None:
                         e,
                     )
                     continue
+
+
+def discover_annotation_targets(num_runs: int, model_name: str) -> list[str]:
+    """Enriched PDB IDs that still need annotation runs for *model_name*.
+
+    A PDB counts as done when its per-model run directory already holds
+    *num_runs* run files; those are excluded. Model-aware so it matches the
+    namespaced output layout written by the runners.
+    """
+    config = get_config()
+    enriched_pdbs = {p.stem.upper() for p in config.enriched_dir.glob("*.json")}
+    done: set[str] = set()
+    if config.ai_results_dir.exists():
+        for d in config.ai_results_dir.iterdir():
+            if not d.is_dir():
+                continue
+            model_dir = d / model_run_subdir(model_name)
+            completed = sum(
+                1 for n in range(1, num_runs + 1) if (model_dir / f"run_{n}.json").exists()
+            )
+            if completed >= num_runs:
+                done.add(d.name.upper())
+    return sorted(enriched_pdbs - done)
+
+
+def run_annotation_stage(
+    pdb_id: str | None = None,
+    targets_file: str | None = None,
+    prompt_file: str | None = None,
+    model: str | None = None,
+    num_runs: int = GEMINI_DEFAULT_RUNS,
+    batch: bool = False,
+) -> None:
+    """Resolve targets / prompt / model and run annotation (single or batch).
+
+    Shared by the ``annotate`` and ``pipeline`` commands. Auto-discovers
+    enriched PDBs that still need runs when no explicit target is given.
+    Raises ``FileNotFoundError`` when no prompt is available.
+    """
+    config = get_config()
+    model_name = model or get_gemini_model_name()
+
+    if pdb_id:
+        pdb_ids = [pdb_id.upper()]
+    elif targets_file:
+        from gpcr_tools.fetcher.targets import read_targets
+
+        pdb_ids = read_targets(Path(targets_file))
+    else:
+        pdb_ids = discover_annotation_targets(num_runs, model_name)
+
+    if prompt_file:
+        prompt_text = Path(prompt_file).read_text(encoding="utf-8")
+        prompt_id = Path(prompt_file).stem
+    elif config.default_prompt_file.exists():
+        prompt_text = config.default_prompt_file.read_text(encoding="utf-8")
+        prompt_id = config.default_prompt_file.stem
+    else:
+        raise FileNotFoundError(
+            f"Default prompt file not found at {config.default_prompt_file}; "
+            "create it or pass a prompt file."
+        )
+
+    if batch:
+        build_and_submit_batch(
+            pdb_ids,
+            prompt_text,
+            num_runs=num_runs,
+            model_name=model_name,
+            prompt_id=prompt_id,
+        )
+        return
+
+    for pid in pdb_ids:
+        enriched_path = config.enriched_dir / f"{pid}.json"
+        if not enriched_path.exists():
+            logger.warning("Skipping %s: no enriched data at %s", pid, enriched_path)
+            continue
+        with open(enriched_path, encoding="utf-8") as fh:
+            enriched_data = json.load(fh)
+        pdf_path = config.papers_dir / f"{pid}.pdf"
+        if not pdf_path.exists():
+            logger.warning("Skipping %s: no PDF at %s", pid, pdf_path)
+            continue
+        run_single_pdb(
+            pdb_id=pid,
+            enriched_data=enriched_data,
+            prompt_text=prompt_text,
+            pdf_path=pdf_path,
+            num_runs=num_runs,
+            model_name=model_name,
+            prompt_id=prompt_id,
+        )

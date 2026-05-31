@@ -171,7 +171,9 @@ def test_run_single_pdb_writes_provenance(tmp_path, monkeypatch):
     )
 
     data = json.loads(
-        (config.ai_results_dir / "7W55" / model_run_subdir("gemini-2.5-pro") / "run_1.json").read_text()
+        (
+            config.ai_results_dir / "7W55" / model_run_subdir("gemini-2.5-pro") / "run_1.json"
+        ).read_text()
     )
     prov = data["_provenance"]
     assert prov["model_requested"] == "gemini-2.5-pro"
@@ -222,7 +224,9 @@ def test_recover_batch_writes_provenance(tmp_path, monkeypatch):
     runner.recover_batch()
 
     data = json.loads(
-        (config.ai_results_dir / "7W55" / model_run_subdir("gemini-2.5-pro") / "run_1.json").read_text()
+        (
+            config.ai_results_dir / "7W55" / model_run_subdir("gemini-2.5-pro") / "run_1.json"
+        ).read_text()
     )
     prov = data["_provenance"]
     assert prov["mode"] == "batch"
@@ -340,3 +344,22 @@ def test_run_outputs_namespaced_by_model(tmp_path, monkeypatch):
     assert b_file.exists()
     # model-a's run is untouched.
     assert json.loads((a_dir / "run_1.json").read_text()) == {"from": "a"}
+
+
+def test_discover_annotation_targets_is_model_aware(tmp_path, monkeypatch):
+    """A PDB complete for one model is excluded for that model but still pending
+    for another (runs are namespaced per model)."""
+    monkeypatch.setenv("GPCR_WORKSPACE", str(tmp_path))
+    reset_config()
+    config = get_config()
+    config.enriched_dir.mkdir(parents=True)
+    (config.enriched_dir / "AAA.json").write_text("{}")
+    (config.enriched_dir / "BBB.json").write_text("{}")
+    # AAA has both runs under model-x; BBB has none.
+    done_dir = config.ai_results_dir / "AAA" / model_run_subdir("model-x")
+    done_dir.mkdir(parents=True)
+    (done_dir / "run_1.json").write_text("{}")
+    (done_dir / "run_2.json").write_text("{}")
+
+    assert runner.discover_annotation_targets(2, "model-x") == ["BBB"]
+    assert "AAA" in runner.discover_annotation_targets(2, "model-y")
