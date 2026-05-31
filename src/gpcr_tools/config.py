@@ -243,7 +243,7 @@ def get_config() -> WorkspaceConfig:
         download_log_file=state_dir / "download_log.json",
         current_batch_job_file=state_dir / "current_batch_job.txt",
         uploaded_files_registry_file=state_dir / "uploaded_files_registry.json",
-        default_prompt_file=workspace / "prompts" / "v5.txt",
+        default_prompt_file=workspace / "prompts" / "v5.md",
     )
 
 
