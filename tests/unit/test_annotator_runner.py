@@ -239,6 +239,72 @@ def test_recover_batch_writes_provenance(tmp_path, monkeypatch):
     assert prov["run"] == 1
 
 
+def test_recover_batch_uses_per_job_provenance(tmp_path, monkeypatch):
+    """Two completed batches with different models must not cross-contaminate:
+    each raw output is stamped from its OWN per-job provenance sidecar, never a
+    single shared file that the latest submission overwrote."""
+    monkeypatch.setenv("GPCR_STATE_PATH", str(tmp_path / "state"))
+    monkeypatch.setenv("GPCR_AI_RESULTS_PATH", str(tmp_path / "ai_results"))
+    reset_config()
+    config = get_config()
+    config.pipeline_runs_dir.mkdir(parents=True)
+
+    def _resp(key, served):
+        return {
+            "key": key,
+            "response": {
+                "modelVersion": served,
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "functionCall": {
+                                        "name": "annotate_gpcr_db_structure",
+                                        "args": {"receptor_info": {}},
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ],
+            },
+        }
+
+    # Job A (model-pro) and job B (model-flash): each with its own raw output
+    # and its own provenance sidecar.
+    (config.pipeline_runs_dir / "raw_output_jobA.jsonl").write_text(
+        json.dumps(_resp("1ABC__run_01", "pro-002")) + "\n"
+    )
+    (config.pipeline_runs_dir / "_batch_provenance_jobA.json").write_text(
+        json.dumps({"model_requested": "model-pro", "prompt": "v5"})
+    )
+    (config.pipeline_runs_dir / "raw_output_jobB.jsonl").write_text(
+        json.dumps(_resp("2XYZ__run_01", "flash-002")) + "\n"
+    )
+    (config.pipeline_runs_dir / "_batch_provenance_jobB.json").write_text(
+        json.dumps({"model_requested": "model-flash", "prompt": "v5"})
+    )
+    # A stale shared file from the most recent submission must NOT win over the
+    # per-job sidecars — that overwrite is exactly what cross-contaminated runs.
+    (config.pipeline_runs_dir / "_batch_provenance.json").write_text(
+        json.dumps({"model_requested": "model-flash", "prompt": "v5"})
+    )
+
+    monkeypatch.setattr(
+        "gpcr_tools.annotator.runner.post_process_annotation", lambda args: {"ok": True}
+    )
+
+    runner.recover_batch()
+
+    pro = config.ai_results_dir / "1ABC" / model_run_subdir("model-pro") / "run_1.json"
+    flash = config.ai_results_dir / "2XYZ" / model_run_subdir("model-flash") / "run_1.json"
+    assert pro.exists(), "job A must be stamped model-pro, not the shared file's model-flash"
+    assert flash.exists()
+    assert json.loads(pro.read_text())["_provenance"]["model_requested"] == "model-pro"
+    assert json.loads(flash.read_text())["_provenance"]["model_requested"] == "model-flash"
+
+
 def _setup_batch_state(tmp_path, monkeypatch, job_name="batchJobs/mock_job"):
     monkeypatch.setenv("GPCR_STATE_PATH", str(tmp_path / "state"))
     monkeypatch.setenv("GPCR_AI_RESULTS_PATH", str(tmp_path / "ai_results"))
