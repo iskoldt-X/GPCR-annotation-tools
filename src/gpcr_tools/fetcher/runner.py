@@ -75,7 +75,7 @@ def run_fetch(
     fail = 0
     for pid in tqdm(pdb_ids, desc="Fetching"):
         # Step 1: Download raw metadata
-        raw_data = fetch_single_pdb(pid, force=force)
+        raw_data = fetch_single_pdb(pid, force=force, session=session)
         if raw_data is None:
             logger.error("[%s] RCSB download failed, skipping enrichment", pid)
             fail += 1

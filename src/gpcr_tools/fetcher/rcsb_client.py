@@ -23,6 +23,7 @@ from gpcr_tools.config import (
     TIMEOUT_RCSB_GRAPHQL,
     get_config,
 )
+from gpcr_tools.fetcher.enricher import _build_session
 
 logger = logging.getLogger(__name__)
 
@@ -496,7 +497,12 @@ query structure($id: String!) {
 # ---------------------------------------------------------------------------
 
 
-def fetch_single_pdb(pdb_id: str, *, force: bool = False) -> dict[str, Any] | None:
+def fetch_single_pdb(
+    pdb_id: str,
+    *,
+    force: bool = False,
+    session: requests.Session | None = None,
+) -> dict[str, Any] | None:
     """Download raw PDB metadata from RCSB and write to ``raw/pdb_json/``.
 
     Return the parsed JSON data on success, ``None`` on failure.
@@ -510,7 +516,7 @@ def fetch_single_pdb(pdb_id: str, *, force: bool = False) -> dict[str, Any] | No
         logger.info("[%s] Raw JSON already exists, skipping download", pdb_id)
         return _load_existing(output_path)
 
-    data = _query_graphql(pdb_id)
+    data = _query_graphql(pdb_id, session)
     if data is None:
         return None
 
@@ -543,17 +549,24 @@ def _load_existing(path: Path) -> dict[str, Any] | None:
         return None
 
 
-def _query_graphql(pdb_id: str) -> dict[str, Any] | None:
+def _query_graphql(
+    pdb_id: str,
+    session: requests.Session | None = None,
+) -> dict[str, Any] | None:
     """Execute the RCSB GraphQL query for *pdb_id*.
 
     Return the parsed response dict on success, None on HTTP/GraphQL error.
+    Uses a retry-enabled session (built on demand if none is passed) so a
+    transient 429/5xx on this entry-point download is retried just like every
+    downstream RCSB/enrichment call, instead of dropping the PDB on one blip.
     Includes a 1-second post-request sleep for rate limiting.
     """
+    sess = session or _build_session()
     payload = {"query": GRAPHQL_QUERY, "variables": {"id": pdb_id.upper()}}
     headers = {"Content-Type": "application/json"}
 
     try:
-        response = requests.post(
+        response = sess.post(
             RCSB_GRAPHQL_URL,
             json=payload,
             headers=headers,
@@ -562,10 +575,17 @@ def _query_graphql(pdb_id: str) -> dict[str, Any] | None:
         response.raise_for_status()
         data: dict[str, Any] = response.json()
 
-        if data.get("errors"):
-            error_msg = data["errors"][0].get("message") or "Unknown GraphQL error"
-            logger.error("[%s] GraphQL error: %s", pdb_id, error_msg)
-            return None
+        # A GraphQL error with no usable entry is a hard failure. But RCSB can
+        # return HTTP 200 with BOTH a populated entry AND a non-fatal errors[]
+        # (partial data); keep the entry in that case rather than discarding a
+        # perfectly usable structure.
+        errors = data.get("errors")
+        if errors:
+            error_msg = errors[0].get("message") or "Unknown GraphQL error"
+            if (data.get("data") or {}).get("entry") is None:
+                logger.error("[%s] GraphQL error: %s", pdb_id, error_msg)
+                return None
+            logger.warning("[%s] GraphQL returned partial data with errors: %s", pdb_id, error_msg)
 
         return data
     except requests.exceptions.RequestException as exc:

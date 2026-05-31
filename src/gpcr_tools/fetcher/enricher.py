@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 from typing import Any
 
 import requests
@@ -132,11 +134,18 @@ def enrich_single_pdb(
     # 3. Sibling PDB discovery
     _enrich_siblings(pdb_data, pdb_id, sess, doi_cache)
 
-    # Write enriched output
+    # Write enriched output atomically. The existence-based resume skip treats
+    # enriched/{id}.json as a completed checkpoint, so a half-written file from
+    # an interrupted run must never be left behind — a later run would trust it
+    # and the annotate stage's json.load would choke on the truncated JSON.
     try:
         cfg.enriched_dir.mkdir(parents=True, exist_ok=True)
-        with open(enriched_path, "w", encoding="utf-8") as f:
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=cfg.enriched_dir, suffix=".tmp", delete=False
+        ) as f:
             json.dump(pdb_data, f, indent=2, ensure_ascii=False)
+            tmp_name = f.name
+        os.replace(tmp_name, enriched_path)
     except OSError as exc:
         logger.error("[%s] Failed to write enriched JSON: %s", pdb_id, exc)
         return False
