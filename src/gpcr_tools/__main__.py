@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 
 
 def cli() -> None:
+    # Surface our own INFO progress (pipeline stages, fetch/annotate/aggregate)
+    # while keeping third-party libraries quiet. Without this, logging defaults
+    # to WARNING and all progress messages are swallowed.
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
+    logging.getLogger("gpcr_tools").setLevel(logging.INFO)
+
     parser = argparse.ArgumentParser(
         prog="gpcr-tools",
         description="GPCR Annotation Tools — Human-in-the-loop curation suite.",
