@@ -203,15 +203,14 @@ class TestTransformForCSV:
         assert gp_row["Beta_label_asym_id"] == "D"  # chain C → D
         assert gp_row["Gamma_label_asym_id"] == "B"  # chain E → B
 
-    def test_ligand_label_asym_id(self, sample_oligomer_data):
-        """Ligand chain IDs are mapped via label_asym_id_map."""
+    def test_ligands_not_polymer_mapped(self, sample_oligomer_data):
+        """A ligand's label_asym_id never comes from the polymer chain map; with
+        no nonpolymer instance index the column is blank (not a protein chain)."""
         result = transform_for_csv("OLIGO1", sample_oligomer_data)
         lig_rows = result["ligands.csv"]
         assert len(lig_rows) == 2
-        # First ligand chain A → A (identity)
-        assert lig_rows[0]["label_asym_id"] == "A"
-        # Second ligand chain B → B (identity)
-        assert lig_rows[1]["label_asym_id"] == "B"
+        assert lig_rows[0]["label_asym_id"] == ""
+        assert lig_rows[1]["label_asym_id"] == ""
 
 
 def _mock_config_with_csv_dir(csv_dir):
@@ -403,9 +402,9 @@ class TestGhostLigandExport:
 
 
 class TestLigandLabelAsymId:
-    """A single-copy small molecule gets its own mmCIF instance label; the
-    polymer chain map (which does not cover non-polymer ligands) is only a
-    fallback for multi-copy or unindexed ligands."""
+    """A ligand's label_asym_id is its OWN mmCIF instance label(s): one copy ->
+    its label, several -> comma-joined, unindexed -> blank. The polymer chain
+    map (protein chains only) is never used for a non-polymer ligand."""
 
     def _ligand(self, **extra):
         base = {
@@ -420,19 +419,19 @@ class TestLigandLabelAsymId:
 
     def test_single_instance_uses_true_instance_label(self, sample_pdb_data):
         sample_pdb_data["oligomer_analysis"] = {
-            "label_asym_id_map": {},
+            "label_asym_id_map": {"A": "Z"},  # the polymer map would wrongly give 'Z'
             "nonpolymer_instance_index": {
                 "SOG": [{"auth_asym_id": "A", "label_asym_id": "F", "auth_seq_id": "501"}]
             },
         }
         sample_pdb_data["ligands"] = [self._ligand()]
         row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
-        # 'F' is the ligand's own label, not its author chain 'A'.
+        # 'F' is the ligand's own label, not its author chain 'A' nor polymer 'Z'.
         assert row["label_asym_id"] == "F"
 
-    def test_multi_instance_falls_back(self, sample_pdb_data):
+    def test_multi_instance_joins_labels(self, sample_pdb_data):
         sample_pdb_data["oligomer_analysis"] = {
-            "label_asym_id_map": {},
+            "label_asym_id_map": {"A": "Z"},  # polymer map would wrongly give 'Z'
             "nonpolymer_instance_index": {
                 "SOG": [
                     {"auth_asym_id": "A", "label_asym_id": "F", "auth_seq_id": "501"},
@@ -442,14 +441,15 @@ class TestLigandLabelAsymId:
         }
         sample_pdb_data["ligands"] = [self._ligand()]
         row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
-        # Two copies -> representative selection deferred -> fall back (chain 'A').
-        assert row["label_asym_id"] == "A"
+        # Both copies' own labels, never the receptor polymer label 'Z'.
+        assert row["label_asym_id"] == "F, G"
 
-    def test_no_index_falls_back(self, sample_pdb_data):
-        sample_pdb_data["oligomer_analysis"] = {"label_asym_id_map": {}}
+    def test_unindexed_ligand_has_blank_label(self, sample_pdb_data):
+        sample_pdb_data["oligomer_analysis"] = {"label_asym_id_map": {"A": "Z"}}
         sample_pdb_data["ligands"] = [self._ligand()]
         row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
-        assert row["label_asym_id"] == "A"
+        # No instance index -> blank, NOT the receptor's polymer label 'Z'.
+        assert row["label_asym_id"] == ""
 
 
 def test_transform_skips_non_dict_ligand():
@@ -458,6 +458,20 @@ def test_transform_skips_non_dict_ligand():
     result = transform_for_csv("X1", data)  # must not raise
     # The bogus string is skipped; the one valid ligand still produces a row.
     assert len(result["ligands.csv"]) == 1
+
+
+def test_pubchem_none_sentinel_blanked():
+    """The schema's literal "None" pubchem_id must become a blank PubChemID
+    column, not the string 'None'; a real CID is preserved."""
+    data = {
+        "ligands": [
+            {"name": "A", "chem_comp_id": "ATP", "chain_id": "A", "pubchem_id": "None"},
+            {"name": "B", "chem_comp_id": "GDP", "chain_id": "B", "pubchem_id": "271"},
+        ]
+    }
+    rows = transform_for_csv("X1", data)["ligands.csv"]
+    assert rows[0]["PubChemID"] == ""
+    assert rows[1]["PubChemID"] == "271"
 
 
 def test_append_to_csvs_upserts_by_pdb(configure_paths):

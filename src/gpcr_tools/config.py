@@ -514,6 +514,14 @@ TM_STATUS_INCOMPLETE: str = "INCOMPLETE_7TM"
 
 TM_COVERAGE_THRESHOLD: float = 0.50
 
+# A chain counts as a 7TM GPCR protomer (for oligomer classification + the
+# missed-protomer check) only if its UniProt annotation carries at least this
+# many TM helices. Single-pass (1) / few-pass partners and soluble chains that
+# RCSB/GPCRdb mis-mapped to a GPCR slug are excluded, so they don't inflate
+# HETEROMER or trigger a false MISSED_PROTOMER (they remain in auxiliary_proteins
+# and are still surfaced by the SUSPICIOUS_7TM alert).
+GPCR_MIN_ANNOTATED_TM: int = 4
+
 TM_ENTITY_FEATURE_TYPES: frozenset[str] = frozenset(
     {
         "TRANSMEMBRANE",

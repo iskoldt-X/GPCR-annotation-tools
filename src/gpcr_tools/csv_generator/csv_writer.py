@@ -13,6 +13,7 @@ from gpcr_tools.config import (
     CSV_SCHEMA,
     VALIDATION_GHOST_LIGAND,
     get_config,
+    is_empty_key,
 )
 
 
@@ -94,24 +95,32 @@ def transform_for_csv(pdb_id: str, data: dict) -> dict[str, list[dict[str, str]]
             continue
         smiles = lig.get("SMILES_stereo") or lig.get("SMILES") or ""
         lig_chain = sanitize_value(lig.get("chain_id"))
-        # Prefer the small molecule's own instance identifier when exactly one
-        # copy is modelled.  The polymer chain map does not cover non-polymer
-        # ligands, so without this they fall through to a protein chain id.  When
-        # several copies are modelled the single-row representation is deferred,
-        # so fall back rather than pick an arbitrary copy.
+        # A non-polymer ligand's label_asym_id is its OWN mmCIF instance label(s).
+        # Never route it through the polymer label_asym_id_map (which covers
+        # protein chains only) — mapping the ligand's auth chain through that map
+        # stamps the receptor's chain label onto the ligand row. One modelled
+        # copy -> its label; several -> all of them, comma-joined (mirroring the
+        # ChainID column). Unindexed ligand -> blank (no protein-chain fallback).
         comp_id = sanitize_value(lig.get("chem_comp_id"))
         instances = nonpolymer_instances.get(comp_id) if comp_id else None
-        if instances and len(instances) == 1:
-            lig_label = sanitize_value(instances[0].get("label_asym_id"))
+        if instances:
+            lig_label = ", ".join(
+                sanitize_value(i.get("label_asym_id")) for i in instances if i.get("label_asym_id")
+            )
         else:
-            lig_label = map_label_asym_id(lig_chain, label_map)
+            lig_label = ""
         rows_map["ligands.csv"].append(
             {
                 "PDB": pdb_id,
                 "ChainID": lig_chain,
                 "label_asym_id": lig_label,
                 "Name": sanitize_value(lig.get("name")),
-                "PubChemID": sanitize_value(lig.get("pubchem_id")),
+                # The schema tells the model to emit the string "None" when there
+                # is no PubChem id; normalize that sentinel to empty rather than
+                # writing a literal "None" into the numeric column.
+                "PubChemID": ""
+                if is_empty_key(lig.get("pubchem_id"))
+                else sanitize_value(lig.get("pubchem_id")),
                 "Role": sanitize_value((lig.get("role") or {}).get("value")),
                 "Title": sanitize_value(lig.get("name")),
                 "Type": sanitize_value(lig.get("type")),
