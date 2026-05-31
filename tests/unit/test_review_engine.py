@@ -7,6 +7,7 @@ import pytest
 
 from gpcr_tools import config
 from gpcr_tools.csv_generator.review_engine import (
+    _list_item_path,
     _resolve_list_key_field,
     get_verified_paths,
     has_downstream_controversy,
@@ -32,6 +33,32 @@ class TestListKeyFieldResolution:
 
     def test_none_for_unknown_path(self):
         assert _resolve_list_key_field("root.unknown.child") is None
+
+
+class TestListItemPathMatchesAggregatorIdentity:
+    """The review navigation path for a list item must equal the identity vote
+    aggregation stored its controversy/flag under — otherwise the curator never
+    sees contested keyless calls (protein/Apo ligands with chem_comp_id="None").
+    """
+
+    def test_keyless_ligand_path_matches_aggregator(self):
+        # chem_comp_id="None" is the placeholder the schema injects for protein
+        # and Apo ligands — the routine GPCR case, not an edge case.
+        item = {"chem_comp_id": "None", "name": "GLP-1"}
+        review_path = _list_item_path("ligands", item, "chem_comp_id", 0)
+        agg_path = f"ligands[{config.list_item_identity(item, 'chem_comp_id', 0)}]"
+        assert review_path == agg_path
+        assert review_path == "ligands[__keyless__:GLP-1]"
+
+    def test_real_key_path_unchanged(self):
+        item = {"chem_comp_id": "ATP", "name": "x"}
+        assert _list_item_path("ligands", item, "chem_comp_id", 0) == "ligands[ATP]"
+
+    def test_non_dict_item_uses_index(self):
+        assert (
+            _list_item_path("ligands[X].synonyms", "a-string", "chem_comp_id", 2)
+            == "ligands[X].synonyms[2]"
+        )
 
 
 class TestHasDownstreamControversy:

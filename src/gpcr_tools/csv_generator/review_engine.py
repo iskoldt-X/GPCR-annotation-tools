@@ -22,6 +22,7 @@ from gpcr_tools.config import (
     LIST_ITEM_KEY_FIELDS,
     TOPLEVEL_BLOCK_KEYS,
     VALIDATION_GHOST_LIGAND,
+    list_item_identity,
 )
 from gpcr_tools.csv_generator.audit import log_audit_trail
 from gpcr_tools.csv_generator.ui import (
@@ -45,6 +46,20 @@ def _resolve_list_key_field(path: str) -> str | None:
         if segment in path:
             return field
     return None
+
+
+def _list_item_path(path: str, item: Any, key_field: str | None, idx: int) -> str:
+    """Navigation path for one list item — addressed exactly the way vote
+    aggregation stored its controversies/flags, so review can match them.
+
+    Uses the shared ``list_item_identity`` (not the raw key field) so a keyless
+    item — a protein/Apo ligand with ``chem_comp_id="None"`` — resolves to the
+    same ``[__keyless__:<name>]`` path the aggregator recorded, instead of a
+    bare ``[None]`` that would never match and silently hide the controversy.
+    """
+    if key_field and isinstance(item, dict):
+        return f"{path}[{list_item_identity(item, key_field, idx)}]"
+    return f"{path}[{idx}]"
 
 
 def _confidence_style(confidence: Any) -> str:
@@ -507,11 +522,7 @@ def review_node(
         new_list = []
         key_field = _resolve_list_key_field(path)
         for idx, item in enumerate(d_node):
-            curr_path = (
-                f"{path}[{item.get(key_field, idx)}]"
-                if key_field and isinstance(item, dict)
-                else f"{path}[{idx}]"
-            )
+            curr_path = _list_item_path(path, item, key_field, idx)
             res = review_node(
                 pdb_id,
                 item,

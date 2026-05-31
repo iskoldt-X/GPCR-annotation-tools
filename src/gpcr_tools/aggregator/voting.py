@@ -11,11 +11,13 @@ from collections import Counter, defaultdict
 from typing import Any
 
 from gpcr_tools.config import (
-    EMPTY_VALUES,
     GROUND_TRUTH_PATHS,
     LIST_ITEM_KEY_FIELDS,
     SOFT_FIELD_KEYS,
     VOTE_NEAR_TIE_MARGIN,
+)
+from gpcr_tools.config import (
+    list_item_identity as _list_item_identity,
 )
 
 # ---------------------------------------------------------------------------
@@ -61,36 +63,6 @@ def _resolve_key_field(path: str) -> str | None:
         if segment in path:
             return key_field
     return None
-
-
-def _is_empty_key(value: Any) -> bool:
-    """True if *value* cannot serve as a grouping key.
-
-    Guards against the placeholder strings the schema injects for keyless
-    items (protein / Apo ligands get ``chem_comp_id="None"``) and blanks — see
-    ``config.EMPTY_VALUES``.  Without this, ``"None"`` is truthy and every
-    protein ligand would collapse into a single bogus ``"None"`` group.
-    """
-    if value is None:
-        return True
-    if isinstance(value, str):
-        return value.strip().lower() in EMPTY_VALUES
-    return not value
-
-
-def _list_item_identity(item: dict[str, Any], key_field: str, idx: int) -> str:
-    """Stable grouping identity for a list item — the key field when usable,
-    else a namespaced fallback (name -> type -> index).
-
-    Shared by ``get_majority_votes`` and ``find_discrepancies`` so both group
-    the same items the same way; otherwise placeholder keys like ``"None"``
-    cross-wire distinct entities during discrepancy detection.
-    """
-    group_key = item.get(key_field)
-    if not _is_empty_key(group_key):
-        return str(group_key)
-    fallback_id = item.get("name") or item.get("type") or f"idx{idx}"
-    return f"__keyless__:{fallback_id}"
 
 
 def get_majority_votes(
