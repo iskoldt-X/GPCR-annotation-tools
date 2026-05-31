@@ -518,9 +518,7 @@ def fetch_single_pdb(pdb_id: str, *, force: bool = False) -> dict[str, Any] | No
     # (no GraphQL error). Treat that as "not found" rather than writing a
     # hollow record that would later pass as a successfully fetched structure.
     if (data.get("data") or {}).get("entry") is None:
-        logger.warning(
-            "[%s] No such entry in RCSB (typo or withdrawn ID?) — skipping", pdb_id
-        )
+        logger.warning("[%s] No such entry in RCSB (typo or withdrawn ID?) — skipping", pdb_id)
         return None
 
     cfg.raw_pdb_json_dir.mkdir(parents=True, exist_ok=True)
