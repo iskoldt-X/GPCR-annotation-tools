@@ -52,7 +52,7 @@ def _registry_fresh_uri(entry: Any, now: datetime) -> str | None:
             except ValueError:
                 return None
             if age < timedelta(hours=GEMINI_FILE_TTL_HOURS):
-                return uri
+                return str(uri)
     return None
 
 
@@ -450,9 +450,10 @@ def recover_batch() -> None:
         ):
             if prov_file.exists():
                 try:
-                    return json.loads(prov_file.read_text())
+                    loaded = json.loads(prov_file.read_text())
                 except (json.JSONDecodeError, OSError):
                     return {}
+                return loaded if isinstance(loaded, dict) else {}
         return {}
 
     for raw_file in runs_dir.glob("raw_output_*.jsonl"):
