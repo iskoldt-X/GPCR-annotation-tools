@@ -288,14 +288,6 @@ def build_and_submit_batch(
 
     # Write JSONL
     os.makedirs(config.pipeline_runs_dir, exist_ok=True)
-    # Record submission provenance so recover_batch can stamp each result with
-    # the model and prompt it came from (the batch response carries only the
-    # served model version).
-    batch_prov_file = config.pipeline_runs_dir / "_batch_provenance.json"
-    tmp_prov = batch_prov_file.with_suffix(".tmp")
-    with open(tmp_prov, "w") as f:
-        json.dump({"model_requested": model_name, "prompt": prompt_id}, f, indent=2)
-    os.replace(tmp_prov, batch_prov_file)
     with tempfile.NamedTemporaryFile("w", delete=False, suffix=".jsonl") as f:
         for req in requests:
             f.write(json.dumps(req) + "\n")
@@ -321,6 +313,18 @@ def build_and_submit_batch(
         with open(tmp_job_file, "w") as f:
             f.write(batch_job.name)
         os.replace(tmp_job_file, config.current_batch_job_file)
+
+        # Record this job's provenance under a filename keyed to the job, so
+        # recover_batch can stamp each result with the model/prompt of the job
+        # that actually produced it. A single shared file would be overwritten
+        # by the next submission and re-attribute an earlier job's results to
+        # the wrong model (and the wrong per-model output directory).
+        safe_name = batch_job.name.replace("/", "_")
+        batch_prov_file = config.pipeline_runs_dir / f"_batch_provenance_{safe_name}.json"
+        tmp_prov = batch_prov_file.with_suffix(".tmp")
+        with open(tmp_prov, "w") as f:
+            json.dump({"model_requested": model_name, "prompt": prompt_id}, f, indent=2)
+        os.replace(tmp_prov, batch_prov_file)
 
     finally:
         if tmp_jsonl.exists():
@@ -403,15 +407,26 @@ def recover_batch() -> None:
         logger.info("No pipeline runs directory found.")
         return
 
-    batch_meta: dict = {}
-    prov_file = runs_dir / "_batch_provenance.json"
-    if prov_file.exists():
-        try:
-            batch_meta = json.loads(prov_file.read_text())
-        except (json.JSONDecodeError, OSError):
-            batch_meta = {}
+    def _load_provenance(raw_file: Path) -> dict:
+        # Match each raw output to its own job's provenance
+        # (raw_output_<job>.jsonl -> _batch_provenance_<job>.json), falling back
+        # to the legacy shared file for outputs downloaded before per-job
+        # provenance existed. Without the per-job match, a stale raw file from
+        # an earlier job would be stamped with a later job's model.
+        job_suffix = raw_file.stem.removeprefix("raw_output_")
+        for prov_file in (
+            runs_dir / f"_batch_provenance_{job_suffix}.json",
+            runs_dir / "_batch_provenance.json",
+        ):
+            if prov_file.exists():
+                try:
+                    return json.loads(prov_file.read_text())
+                except (json.JSONDecodeError, OSError):
+                    return {}
+        return {}
 
     for raw_file in runs_dir.glob("raw_output_*.jsonl"):
+        batch_meta = _load_provenance(raw_file)
         logger.info("Processing %s...", raw_file.name)
         with open(raw_file) as f:
             for line_no, line in enumerate(f, 1):
