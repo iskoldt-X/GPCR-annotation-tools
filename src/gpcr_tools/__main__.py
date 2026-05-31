@@ -231,6 +231,21 @@ def cli() -> None:
         help="Skip UniProt/PubChem/chimera validation in the aggregate stage.",
     )
 
+    # report -----------------------------------------------------------
+    report_parser = subparsers.add_parser(
+        "report",
+        help="Print an operational report over pipeline outputs.",
+    )
+    report_parser.add_argument(
+        "kind",
+        choices=["pdf-coverage", "full-audit", "tail-analysis"],
+        help=(
+            "pdf-coverage: paper-PDF outcomes; "
+            "full-audit: validation warnings + chimera conflicts across PDBs; "
+            "tail-analysis: G-protein chimera score distribution."
+        ),
+    )
+
     args = parser.parse_args()
 
     if args.command == "init-workspace":
@@ -338,6 +353,16 @@ def cli() -> None:
             skip_fetch_papers=args.skip_fetch_papers,
             skip_api_checks=args.skip_api_checks,
         )
+
+    elif args.command == "report":
+        from gpcr_tools import reports
+
+        report_funcs = {
+            "pdf-coverage": reports.report_pdf_coverage,
+            "full-audit": reports.report_full_audit,
+            "tail-analysis": reports.report_tail_analysis,
+        }
+        print(report_funcs[args.kind]())
 
     elif args.command is None:
         parser.print_help()
