@@ -315,11 +315,15 @@ def _get_pubchem_cid(
                     pubchem_id = str(cids[0])
                 elif isinstance(cids, int | float):
                     pubchem_id = str(int(cids))
+            # Cache only a confirmed (HTTP 200) answer. A transient failure or
+            # non-200 must NOT be cached: the cache is keyed by InChIKey (not
+            # PDB), shared across runs and not cleared by --force, so a cached
+            # negative from one blip would suppress this ligand forever.
+            if cache:
+                cache.set(inchikey, pubchem_id)
     except requests.exceptions.RequestException as exc:
         logger.error("PubChem CID lookup failed for %s: %s", inchikey, exc)
 
-    if cache:
-        cache.set(inchikey, pubchem_id)
     return pubchem_id
 
 
@@ -341,11 +345,12 @@ def _get_pubchem_synonyms(
             data = response.json()
             info_list = (data.get("InformationList") or {}).get("Information") or []
             synonyms = info_list[0].get("Synonym") or [] if info_list else []
+            # Cache only a confirmed (HTTP 200) answer — see _get_pubchem_cid.
+            if cache:
+                cache.set(cid, synonyms)
     except requests.exceptions.RequestException as exc:
         logger.error("PubChem synonyms lookup failed for CID %s: %s", cid, exc)
 
-    if cache:
-        cache.set(cid, synonyms)
     return synonyms
 
 
@@ -369,11 +374,12 @@ def _fetch_chem_comp_descriptors(
         if resp.status_code == 200:
             data = resp.json().get("data") or {}
             result = (data.get("chem_comp") or {}).get("rcsb_chem_comp_descriptor") or {}
+            # Cache only a confirmed (HTTP 200) answer — see _get_pubchem_cid.
+            if cache:
+                cache.set(comp_id, result)
     except requests.exceptions.RequestException as exc:
         logger.error("RCSB chem_comp query failed for %s: %s", comp_id, exc)
 
-    if cache:
-        cache.set(comp_id, result)
     return result if result else None
 
 

@@ -8,11 +8,15 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 from gpcr_tools.fetcher.enricher import (
     _determine_ligand_type,
     _enrich_siblings,
     _enrich_uniprot,
+    _fetch_chem_comp_descriptors,
+    _get_pubchem_cid,
+    _get_pubchem_synonyms,
     enrich_single_pdb,
 )
 
@@ -209,3 +213,58 @@ class TestEnrichSinglePdb:
 
         data = json.loads(enriched_path.read_text())
         assert data["data"]["entry"]["rcsb_id"] == "7W55"
+
+
+class TestEnrichmentCacheNotPoisoned:
+    """A transient lookup failure must never be written to the shared cache —
+    the cache is keyed by InChIKey/CID/comp_id (not PDB), persists across runs,
+    and is not cleared by --force, so a cached negative from one network blip
+    would suppress that ligand's enrichment for every future run.
+    """
+
+    @staticmethod
+    def _resp(status, payload=None):
+        r = MagicMock()
+        r.status_code = status
+        r.json.return_value = payload or {}
+        return r
+
+    def test_cid_transient_failure_not_cached(self):
+        cache = MagicMock()
+        cache.has.return_value = False
+        session = MagicMock()
+        session.get.side_effect = requests.exceptions.ConnectionError("boom")
+        assert _get_pubchem_cid("KEY", session, cache) is None
+        cache.set.assert_not_called()
+
+    def test_cid_non_200_not_cached(self):
+        cache = MagicMock()
+        cache.has.return_value = False
+        session = MagicMock()
+        session.get.return_value = self._resp(503)
+        assert _get_pubchem_cid("KEY", session, cache) is None
+        cache.set.assert_not_called()
+
+    def test_cid_200_is_cached(self):
+        cache = MagicMock()
+        cache.has.return_value = False
+        session = MagicMock()
+        session.get.return_value = self._resp(200, {"IdentifierList": {"CID": [271]}})
+        assert _get_pubchem_cid("KEY", session, cache) == "271"
+        cache.set.assert_called_once_with("KEY", "271")
+
+    def test_synonyms_transient_failure_not_cached(self):
+        cache = MagicMock()
+        cache.has.return_value = False
+        session = MagicMock()
+        session.get.side_effect = requests.exceptions.ReadTimeout("slow")
+        assert _get_pubchem_synonyms("271", session, cache) is None
+        cache.set.assert_not_called()
+
+    def test_chem_comp_transient_failure_not_cached(self):
+        cache = MagicMock()
+        cache.has.return_value = False
+        session = MagicMock()
+        session.post.side_effect = requests.exceptions.ConnectionError("boom")
+        assert _fetch_chem_comp_descriptors("ATP", session, cache) is None
+        cache.set.assert_not_called()
