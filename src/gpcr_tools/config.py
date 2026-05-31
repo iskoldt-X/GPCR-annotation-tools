@@ -130,6 +130,10 @@ GEMINI_MAX_RETRIES: int = 5
 GEMINI_BASE_BACKOFF: int = 10
 GEMINI_DEFAULT_RUNS: int = 10
 GEMINI_MAX_WORKERS: int = 10
+# Files uploaded to the Gemini Files API expire (~48h). A cached upload URI in
+# the batch registry older than this must be treated as gone and re-uploaded,
+# so a re-submission after a long-failed batch doesn't embed a dead fileUri.
+GEMINI_FILE_TTL_HOURS: int = 47
 
 # ---------------------------------------------------------------------------
 # Watcher polling configuration
