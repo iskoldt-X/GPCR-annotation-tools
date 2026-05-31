@@ -450,3 +450,35 @@ class TestLigandLabelAsymId:
         sample_pdb_data["ligands"] = [self._ligand()]
         row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
         assert row["label_asym_id"] == "A"
+
+
+def test_transform_skips_non_dict_ligand():
+    """A non-dict ligand entry must be skipped, not crash the whole transform."""
+    data = {"ligands": ["bogus-string", {"chem_comp_id": "ATP", "chain_id": "A"}]}
+    result = transform_for_csv("X1", data)  # must not raise
+    # The bogus string is skipped; the one valid ligand still produces a row.
+    assert len(result["ligands.csv"]) == 1
+
+
+def test_append_to_csvs_upserts_by_pdb(configure_paths):
+    """Re-curating a PDB replaces its rows instead of appending duplicates;
+    other PDBs are preserved."""
+    from gpcr_tools.config import CSV_SCHEMA, get_config
+
+    fields = CSV_SCHEMA["structures.csv"]
+    pdb_col = fields[0]
+
+    def _row(pdb: str) -> dict[str, str]:
+        return {f: (pdb if f == pdb_col else "x") for f in fields}
+
+    def _read() -> list[dict[str, str]]:
+        path = get_config().csv_output_dir / "structures.csv"
+        with open(path, encoding="utf-8") as f:
+            return list(csv.DictReader(f, delimiter="\t"))
+
+    append_to_csvs({"structures.csv": [_row("AAA")]})
+    append_to_csvs({"structures.csv": [_row("AAA")]})  # re-curate same PDB
+    assert sum(1 for r in _read() if r[pdb_col] == "AAA") == 1
+
+    append_to_csvs({"structures.csv": [_row("BBB")]})  # a different PDB
+    assert {r[pdb_col] for r in _read()} == {"AAA", "BBB"}

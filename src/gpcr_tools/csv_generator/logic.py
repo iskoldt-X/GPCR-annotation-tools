@@ -43,6 +43,8 @@ def collect_ligand_chains(ligands: list[dict]) -> set[str]:
     """
     chains: set[str] = set()
     for lig in ligands:
+        if not isinstance(lig, dict):
+            continue
         lc = lig.get("chain_id") or ""
         if isinstance(lc, str) and lc.strip() and lc.lower() not in ("none", "null", "n/a"):
             for part in lc.split(","):

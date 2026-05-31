@@ -5,6 +5,7 @@ Converts reviewed JSON data into tabular CSV rows and appends them to disk.
 """
 
 import csv
+import os
 from typing import Any
 
 from gpcr_tools.config import (
@@ -80,15 +81,15 @@ def transform_for_csv(pdb_id: str, data: dict) -> dict[str, list[dict[str, str]]
 
     # ── ligands.csv ────────────────────────────────────────────────
     for lig in data.get("ligands") or []:
+        if not isinstance(lig, dict):
+            continue
         # Fail-safe: a ligand the validator could not find in the structure
         # (GHOST_LIGAND) is left out of the export unless a curator explicitly
         # confirmed it.  The model sometimes annotates a ligand the paper
         # discusses but that this deposition does not actually model; writing it
         # would record an interaction for a molecule absent from the structure.
-        if (
-            isinstance(lig, dict)
-            and lig.get("validation_status") == VALIDATION_GHOST_LIGAND
-            and not lig.get("curator_kept_ghost")
+        if lig.get("validation_status") == VALIDATION_GHOST_LIGAND and not lig.get(
+            "curator_kept_ghost"
         ):
             continue
         smiles = lig.get("SMILES_stereo") or lig.get("SMILES") or ""
@@ -211,9 +212,25 @@ def append_to_csvs(csv_data_map: dict[str, list[dict[str, str]]]) -> None:
             continue
         filepath = csv_dir / filename
         expected_fields = CSV_SCHEMA[filename]
-        exists = filepath.exists()
-        with open(filepath, "a", newline="", encoding="utf-8") as f:
+        pdb_col = expected_fields[0]  # first column is the PDB id in every schema
+        incoming_pdbs = {r.get(pdb_col) for r in rows}
+
+        # Upsert, not blind append: drop any existing rows for the same PDB(s)
+        # before writing, so re-curating a PDB replaces its rows instead of
+        # accumulating duplicate, conflicting entries. Rewrite atomically.
+        kept: list[dict[str, str]] = []
+        if filepath.exists():
+            with open(filepath, newline="", encoding="utf-8") as f:
+                kept = [
+                    row
+                    for row in csv.DictReader(f, delimiter="\t")
+                    if row.get(pdb_col) not in incoming_pdbs
+                ]
+
+        tmp_path = filepath.with_suffix(filepath.suffix + ".tmp")
+        with open(tmp_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=expected_fields, delimiter="\t")
-            if not exists:
-                writer.writeheader()
+            writer.writeheader()
+            writer.writerows(kept)
             writer.writerows(rows)
+        os.replace(tmp_path, filepath)
