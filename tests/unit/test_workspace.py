@@ -72,6 +72,13 @@ class TestInitWorkspace:
         for d in expected_dirs:
             assert (tmp_path / d).is_dir(), f"Missing directory: {d}"
 
+    def test_creates_default_markdown_prompt(self, tmp_path):
+        # The bundled default prompt is Markdown so it renders on GitHub.
+        init_workspace(tmp_path)
+        prompt = tmp_path / "prompts" / "v5.md"
+        assert prompt.is_file()
+        assert prompt.read_text(encoding="utf-8").strip()  # copied from the bundled prompt
+
     def test_idempotent(self, tmp_path):
         init_workspace(tmp_path)
         contract = tmp_path / "contract" / "storage_contract.json"
