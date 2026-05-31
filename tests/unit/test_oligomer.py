@@ -300,6 +300,13 @@ class TestSuggestPrimaryProtomer:
         assert result["chain_id"] == "A"
         assert result["rank_used"] == 4
 
+
+def test_map_uniprot_to_entity_skips_incomplete_region():
+    """An alignment region missing a coordinate field is skipped, not a KeyError
+    that would fail the whole PDB's oligomer analysis."""
+    regions = [{"ref_beg_seq_id": 1, "entity_beg_seq_id": 1}]  # no 'length'
+    assert map_uniprot_to_entity(1, 10, regions) == []
+
     def test_rank4_longest_sequence(self) -> None:
         roster = {
             "A": {"slug": "drd2_human", "length": 300, "asym_id": "A"},
