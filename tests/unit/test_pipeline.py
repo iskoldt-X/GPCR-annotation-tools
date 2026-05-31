@@ -71,3 +71,16 @@ def test_stops_when_no_enriched_data(cfg: Any, monkeypatch: pytest.MonkeyPatch) 
     _patch_stages(monkeypatch, calls)
     pipeline.run_pipeline()
     assert calls == ["fetch"]
+
+
+def test_dry_run_logs_the_plan(
+    cfg: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    calls: list[str] = []
+    _patch_stages(monkeypatch, calls)
+    with caplog.at_level(logging.INFO, logger="gpcr_tools.pipeline"):
+        pipeline.run_pipeline(dry_run=True)
+    assert "would run" in caplog.text  # the preview is emitted (not swallowed)
+    assert calls == []
