@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from types import MappingProxyType
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # API base URLs
@@ -311,6 +312,47 @@ APO_SENTINEL: str = "apo"
 # Ligand type classifiers
 LIGAND_TYPE_PEPTIDE: str = "peptide"
 LIGAND_TYPE_PROTEIN: str = "protein"
+
+
+# ---------------------------------------------------------------------------
+# List-item grouping identity
+# ---------------------------------------------------------------------------
+# Shared by vote aggregation and curator review so both address the same list
+# item by the same path. Keeping it here (not in either consumer) prevents the
+# two from drifting — if they disagree, keyless items (protein/Apo ligands with
+# chem_comp_id="None") get controversies stored under one path and looked up
+# under another, silently hiding them from human review.
+
+
+def is_empty_key(value: Any) -> bool:
+    """True if *value* cannot serve as a grouping key.
+
+    Guards against the placeholder strings the schema injects for keyless
+    items (protein / Apo ligands get ``chem_comp_id="None"``) and blanks — see
+    ``EMPTY_VALUES``.  Without this, ``"None"`` is truthy and every protein
+    ligand would collapse into a single bogus ``"None"`` group.
+    """
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in EMPTY_VALUES
+    return not value
+
+
+def list_item_identity(item: dict[str, Any], key_field: str, idx: int) -> str:
+    """Stable grouping identity for a list item — the key field when usable,
+    else a namespaced fallback (name -> type -> index).
+
+    Used everywhere a list item needs a path-addressable identity (vote
+    grouping, discrepancy detection, and curator-review navigation) so the
+    same item resolves to the same string in every stage.
+    """
+    group_key = item.get(key_field)
+    if not is_empty_key(group_key):
+        return str(group_key)
+    fallback_id = item.get("name") or item.get("type") or f"idx{idx}"
+    return f"__keyless__:{fallback_id}"
+
 
 # ---------------------------------------------------------------------------
 # Validation statuses (Ligand / Receptor)
