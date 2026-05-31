@@ -37,7 +37,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/dist/*.whl /tmp/
-RUN pip install --no-cache-dir /tmp/*.whl \
+# Install with the annotate + papers extras so the full pipeline works, not just
+# curate: google-genai for annotation, PyMuPDF/lxml for paper parsing. Without
+# them the runtime image can fetch and curate but cannot annotate or read PDFs.
+RUN pip install --no-cache-dir "$(ls /tmp/*.whl)[annotate,papers]" \
     && rm -rf /tmp/*.whl
 
 ENV GPCR_WORKSPACE=/workspace
