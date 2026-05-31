@@ -86,9 +86,14 @@ def map_uniprot_to_entity(
     """Map UniProt feature coordinates to entity coordinates via alignment regions."""
     mapped_segments: list[tuple[int, int]] = []
     for reg in alignments:
-        ref_start = reg["ref_beg_seq_id"]
-        ref_end = ref_start + reg["length"] - 1
-        ent_start = reg["entity_beg_seq_id"]
+        ref_start = reg.get("ref_beg_seq_id")
+        length = reg.get("length")
+        ent_start = reg.get("entity_beg_seq_id")
+        # RCSB can omit/null these coordinate fields; skip the region rather
+        # than raise (which would fail the whole PDB's oligomer analysis).
+        if ref_start is None or length is None or ent_start is None:
+            continue
+        ref_end = ref_start + length - 1
 
         overlap_start = max(u_start, ref_start)
         overlap_end = min(u_end, ref_end)
@@ -118,7 +123,9 @@ def _analyze_tm_for_entity_instance(
     for f in entity.get("rcsb_polymer_entity_feature") or []:
         if (f.get("type") or "").upper() in TM_ENTITY_FEATURE_TYPES:
             for pos in f.get("feature_positions") or []:
-                tm_regions.append((pos["beg_seq_id"], pos["end_seq_id"]))
+                beg, end = pos.get("beg_seq_id"), pos.get("end_seq_id")
+                if beg is not None and end is not None:
+                    tm_regions.append((beg, end))
 
     # Strategy 2: fallback to UniProt features mapped through alignments
     if not tm_regions:
@@ -140,10 +147,10 @@ def _analyze_tm_for_entity_instance(
                     if "TRANSMEMBRANE" not in desc and "MEMBRANE" not in desc:
                         continue
                 for pos in f.get("feature_positions") or []:
-                    mapped = map_uniprot_to_entity(
-                        pos["beg_seq_id"], pos["end_seq_id"], u_alignments
-                    )
-                    tm_regions.extend(mapped)
+                    beg, end = pos.get("beg_seq_id"), pos.get("end_seq_id")
+                    if beg is None or end is None:
+                        continue
+                    tm_regions.extend(map_uniprot_to_entity(beg, end, u_alignments))
 
     if not tm_regions:
         return {"resolved_tms": 0, "total_tms": 0, "status": TM_STATUS_UNKNOWN}
@@ -153,7 +160,9 @@ def _analyze_tm_for_entity_instance(
     for f in instance.get("rcsb_polymer_instance_feature") or []:
         if f.get("type") in ("UNOBSERVED_RESIDUE_XYZ", "UNMODELED"):
             for pos in f.get("feature_positions") or []:
-                unmodeled_regions.append((pos["beg_seq_id"], pos["end_seq_id"]))
+                beg, end = pos.get("beg_seq_id"), pos.get("end_seq_id")
+                if beg is not None and end is not None:
+                    unmodeled_regions.append((beg, end))
 
     unmodeled_regions.sort(key=lambda x: x[0])
     merged_unmodeled: list[tuple[int, int]] = []

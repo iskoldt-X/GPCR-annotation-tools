@@ -82,3 +82,23 @@ class TestTailAnalysis:
         assert "Flagged for review (non-success or score < 4): 2" in out
         assert "BBB" in out
         assert "CCC" in out
+
+
+def test_pdf_coverage_handles_non_dict_log(cfg: Any) -> None:
+    """A corrupt-but-parseable (non-dict) download log must not crash the report."""
+    _write_download_log(cfg, ["not", "a", "dict"])
+    assert "no download log" in reports.report_pdf_coverage()  # degrades, no crash
+
+
+def test_pdf_coverage_none_status_renders_unknown(cfg: Any) -> None:
+    """A null status renders as 'unknown', not the literal string 'None'."""
+    _write_download_log(cfg, {"A": {"status": None}})
+    assert "unknown" in reports.report_pdf_coverage()
+
+
+def test_tail_analysis_accepts_float_score(cfg: Any) -> None:
+    """A float chimera score below 4 is shown and flagged, not silently ignored."""
+    _write_validation(cfg, "FLT", chimera_score=3.5, chimera_status="partial")
+    out = reports.report_tail_analysis()
+    assert "3.5" in out
+    assert "FLT" in out

@@ -26,6 +26,13 @@ def _read_json(path: Path) -> Any:
         return None
 
 
+def _read_json_dict(path: Path) -> dict[str, Any]:
+    """Read a JSON object, returning {} if the file is missing, unreadable, or
+    not a JSON object — a corrupt-but-parseable non-dict must not crash a report."""
+    data = _read_json(path)
+    return data if isinstance(data, dict) else {}
+
+
 def _validation_log_files() -> list[Path]:
     vdir = get_config().aggregated_dir / "validation_logs"
     return sorted(vdir.glob("*_validation.json")) if vdir.is_dir() else []
@@ -35,12 +42,12 @@ def report_pdf_coverage() -> str:
     """Summarise paper-PDF coverage from the download log: how many PDB entries
     landed in each outcome (downloaded, paywalled, no DOI, ...)."""
     cfg = get_config()
-    log = _read_json(cfg.download_log_file) or {}
+    log = _read_json_dict(cfg.download_log_file)
     entries = [e for e in log.values() if isinstance(e, dict)]
     if not entries:
         return "PDF coverage: no download log found (run 'fetch-papers' first)."
 
-    counts = Counter(e.get("status", "unknown") for e in entries)
+    counts = Counter(e.get("status") or "unknown" for e in entries)
     total = sum(counts.values())
     lines = [f"PDF coverage report ({total} PDB entr{'y' if total == 1 else 'ies'}):", ""]
     for status, n in counts.most_common():
@@ -61,7 +68,7 @@ def report_full_audit() -> str:
     chimera_status: Counter[str] = Counter()
     for f in files:
         pdb = f.name.removesuffix("_validation.json")
-        data = _read_json(f) or {}
+        data = _read_json_dict(f)
         chimera_status[data.get("chimera_status") or "unknown"] += 1
         if data.get("critical_warnings"):
             with_warnings.append(pdb)
@@ -97,13 +104,13 @@ def report_tail_analysis() -> str:
     flagged: list[tuple[str, Any]] = []
     for f in files:
         pdb = f.name.removesuffix("_validation.json")
-        data = _read_json(f) or {}
+        data = _read_json_dict(f)
         score = data.get("chimera_score")
         status = data.get("chimera_status") or "unknown"
         score_dist[score] += 1
         status_dist[status] += 1
         # A non-success status or an imperfect score is worth a curator's eye.
-        if status != "success" or (isinstance(score, int) and score < 4):
+        if status != "success" or (isinstance(score, (int, float)) and score < 4):
             flagged.append((pdb, score))
 
     lines = [
@@ -111,7 +118,7 @@ def report_tail_analysis() -> str:
         "",
         "  Score distribution:",
     ]
-    for score in sorted((s for s in score_dist if isinstance(s, int)), reverse=True):
+    for score in sorted((s for s in score_dist if isinstance(s, (int, float))), reverse=True):
         lines.append(f"    score {score}: {score_dist[score]}")
     if score_dist.get(None):
         lines.append(f"    score n/a: {score_dist[None]}")
