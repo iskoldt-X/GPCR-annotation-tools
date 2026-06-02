@@ -136,6 +136,22 @@ class TestGhostLigand:
         assert "Mystery" in warnings[0]
         assert _WARNING_REGEX.search(warnings[0]) is not None
 
+    def test_ghost_ligand_is_flagged_not_removed(self) -> None:
+        # The validator only flags; it never drops the entry. Deciding whether
+        # an unverified ligand reaches the export is left to the curator and the
+        # CSV writer, so the flagged ligand must survive validation intact.
+        data: dict[str, Any] = {
+            "ligands": [
+                {"chem_comp_id": "ATP", "name": "Adenosine"},
+                {"chem_comp_id": "XYZ", "name": "Fake Drug"},
+            ]
+        }
+        enriched = _make_enriched(nonpolymer=[_np_entity("ATP")])
+        validate_and_enrich_ligands("TEST", data, enriched)
+        assert len(data["ligands"]) == 2
+        assert data["ligands"][1]["name"] == "Fake Drug"
+        assert data["ligands"][1]["validation_status"] == VALIDATION_GHOST_LIGAND
+
 
 class TestBufferExclusion:
     def test_excluded_buffer(self) -> None:
@@ -162,6 +178,36 @@ class TestApoHandling:
         warnings = validate_and_enrich_ligands("TEST", data, enriched)
         assert warnings == []
         assert data["ligands"][0]["validation_status"] == VALIDATION_SKIPPED_APO
+
+    def test_warns_when_apo_coexists_with_real_ligand(self) -> None:
+        # An apo (ligand-free) placeholder alongside a real ligand is
+        # contradictory; surface it for the curator, do not silently edit.
+        data: dict[str, Any] = {
+            "ligands": [
+                {"name": "apo", "chem_comp_id": ""},
+                {"name": "ATP", "chem_comp_id": "ATP"},
+            ]
+        }
+        warnings = validate_and_enrich_ligands("TEST", data, _make_enriched())
+        assert any("apo" in w.lower() and "coexist" in w.lower() for w in warnings)
+        # warning-only: the apo entry must NOT be removed
+        assert len(data["ligands"]) == 2
+
+    def test_no_apo_coexistence_warning_for_pure_apo(self) -> None:
+        data: dict[str, Any] = {"ligands": [{"name": "apo", "chem_comp_id": ""}]}
+        warnings = validate_and_enrich_ligands("TEST", data, _make_enriched())
+        assert not any("coexist" in w.lower() for w in warnings)
+
+    def test_no_apo_coexistence_warning_with_only_buffer(self) -> None:
+        # Apo + an excluded buffer (glycerol) is normal, not contradictory.
+        data: dict[str, Any] = {
+            "ligands": [
+                {"name": "apo", "chem_comp_id": ""},
+                {"name": "glycerol", "chem_comp_id": "GOL"},
+            ]
+        }
+        warnings = validate_and_enrich_ligands("TEST", data, _make_enriched())
+        assert not any("coexist" in w.lower() for w in warnings)
 
 
 class TestNoneSafety:

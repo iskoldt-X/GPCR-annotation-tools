@@ -43,3 +43,14 @@ coverage.xml
 *.json
 !tests/fixtures/*.json
 !tests/fixtures/**/*.json
+
+# --- collaboration artifacts: live in the Obsidian vault HQ, never in the code repo ---
+/localdata/
+.github/instructions/codacy.instructions.md
+.agents/
+.claude/
+.gemini/
+agent_reviews/
+benchmark*
+CLAUDE.md
+GEMINI.md

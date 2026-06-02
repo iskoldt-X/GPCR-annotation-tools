@@ -184,7 +184,7 @@ Run Gemini AI annotation with structured output.
 gpcr-tools annotate                                    # Auto-discover pending PDBs
 gpcr-tools annotate 8TII --runs 5                      # Single PDB, 5 runs
 gpcr-tools annotate --model gemini-2.5-flash            # Use a different model
-gpcr-tools annotate --prompt prompts/custom.txt         # Custom prompt template
+gpcr-tools annotate --prompt prompts/custom.md          # Custom prompt template
 gpcr-tools annotate --batch                             # Submit via Batch API
 gpcr-tools annotate --check-batch                       # Poll batch status
 gpcr-tools annotate --recover                           # Re-process raw batch output
@@ -251,7 +251,7 @@ For non-standard workspace layouts (e.g., separate storage mounts), each subdire
 /workspace/
 ├── contract/storage_contract.json    # Versioned workspace contract
 ├── targets.txt                       # PDB IDs to process (one per line)
-├── prompts/v5.txt                    # Default annotation prompt template
+├── prompts/v5.md                     # Default annotation prompt template (Markdown)
 │
 ├── raw/pdb_json/                     # RCSB GraphQL responses
 ├── enriched/                         # Enriched PDB metadata (AI input)

@@ -141,6 +141,7 @@ ANNOTATION_TOOL = types.Tool(
                                                     "Inverse agonist",
                                                     "Agonist",
                                                     "Allosteric agonist",
+                                                    "Co-agonist",
                                                     "Agonist (partial)",
                                                 ],
                                             },

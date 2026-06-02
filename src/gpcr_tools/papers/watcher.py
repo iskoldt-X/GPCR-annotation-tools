@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from gpcr_tools.config import (
+    WATCHER_MAX_INGEST_ATTEMPTS,
     WATCHER_POLL_INTERVAL,
     WATCHER_STABILITY_CHECKS,
     WATCHER_STABILITY_INTERVAL,
@@ -83,6 +84,68 @@ def _wait_for_stability(path: Path) -> bool:
     return False
 
 
+def _ingest_if_ready(
+    pdf_path: Path,
+    pdb_id: str,
+    pending: dict[str, dict[str, Any]],
+    papers_dir: Path,
+) -> bool:
+    """If *pdf_path* is a stable, valid PDF, rename it to ``{pdb_id}.pdf`` and
+    log it as manually provided.
+
+    Returns True on success; False if the file is not yet stable or not a valid
+    PDF — in which case the caller must NOT permanently blacklist it (it may
+    still be downloading, or the user may re-drop a good copy), only retry later.
+    """
+    if not _wait_for_stability(pdf_path):
+        return False
+    if not _is_valid_pdf(pdf_path):
+        return False
+
+    canonical = papers_dir / f"{pdb_id}.pdf"
+    if pdf_path != canonical:
+        os.replace(str(pdf_path), str(canonical))
+
+    _update_download_log(
+        pdb_id,
+        {
+            "status": "manual_user_provided",
+            "source": "user_manual",
+            "file_path": str(canonical),
+            "doi": pending[pdb_id].get("doi"),
+            "pmid": pending[pdb_id].get("pmid"),
+            "pmcid": pending[pdb_id].get("pmcid"),
+            "timestamp": datetime.now(UTC).isoformat(),
+        },
+    )
+    return True
+
+
+def _scan_and_ingest(pending: dict[str, dict[str, Any]], papers_dir: Path) -> int:
+    """Match every PDF currently in *papers_dir* against *pending* and ingest
+    the ready ones, removing them from *pending* in place. Returns the count.
+
+    Run at startup (to pick up papers dropped before the watch began, or left
+    from a previous session) and again on a Ctrl-C exit, so a manually-provided
+    paper is never silently abandoned as ``skipped_no_paper``.
+    """
+    matched = 0
+    for pdf_path in sorted(papers_dir.iterdir()):
+        if pdf_path.suffix.lower() != ".pdf":
+            continue
+        pdb_id = _match_pdf_to_pdb(pdf_path, pending)
+        if pdb_id is None:
+            continue
+        if _ingest_if_ready(pdf_path, pdb_id, pending, papers_dir):
+            del pending[pdb_id]
+            matched += 1
+            print(
+                f"  ✅ {pdb_id}.pdf — matched and saved ({len(pending)} remaining)",
+                file=sys.stderr,
+            )
+    return matched
+
+
 def run_watcher(paywalled_entries: dict[str, dict[str, Any]]) -> int:
     """Watch ``papers/`` for new PDFs and match to paywalled entries.
 
@@ -96,88 +159,61 @@ def run_watcher(paywalled_entries: dict[str, dict[str, Any]]) -> int:
     if not pending:
         return 0
 
-    # Phase 1: Print instructions
-    _print_instructions(pending, papers_dir)
+    # Pick up papers already sitting in papers_dir before we start watching.
+    matched = _scan_and_ingest(pending, papers_dir)
 
-    matched = 0
-    known_files: set[str] = {f.name for f in papers_dir.iterdir() if f.suffix.lower() == ".pdf"}
+    if pending:
+        _print_instructions(pending, papers_dir)
+        # Re-examine matching files every poll instead of blacklisting them.
+        # attempts/last_size give a still-downloading or just-re-dropped file
+        # repeated chances; the count resets on any size change so only a
+        # genuinely stuck stable file is eventually given up on.
+        attempts: dict[str, int] = {}
+        last_size: dict[str, int] = {}
+        try:
+            while pending:
+                time.sleep(WATCHER_POLL_INTERVAL)
+                for pdf_path in sorted(papers_dir.iterdir()):
+                    if pdf_path.suffix.lower() != ".pdf":
+                        continue
+                    pdb_id = _match_pdf_to_pdb(pdf_path, pending)
+                    if pdb_id is None:
+                        continue
+                    try:
+                        size = pdf_path.stat().st_size
+                    except OSError:
+                        continue
+                    if last_size.get(pdf_path.name) != size:
+                        last_size[pdf_path.name] = size
+                        attempts[pdf_path.name] = 0
+                    if attempts[pdf_path.name] >= WATCHER_MAX_INGEST_ATTEMPTS:
+                        continue
+                    attempts[pdf_path.name] += 1
+                    if _ingest_if_ready(pdf_path, pdb_id, pending, papers_dir):
+                        del pending[pdb_id]
+                        matched += 1
+                        print(
+                            f"  ✅ {pdb_id}.pdf — matched and saved ({len(pending)} remaining)",
+                            file=sys.stderr,
+                        )
 
-    try:
-        while pending:
-            time.sleep(WATCHER_POLL_INTERVAL)
-            current_files = {f.name for f in papers_dir.iterdir() if f.suffix.lower() == ".pdf"}
-            new_files = current_files - known_files
-
-            for filename in sorted(new_files):
-                pdf_path = papers_dir / filename
-                pdb_id = _match_pdf_to_pdb(pdf_path, pending)
-
-                if pdb_id is None:
-                    # Can't match — skip this file
-                    logger.info(
-                        "New PDF %s doesn't match any pending PDB, ignoring",
-                        filename,
-                    )
-                    known_files.add(filename)
-                    continue
-
-                # Wait for file stability
-                if not _wait_for_stability(pdf_path):
-                    logger.warning("File %s not stable, skipping", filename)
-                    known_files.add(filename)
-                    continue
-
-                # Validate PDF
-                if not _is_valid_pdf(pdf_path):
-                    logger.warning("File %s is not a valid PDF, skipping", filename)
-                    known_files.add(filename)
-                    continue
-
-                # Rename to canonical form
-                canonical = papers_dir / f"{pdb_id}.pdf"
-                if pdf_path != canonical:
-                    os.replace(str(pdf_path), str(canonical))
-
-                # Update log
+        except KeyboardInterrupt:
+            # Before giving up, ingest anything that became ready at the last
+            # moment, then record only the truly-absent ones as skipped.
+            matched += _scan_and_ingest(pending, papers_dir)
+            for pdb_id, entry in pending.items():
                 _update_download_log(
                     pdb_id,
                     {
-                        "status": "manual_user_provided",
-                        "source": "user_manual",
-                        "file_path": str(canonical),
-                        "doi": pending[pdb_id].get("doi"),
-                        "pmid": pending[pdb_id].get("pmid"),
-                        "pmcid": pending[pdb_id].get("pmcid"),
+                        "status": "skipped_no_paper",
+                        "source": None,
+                        "file_path": None,
+                        "doi": entry.get("doi"),
+                        "pmid": entry.get("pmid"),
+                        "pmcid": entry.get("pmcid"),
                         "timestamp": datetime.now(UTC).isoformat(),
                     },
                 )
-
-                del pending[pdb_id]
-                matched += 1
-                remaining = len(pending)
-                print(
-                    f"  ✅ {pdb_id}.pdf — matched and saved ({remaining} remaining)",
-                    file=sys.stderr,
-                )
-
-                known_files.add(f"{pdb_id}.pdf")
-                known_files.add(filename)
-
-    except KeyboardInterrupt:
-        # Clean exit — log remaining as skipped
-        for pdb_id, entry in pending.items():
-            _update_download_log(
-                pdb_id,
-                {
-                    "status": "skipped_no_paper",
-                    "source": None,
-                    "file_path": None,
-                    "doi": entry.get("doi"),
-                    "pmid": entry.get("pmid"),
-                    "pmcid": entry.get("pmcid"),
-                    "timestamp": datetime.now(UTC).isoformat(),
-                },
-            )
 
     # Phase 3: Summary
     total = len(paywalled_entries)

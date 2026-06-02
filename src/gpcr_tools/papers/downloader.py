@@ -31,7 +31,6 @@ from urllib3.util.retry import Retry
 
 from gpcr_tools.config import (
     CROSSREF_API_URL,
-    DL_STATUS_ABSTRACT_ONLY,
     DL_STATUS_FAILED_NO_DATA,
     DL_STATUS_FAILED_NO_DOI,
     DL_STATUS_PAYWALLED,
@@ -44,12 +43,10 @@ from gpcr_tools.config import (
     HTTP_RETRY_READ,
     HTTP_RETRY_STATUS_FORCELIST,
     HTTP_RETRY_TOTAL,
-    NCBI_EUTILS_EFETCH_URL,
     NCBI_PMC_OA_URL,
     PDF_DOWNLOAD_CHUNK_SIZE,
     SLEEP_NCBI_RATE_LIMIT,
     TIMEOUT_CROSSREF,
-    TIMEOUT_NCBI_EUTILS,
     TIMEOUT_NCBI_PMC_OA,
     TIMEOUT_PDF_DOWNLOAD,
     TIMEOUT_UNPAYWALL,
@@ -215,34 +212,6 @@ def _fetch_pmc_oa_pdf_url(pmcid: str, session: requests.Session) -> str | None:
                         return pdf_href
     except (requests.exceptions.RequestException, ET.ParseError) as exc:
         logger.warning("[PMC OA] Failed for PMCID %s: %s", pmcid, exc)
-    return None
-
-
-def _fetch_abstract_from_ncbi(pmid: str | int, session: requests.Session) -> str | None:
-    """Fetch an abstract from PubMed via NCBI E-utilities efetch.
-
-    Parameters
-    ----------
-    pmid:
-        PubMed identifier (string or integer).
-    session:
-        Requests session to use for the HTTP call.
-
-    Returns
-    -------
-    str | None
-        Cleaned abstract text, or ``None`` on any failure.
-    """
-    url = f"{NCBI_EUTILS_EFETCH_URL}?db=pubmed&id={pmid}&rettype=abstract&retmode=text"
-    try:
-        response = session.get(url, timeout=TIMEOUT_NCBI_EUTILS)
-        time.sleep(SLEEP_NCBI_RATE_LIMIT)
-        if response.status_code == 200 and response.text:
-            clean_text = re.sub(r"^\s*\d+\.\s*", "", response.text.strip())
-            clean_text = "\n".join(line.strip() for line in clean_text.split("\n") if line.strip())
-            return clean_text
-    except requests.exceptions.RequestException as exc:
-        logger.warning("[NCBI abstract] Failed for PMID %s: %s", pmid, exc)
     return None
 
 
@@ -424,32 +393,10 @@ def download_paper_for_pdb(
             with contextlib.suppress(OSError):
                 temp_pdf.unlink()
 
-    # Tier 3: NCBI abstract fallback
-    if pmid:
-        abstract = _fetch_abstract_from_ncbi(str(pmid), sess)
-        if abstract:
-            abstracts_dir = cfg.papers_dir / "abstracts"
-            abstracts_dir.mkdir(parents=True, exist_ok=True)
-            abstract_path = abstracts_dir / f"{pdb_id}.txt"
-            try:
-                abstract_path.write_text(abstract, encoding="utf-8")
-                logger.info("[%s] Saved abstract → %s", pdb_id, abstract_path)
-                entry = {
-                    "status": DL_STATUS_ABSTRACT_ONLY,
-                    "source": "ncbi_abstract",
-                    "file_path": str(abstract_path),
-                    "doi": doi,
-                    "pmid": pmid,
-                    "pmcid": pmcid,
-                    "timestamp": now,
-                }
-                _update_download_log(pdb_id, entry)
-                return entry
-            except OSError as exc:
-                logger.warning("[%s] Failed to write abstract: %s", pdb_id, exc)
-
-    # Fallback: paywalled
-    logger.info("[%s] All download tiers failed, marking paywalled", pdb_id)
+    # No usable PDF. We deliberately do NOT fall back to an abstract: the
+    # annotator needs the full paper, and a PDB with no PDF is simply not
+    # processed (left paywalled for optional manual download, then skipped).
+    logger.info("[%s] No open-access PDF available, marking paywalled", pdb_id)
     entry = {
         "status": DL_STATUS_PAYWALLED,
         "source": None,

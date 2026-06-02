@@ -23,8 +23,10 @@ from gpcr_tools.config import (
     ALERT_CONFIRMED_OLIGOMER,
     ALERT_HALLUCINATION,
     ALERT_MISSED_PROTOMER,
+    ALERT_MULTI_COPY_LIGAND,
     ALERT_SUSPICIOUS_7TM,
     EMPTY_VALUES,
+    GPCR_MIN_ANNOTATED_TM,
     GPCR_SLUG_NEGATIVE_PREFIXES,
     OLIGOMER_HETEROMER,
     OLIGOMER_HOMOMER,
@@ -85,9 +87,14 @@ def map_uniprot_to_entity(
     """Map UniProt feature coordinates to entity coordinates via alignment regions."""
     mapped_segments: list[tuple[int, int]] = []
     for reg in alignments:
-        ref_start = reg["ref_beg_seq_id"]
-        ref_end = ref_start + reg["length"] - 1
-        ent_start = reg["entity_beg_seq_id"]
+        ref_start = reg.get("ref_beg_seq_id")
+        length = reg.get("length")
+        ent_start = reg.get("entity_beg_seq_id")
+        # RCSB can omit/null these coordinate fields; skip the region rather
+        # than raise (which would fail the whole PDB's oligomer analysis).
+        if ref_start is None or length is None or ent_start is None:
+            continue
+        ref_end = ref_start + length - 1
 
         overlap_start = max(u_start, ref_start)
         overlap_end = min(u_end, ref_end)
@@ -117,7 +124,9 @@ def _analyze_tm_for_entity_instance(
     for f in entity.get("rcsb_polymer_entity_feature") or []:
         if (f.get("type") or "").upper() in TM_ENTITY_FEATURE_TYPES:
             for pos in f.get("feature_positions") or []:
-                tm_regions.append((pos["beg_seq_id"], pos["end_seq_id"]))
+                beg, end = pos.get("beg_seq_id"), pos.get("end_seq_id")
+                if beg is not None and end is not None:
+                    tm_regions.append((beg, end))
 
     # Strategy 2: fallback to UniProt features mapped through alignments
     if not tm_regions:
@@ -139,10 +148,10 @@ def _analyze_tm_for_entity_instance(
                     if "TRANSMEMBRANE" not in desc and "MEMBRANE" not in desc:
                         continue
                 for pos in f.get("feature_positions") or []:
-                    mapped = map_uniprot_to_entity(
-                        pos["beg_seq_id"], pos["end_seq_id"], u_alignments
-                    )
-                    tm_regions.extend(mapped)
+                    beg, end = pos.get("beg_seq_id"), pos.get("end_seq_id")
+                    if beg is None or end is None:
+                        continue
+                    tm_regions.extend(map_uniprot_to_entity(beg, end, u_alignments))
 
     if not tm_regions:
         return {"resolved_tms": 0, "total_tms": 0, "status": TM_STATUS_UNKNOWN}
@@ -152,7 +161,9 @@ def _analyze_tm_for_entity_instance(
     for f in instance.get("rcsb_polymer_instance_feature") or []:
         if f.get("type") in ("UNOBSERVED_RESIDUE_XYZ", "UNMODELED"):
             for pos in f.get("feature_positions") or []:
-                unmodeled_regions.append((pos["beg_seq_id"], pos["end_seq_id"]))
+                beg, end = pos.get("beg_seq_id"), pos.get("end_seq_id")
+                if beg is not None and end is not None:
+                    unmodeled_regions.append((beg, end))
 
     unmodeled_regions.sort(key=lambda x: x[0])
     merged_unmodeled: list[tuple[int, int]] = []
@@ -348,6 +359,70 @@ def _build_label_asym_id_map(
             if auth and asym:
                 mapping[auth] = asym
     return mapping
+
+
+def build_nonpolymer_instance_index(
+    enriched_entry: dict[str, Any],
+) -> dict[str, list[dict[str, str]]]:
+    """Index every modelled copy of each small-molecule (non-polymer) component.
+
+    An annotation records a ligand by its chemical component, but a structure can
+    contain several modelled copies of the same component -- ions, lipids such as
+    cholesterol, or a ligand bound at more than one site.  Copies are told apart
+    only by their PDB instance identifier (``label_asym_id``): the author chain
+    (``auth_asym_id``) is frequently shared between copies, so it cannot
+    distinguish them on its own.
+
+    Returns ``{component_id: [{"auth_asym_id", "label_asym_id", "auth_seq_id"}, ...]}``,
+    with each component's instance list sorted by ``label_asym_id`` for stable
+    output.  Instances missing a usable identifier, and entities missing a
+    component id, are skipped.
+
+    RCSB names the per-instance label identifier ``asym_id`` inside the instance
+    container identifiers (``auth_asym_id`` is the author chain) -- the same
+    convention :func:`_build_label_asym_id_map` relies on for polymer chains.
+    """
+    index: dict[str, list[dict[str, str]]] = {}
+    for entity in enriched_entry.get("nonpolymer_entities") or []:
+        if not isinstance(entity, dict):
+            continue
+        entity_ids = entity.get("rcsb_nonpolymer_entity_container_identifiers") or {}
+        comp_id = entity_ids.get("nonpolymer_comp_id")
+        if not comp_id:
+            continue
+        for inst in entity.get("nonpolymer_entity_instances") or []:
+            if not isinstance(inst, dict):
+                continue
+            cid = inst.get("rcsb_nonpolymer_entity_instance_container_identifiers") or {}
+            label_asym_id = cid.get("asym_id")
+            if not label_asym_id:
+                continue
+            index.setdefault(comp_id, []).append(
+                {
+                    "auth_asym_id": cid.get("auth_asym_id") or "",
+                    "label_asym_id": label_asym_id,
+                    "auth_seq_id": cid.get("auth_seq_id") or "",
+                }
+            )
+    for instances in index.values():
+        instances.sort(key=lambda rec: rec["label_asym_id"])
+    return index
+
+
+def find_multi_copy_components(
+    instance_index: dict[str, list[dict[str, str]]],
+) -> dict[str, int]:
+    """Return ``{component_id: copy_count}`` for components modelled more than once.
+
+    A copy count above one means a single ligand entry stands for several modelled
+    copies -- the signal a reviewer needs when deciding whether those copies play
+    distinct roles.
+    """
+    return {
+        comp_id: len(instances)
+        for comp_id, instances in instance_index.items()
+        if len(instances) > 1
+    }
 
 
 def _get_assembly_cross_check(
@@ -665,12 +740,26 @@ def analyze_oligomer(
     # 3. Refine fusion slugs using per-UniProt TM features
     _refine_fusion_slugs(gpcr_roster, enriched_entry, graphql_entry)
 
-    # 4. Classify (after refinement so slugs are correct)
-    unique_slugs = {info["slug"] for info in gpcr_roster.values()}
+    # 3b. Validated protomer roster: a chain whose UniProt annotation is not 7TM
+    # (a single-pass partner, a soluble ligand, etc. mis-mapped to a GPCR slug)
+    # is not a protomer for classification or the missed-protomer check. Gate on
+    # the annotated TM count so a truncated-but-real GPCR (few resolved TMs, full
+    # annotation) is kept. Fall back to the full roster if the 7TM scan produced
+    # nothing (e.g. no GraphQL) so missing data never over-prunes.
+    classify_roster = {
+        chain: info
+        for chain, info in gpcr_roster.items()
+        if (tm_roster.get(chain) or {}).get("total_tms", 0) >= GPCR_MIN_ANNOTATED_TM
+    }
+    if not classify_roster:
+        classify_roster = dict(gpcr_roster)
 
-    if len(gpcr_roster) == 0:
+    # 4. Classify (after refinement so slugs are correct)
+    unique_slugs = {info["slug"] for info in classify_roster.values()}
+
+    if len(classify_roster) == 0:
         classification = OLIGOMER_NO_GPCR
-    elif len(gpcr_roster) == 1:
+    elif len(classify_roster) == 1:
         classification = OLIGOMER_MONOMER
     elif len(unique_slugs) == 1:
         classification = OLIGOMER_HOMOMER
@@ -702,7 +791,7 @@ def analyze_oligomer(
     ligands_data = best_run_data.get("ligands") or []
 
     suggestion = _suggest_primary_protomer(
-        gpcr_roster,
+        classify_roster,
         tm_roster,
         classification,
         ai_chain,
@@ -710,9 +799,10 @@ def analyze_oligomer(
         ligands_data,
     )
 
-    # 6. Alerts
+    # 6. Alerts — use the validated roster so non-7TM partners don't trigger a
+    # false MISSED_PROTOMER / inflate the heteromer chain list.
     alerts = _generate_alerts(
-        gpcr_roster,
+        classify_roster,
         classification,
         ai_chain,
         best_run_data,
@@ -743,8 +833,34 @@ def analyze_oligomer(
         alerts,
     )
 
-    # 8. label_asym_id map
+    # 8. label_asym_id map + small-molecule instance index
     label_map = _build_label_asym_id_map(enriched_entry)
+    nonpolymer_instance_index = build_nonpolymer_instance_index(enriched_entry)
+
+    # 8b. Flag annotated ligands modelled in more than one copy, so a curator can
+    # check whether the copies sit at distinct sites or play distinct roles --
+    # something a single annotation row cannot carry.  Only components the model
+    # actually annotated as ligands are flagged; repeated glycosylation or ions
+    # the model did not call out stay silent.
+    multi_copy = find_multi_copy_components(nonpolymer_instance_index)
+    annotated_comp_ids = {
+        (lig.get("chem_comp_id") or "").strip() for lig in ligands_data if isinstance(lig, dict)
+    }
+    for comp_id in sorted(multi_copy):
+        if comp_id not in annotated_comp_ids:
+            continue
+        labels = ", ".join(rec["label_asym_id"] for rec in nonpolymer_instance_index[comp_id])
+        alerts.append(
+            {
+                "type": ALERT_MULTI_COPY_LIGAND,
+                "message": (
+                    f"[{ALERT_MULTI_COPY_LIGAND}] at 'ligands[{comp_id}]': modelled in "
+                    f"{multi_copy[comp_id]} copies (instances {labels}); one annotation row "
+                    f"may hide copies at distinct sites or with distinct roles. "
+                    f"Human review recommended."
+                ),
+            }
+        )
 
     # 9. Assembly cross-check (informational only)
     assembly_info = _get_assembly_cross_check(enriched_entry)
@@ -758,4 +874,5 @@ def analyze_oligomer(
         "alerts": alerts,
         "chain_id_override": override_info,
         "label_asym_id_map": label_map,
+        "nonpolymer_instance_index": nonpolymer_instance_index,
     }

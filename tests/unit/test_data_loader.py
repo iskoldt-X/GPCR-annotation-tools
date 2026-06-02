@@ -2,6 +2,22 @@
 
 import json
 
+import pytest
+
+
+def test_load_processed_log_raises_on_corrupt(configure_paths):
+    """A corrupt (but present) processed log must fail loudly, not silently
+    return {} — which would re-queue completed PDBs and duplicate CSV rows."""
+    from gpcr_tools.config import get_config
+    from gpcr_tools.csv_generator.data_loader import load_processed_log
+
+    cfg = get_config()
+    cfg.state_dir.mkdir(parents=True, exist_ok=True)
+    cfg.processed_log_file.write_text("{ not valid json")
+
+    with pytest.raises(RuntimeError):
+        load_processed_log()
+
 
 class TestGetPendingPdbs:
     def test_all_new(self, configure_paths):

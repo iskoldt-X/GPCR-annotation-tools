@@ -27,6 +27,7 @@ from gpcr_tools.csv_generator.ui import (
     create_display_copy,
     display_dashboard_header,
     display_oligomer_analysis_panel,
+    display_pdb_footer,
 )
 from gpcr_tools.csv_generator.validation_display import inject_oligomer_alerts
 
@@ -128,6 +129,7 @@ def main(target_pdb: str | None = None, auto_accept: bool = False) -> None:
 
             prompt_txt += "):"
 
+            display_pdb_footer(pdb_id)
             mode = Prompt.ask(prompt_txt, choices=choices, default="r").lower()
 
             if mode == "s":

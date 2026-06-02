@@ -15,6 +15,16 @@ from pathlib import Path
 
 import pytest
 
+from gpcr_tools.config import (
+    DL_STATUS_FAILED_NO_DATA,
+    DL_STATUS_FAILED_NO_DOI,
+    DL_STATUS_MANUAL,
+    DL_STATUS_PAYWALLED,
+    DL_STATUS_SKIPPED_EXISTS,
+    DL_STATUS_SKIPPED_NO_ENRICHED,
+    DL_STATUS_SKIPPED_NO_PAPER,
+    DL_STATUS_SUCCESS,
+)
 from tests.conftest import REAL_PDB_DIR, REAL_PDB_IDS
 
 _LIVE = os.environ.get("GPCR_RUN_LIVE_TESTS")
@@ -78,13 +88,18 @@ class TestFetchPapersLive:
             f"Download log has {len(log)} entries, expected {len(REAL_PDB_IDS)}"
         )
 
-        # Every entry should have a valid status
+        # Every entry should carry a KNOWN download-log status. The point is to
+        # catch garbage values, not to pin which OA tier each PDB resolved to —
+        # so accept any legitimate status, including the abstract-only fallback.
         valid_statuses = {
-            "success_pdf_downloaded",
-            "skipped_already_downloaded",
-            "failed_no_doi",
-            "failed_no_data",
-            "fallback_paywalled",
+            DL_STATUS_SUCCESS,
+            DL_STATUS_SKIPPED_EXISTS,
+            DL_STATUS_SKIPPED_NO_ENRICHED,
+            DL_STATUS_FAILED_NO_DOI,
+            DL_STATUS_FAILED_NO_DATA,
+            DL_STATUS_PAYWALLED,
+            DL_STATUS_MANUAL,
+            DL_STATUS_SKIPPED_NO_PAPER,
         }
         for pdb_id, entry in log.items():
             assert entry["status"] in valid_statuses, (

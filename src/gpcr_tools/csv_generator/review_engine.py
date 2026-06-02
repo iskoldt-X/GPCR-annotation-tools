@@ -16,18 +16,58 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 from rich.text import Text
 
-from gpcr_tools.config import AUTO_RESOLVE_KEYS, BLACKLISTED_KEYS, TOPLEVEL_BLOCK_KEYS
+from gpcr_tools.config import (
+    AUTO_RESOLVE_KEYS,
+    BLACKLISTED_KEYS,
+    LIST_ITEM_KEY_FIELDS,
+    TOPLEVEL_BLOCK_KEYS,
+    VALIDATION_GHOST_LIGAND,
+    list_item_identity,
+)
 from gpcr_tools.csv_generator.audit import log_audit_trail
 from gpcr_tools.csv_generator.ui import (
     console,
     create_display_copy,
     display_ligand_validation_panel,
+    display_pdb_footer,
 )
 from gpcr_tools.csv_generator.validation_display import (
     analyze_validation_impact,
     display_validation_alert,
     get_relevant_validation_warnings,
 )
+
+
+def _resolve_list_key_field(path: str) -> str | None:
+    """Return the list-item navigation key for *path* from the shared field
+    map, so review paths match the ones produced during vote aggregation.
+    """
+    for segment, field in LIST_ITEM_KEY_FIELDS.items():
+        if segment in path:
+            return field
+    return None
+
+
+def _list_item_path(path: str, item: Any, key_field: str | None, idx: int) -> str:
+    """Navigation path for one list item — addressed exactly the way vote
+    aggregation stored its controversies/flags, so review can match them.
+
+    Uses the shared ``list_item_identity`` (not the raw key field) so a keyless
+    item — a protein/Apo ligand with ``chem_comp_id="None"`` — resolves to the
+    same ``[__keyless__:<name>]`` path the aggregator recorded, instead of a
+    bare ``[None]`` that would never match and silently hide the controversy.
+    """
+    if key_field and isinstance(item, dict):
+        return f"{path}[{list_item_identity(item, key_field, idx)}]"
+    return f"{path}[{idx}]"
+
+
+def _confidence_style(confidence: Any) -> str:
+    """Rich style for a model confidence level (the "High"/"Medium"/"Low" enum):
+    high confidence reads as success, everything else as a warning.
+    """
+    return "success" if confidence == "High" else "warning"
+
 
 # ── Type Coercion ──────────────────────────────────────────────────────
 
@@ -143,8 +183,8 @@ def review_decision_unit(
     grid.add_column(style="bold cyan", width=12)
     grid.add_column(style="value")
     grid.add_row("Value:", str(d_node.get("value", "N/A")))
-    conf = d_node.get("confidence", 0)
-    conf_style = "success" if isinstance(conf, int | float) and conf >= 0.8 else "warning"
+    conf = d_node.get("confidence", "")
+    conf_style = _confidence_style(conf)
     grid.add_row("Confidence:", f"[{conf_style}]{conf}[/{conf_style}]")
 
     content = Group(
@@ -480,17 +520,9 @@ def review_node(
             return d_node
 
         new_list = []
-        key_field = (
-            "chem_comp_id"
-            if "ligands" in path
-            else ("name" if "auxiliary_proteins" in path else None)
-        )
+        key_field = _resolve_list_key_field(path)
         for idx, item in enumerate(d_node):
-            curr_path = (
-                f"{path}[{item.get(key_field, idx)}]"
-                if key_field and isinstance(item, dict)
-                else f"{path}[{idx}]"
-            )
+            curr_path = _list_item_path(path, item, key_field, idx)
             res = review_node(
                 pdb_id,
                 item,
@@ -512,6 +544,39 @@ def review_node(
 # ── Top-Level Block Review ──────────────────────────────────────────────
 
 
+def _confirm_ghost_ligands(pdb_id: str, ligands: Any) -> None:
+    """Ask the curator, per unverified (GHOST) ligand, whether to keep it.
+
+    A ghost ligand is one the model named but the structure does not model, so
+    it is excluded from the export by default; the curator must explicitly
+    confirm to keep it.  Confirmed ligands get ``curator_kept_ghost = True``,
+    which the CSV writer honours.  Ligands with a real structure match are left
+    untouched.  No prompt appears when there are no ghosts.
+    """
+    if not isinstance(ligands, list):
+        return
+    ghosts = [
+        lig
+        for lig in ligands
+        if isinstance(lig, dict) and lig.get("validation_status") == VALIDATION_GHOST_LIGAND
+    ]
+    for lig in ghosts:
+        name = lig.get("name") or lig.get("chem_comp_id") or "?"
+        keep = Confirm.ask(
+            f"[bold red]GHOST[/] ligand '[cyan]{name}[/]' is not modelled in the structure "
+            f"and will be EXCLUDED from the export. Keep it anyway?",
+            default=False,
+        )
+        lig["curator_kept_ghost"] = keep
+        log_audit_trail(
+            pdb_id,
+            "ligands",
+            "keep_ghost_ligand" if keep else "drop_ghost_ligand",
+            name,
+            "KEPT" if keep else "DROPPED",
+        )
+
+
 def review_toplevel_blocks(
     pdb_id: str,
     main_data: dict,
@@ -527,6 +592,10 @@ def review_toplevel_blocks(
         if key not in main_data:
             continue
         block_data = main_data[key]
+
+        # Quiet reminder of which PDB this block belongs to (the header
+        # scrolls off-screen during a long review).
+        display_pdb_footer(pdb_id)
 
         has_alert = bool(get_relevant_validation_warnings(key, validation_data))
         has_contra = has_downstream_controversy(key, controversies)
@@ -559,6 +628,7 @@ def review_toplevel_blocks(
         # Ligand validation panel
         if key == "ligands" and isinstance(block_data, list):
             display_ligand_validation_panel(block_data)
+            _confirm_ghost_ligands(pdb_id, block_data)
 
         # Receptor identity clash
         if key == "receptor_info" and isinstance(block_data, dict):

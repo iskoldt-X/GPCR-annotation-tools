@@ -14,6 +14,7 @@ from rich.text import Text
 from gpcr_tools.config import (
     ALERT_HALLUCINATION,
     ALERT_MISSED_PROTOMER,
+    ALERT_MULTI_COPY_LIGAND,
     ALERT_SUSPICIOUS_7TM,
     TM_STATUS_INCOMPLETE,
     VALIDATION_FATAL_KEYWORDS,
@@ -51,6 +52,10 @@ def inject_oligomer_alerts(oligo: dict, validation_data: dict) -> None:
             warnings.append(
                 f"OLIGOMER ALERT at 'receptor_info': [{atype}] {alert.get('message') or ''}"
             )
+        elif atype == ALERT_MULTI_COPY_LIGAND:
+            # Already carries its own 'ligands[...]' path, so it buckets with the
+            # ligand block during review rather than under receptor_info.
+            warnings.append(alert.get("message") or "")
 
     if any(c.get("7tm_status") == TM_STATUS_INCOMPLETE for c in oligo.get("all_gpcr_chains") or []):
         warnings.append(

@@ -14,6 +14,10 @@ from gpcr_tools.config import (
     GROUND_TRUTH_PATHS,
     LIST_ITEM_KEY_FIELDS,
     SOFT_FIELD_KEYS,
+    VOTE_NEAR_TIE_MARGIN,
+)
+from gpcr_tools.config import (
+    list_item_identity as _list_item_identity,
 )
 
 # ---------------------------------------------------------------------------
@@ -90,7 +94,6 @@ def get_majority_votes(
 
         if key_field:
             grouped_items: dict[str, list[dict[str, Any]]] = defaultdict(list)
-            index_items: list[tuple[int, dict[str, Any]]] = []
 
             for run_list in values:
                 if not isinstance(run_list, list):
@@ -98,15 +101,11 @@ def get_majority_votes(
                 for idx, item in enumerate(run_list):
                     if not isinstance(item, dict):
                         continue
-                    group_key = item.get(key_field)
-                    if group_key:
-                        grouped_items[group_key].append(item)
-                    else:
-                        # Fallback: index-based matching for items missing
-                        # the key field (e.g. hallucinated ligands without
-                        # chem_comp_id).  This matches legacy behaviour and
-                        # was explicitly mandated — do NOT remove.
-                        index_items.append((idx, item))
+                    # Items lacking a usable key must neither be silently
+                    # dropped nor collapsed under a placeholder like "None":
+                    # group them under a stable fallback identity so distinct
+                    # entities stay separate and still survive aggregation.
+                    grouped_items[_list_item_identity(item, key_field, idx)].append(item)
 
             majority_list: list[Any] = []
             counts_list: list[Any] = []
@@ -161,23 +160,43 @@ def get_majority_votes(
 def score_run(
     run_data: Any,
     majority_votes: Any,
+    path: str = "",
 ) -> int:
     """Score *run_data* against *majority_votes*.
 
-    One point for each scalar leaf that matches the majority value.
+    One point for each scalar leaf that matches the majority value.  Object
+    lists (ligands, auxiliary_proteins) are matched item-by-item on their key
+    field and scored field-by-field, instead of requiring whole-object
+    equality — which never holds once soft fields are normalised to ``None``,
+    so those lists would otherwise contribute nothing to best-run selection.
     """
     if isinstance(majority_votes, dict):
         if not isinstance(run_data, dict):
             return 0
         score = 0
         for key, maj_val in majority_votes.items():
-            run_val = run_data.get(key)
-            score += score_run(run_val, maj_val)
+            child_path = f"{path}.{key}" if path else key
+            score += score_run(run_data.get(key), maj_val, child_path)
         return score
 
     if isinstance(majority_votes, list):
         if not isinstance(run_data, list):
             return 0
+        key_field = _resolve_key_field(path)
+        if key_field and majority_votes and isinstance(majority_votes[0], dict):
+            run_map = {
+                _list_item_identity(item, key_field, idx): item
+                for idx, item in enumerate(run_data)
+                if isinstance(item, dict)
+            }
+            score = 0
+            for idx, maj_item in enumerate(majority_votes):
+                if not isinstance(maj_item, dict):
+                    continue
+                run_item = run_map.get(_list_item_identity(maj_item, key_field, idx))
+                if run_item is not None:
+                    score += score_run(run_item, maj_item, f"{path}[item]")
+            return score
         return sum(1 for item in run_data if item in majority_votes)
 
     if majority_votes is not None:
@@ -206,6 +225,20 @@ def select_best_run(
 # ---------------------------------------------------------------------------
 # Discrepancy detection
 # ---------------------------------------------------------------------------
+
+
+def _vote_margin(all_votes: Any) -> int | None:
+    """Return ``top1 - top2`` vote counts for a scalar vote-count mapping.
+
+    Returns ``None`` when there are fewer than two candidates or the counts are
+    unusable, so a single-candidate vote is never treated as a near-tie.
+    """
+    if not isinstance(all_votes, dict):
+        return None
+    counts = sorted((c for c in all_votes.values() if isinstance(c, int)), reverse=True)
+    if len(counts) < 2:
+        return None
+    return counts[0] - counts[1]
 
 
 def find_discrepancies(
@@ -245,15 +278,17 @@ def find_discrepancies(
         key_field = _resolve_key_field(path)
 
         if key_field:
-            best_run_map: dict[str | None, dict[str, Any]] = {
-                item.get(key_field): item for item in best_run_data if isinstance(item, dict)
+            # Group by the same stable identity as get_majority_votes so
+            # keyless items (placeholder "None") map 1:1 instead of collapsing.
+            best_run_map: dict[str, dict[str, Any]] = {
+                _list_item_identity(item, key_field, idx): item
+                for idx, item in enumerate(best_run_data)
+                if isinstance(item, dict)
             }
             for i, maj_item in enumerate(majority_data):
                 if not isinstance(maj_item, dict):
                     continue
-                item_key = maj_item.get(key_field)
-                if not item_key:
-                    continue
+                item_key = _list_item_identity(maj_item, key_field, i)
                 run_item = best_run_map.get(item_key)
                 votes_item = (
                     all_votes_data[i]
@@ -274,6 +309,65 @@ def find_discrepancies(
                     "all_votes": all_votes_data,
                 }
             )
+        else:
+            margin = _vote_margin(all_votes_data)
+            if margin is not None and margin <= VOTE_NEAR_TIE_MARGIN:
+                discrepancies.append(
+                    {
+                        "path": path,
+                        "best_run_value": best_run_data,
+                        "majority_vote_value": majority_data,
+                        "all_votes": all_votes_data,
+                        "needs_review": True,
+                        "vote_margin": margin,
+                    }
+                )
         return discrepancies
 
     return []
+
+
+def flag_low_confidence_consensus(
+    best_run_data: Any,
+    low_levels: frozenset[str],
+) -> list[dict[str, Any]]:
+    """Flag decision units whose self-reported confidence is in *low_levels*.
+
+    Cross-run agreement is not correctness: a unanimous but low-confidence call
+    is still a guess, so surface it for human review.  Records share the shape
+    and ``.value`` path of discrepancies so the curate UI picks them up with no
+    extra wiring.
+    """
+    flags: list[dict[str, Any]] = []
+    if not isinstance(best_run_data, dict):
+        return flags
+
+    def _is_low(node: Any) -> bool:
+        return isinstance(node, dict) and node.get("confidence") in low_levels
+
+    def _record(node_path: str, node: Any) -> dict[str, Any]:
+        value = node.get("value")
+        return {
+            "path": node_path,
+            "best_run_value": value,
+            "majority_vote_value": value,
+            "all_votes": {},
+            "needs_review": True,
+            "low_confidence": node.get("confidence"),
+        }
+
+    state = (best_run_data.get("structure_info") or {}).get("state")
+    if _is_low(state):
+        flags.append(_record("structure_info.state.value", state))
+
+    for idx, lig in enumerate(best_run_data.get("ligands") or []):
+        if isinstance(lig, dict) and _is_low(lig.get("role")):
+            key = _list_item_identity(lig, "chem_comp_id", idx)
+            flags.append(_record(f"ligands[{key}].role.value", lig["role"]))
+
+    for idx, aux in enumerate(best_run_data.get("auxiliary_proteins") or []):
+        if isinstance(aux, dict) and _is_low(aux.get("type")):
+            key = _list_item_identity(aux, "name", idx)
+            flags.append(_record(f"auxiliary_proteins[{key}].type.value", aux["type"]))
+
+    return flags
