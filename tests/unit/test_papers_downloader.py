@@ -181,13 +181,8 @@ class TestDownloadPaperForPdb:
         "gpcr_tools.papers.downloader._fetch_crossref_metadata",
         return_value={"pmid": None, "pmcid": None},
     )
-    @patch(
-        "gpcr_tools.papers.downloader._fetch_abstract_from_ncbi",
-        return_value=None,
-    )
     def test_fallback_paywalled(
         self,
-        _mock_abs: MagicMock,
         _mock_cr: MagicMock,
         _mock_pmc: MagicMock,
         _mock_up: MagicMock,

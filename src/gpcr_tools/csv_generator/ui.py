@@ -53,6 +53,13 @@ custom_theme = Theme(
 console = Console(theme=custom_theme)
 
 
+def display_pdb_footer(pdb_id: str) -> None:
+    """Re-show the PDB being curated so the reviewer keeps context after the
+    screen scrolls.  Intentionally faint — a quiet marker, not a banner.
+    """
+    console.print(f"[dim]── PDB {pdb_id} ──[/dim]")
+
+
 # ── Dashboard ───────────────────────────────────────────────────────────
 
 

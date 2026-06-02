@@ -47,7 +47,9 @@ EXPECTED_CSV_FILES: dict[str, set[str]] = {
         "arrestins.csv",
         "fusion_proteins.csv",
     },
-    "9NOR": {"structures.csv", "ligands.csv", "g_proteins.csv"},
+    # No ligands.csv: this entry's only annotated ligands are not modelled in
+    # the structure (the paper's sweeteners), so they are excluded from export.
+    "9NOR": {"structures.csv", "g_proteins.csv"},
     "9O38": {"structures.csv", "ligands.csv", "g_proteins.csv", "nanobodies.csv"},
 }
 

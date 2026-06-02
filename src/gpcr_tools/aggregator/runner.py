@@ -27,12 +27,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from gpcr_tools.aggregator.ai_results_loader import get_pending_pdb_ids, load_ai_runs
+from gpcr_tools.aggregator.ai_results_loader import (
+    get_pending_pdb_ids,
+    load_ai_runs,
+    pdb_has_runs,
+)
 from gpcr_tools.aggregator.enriched_loader import load_enriched_data
 from gpcr_tools.aggregator.ground_truth import inject_ground_truth
 from gpcr_tools.aggregator.voting import (
     extract_ai_g_protein,
     find_discrepancies,
+    flag_low_confidence_consensus,
     get_majority_votes,
     select_best_run,
 )
@@ -40,6 +45,7 @@ from gpcr_tools.config import (
     AGG_STATUS_COMPLETED,
     AGG_STATUS_FAILED,
     ALERT_PREFIX_ALGO_WARNING,
+    ALERT_PREFIX_CHIMERIC_REVIEW,
     ALERT_PREFIX_HALLUCINATION,
     ALERT_PREFIX_TIE_BREAKER_ALIGNED,
     ALERT_PREFIX_TIE_BREAKER_OVERRIDE,
@@ -47,6 +53,7 @@ from gpcr_tools.config import (
     CHIMERA_STATUS_SKIPPED,
     CHIMERA_STATUS_SUCCESS,
     EMPTY_VALUES,
+    LOW_CONFIDENCE_LEVELS,
     get_config,
 )
 from gpcr_tools.validator.cache import SequenceCache, ValidationCache
@@ -111,6 +118,17 @@ def _build_validation_report(
     # Integrity checks (ghost chain, fake UniProt/PubChem, ghost ligand, method)
     integrity_warnings = validate_all(pdb_id, best_run_data, enriched_entry, cache=validation_cache)
     report["critical_warnings"].extend(integrity_warnings)
+
+    # A chimeric G-protein's alpha-subunit identity cannot be resolved reliably
+    # from sequence alone (the tail is degenerate across subtypes), so force a
+    # human to confirm it instead of trusting the model or the tie-break.
+    g_protein = (best_run_data.get("signaling_partners") or {}).get("g_protein") or {}
+    if g_protein.get("is_chimeric") is True:
+        report["critical_warnings"].append(
+            f"{ALERT_PREFIX_CHIMERIC_REVIEW} at "
+            f"'signaling_partners.g_protein.alpha_subunit': chimeric G-protein — "
+            f"confirm the alpha-subunit identity manually."
+        )
 
     # Chimera vs AI comparison (Review 4 A-2, Review 7)
     status = chimera_result.get("status") or CHIMERA_STATUS_SKIPPED
@@ -360,6 +378,12 @@ def aggregate_pdb(
 
         # 9. Compute discrepancies
         discrepancies = find_discrepancies(best_run_data, majority_votes, all_votes)
+        # Also surface unanimous-but-low-confidence decision units for review
+        # (consensus is not correctness); dedupe by path so a field already
+        # flagged as a real disagreement or near-tie is not duplicated.
+        low_conf = flag_low_confidence_consensus(best_run_data, LOW_CONFIDENCE_LEVELS)
+        seen_paths = {d["path"] for d in discrepancies}
+        discrepancies.extend(d for d in low_conf if d["path"] not in seen_paths)
 
         # 10. Chimera analysis
         chimera_result: dict[str, Any] = {
@@ -425,9 +449,7 @@ def aggregate_all(
         ai_dir = cfg.ai_results_dir
         if not ai_dir.is_dir():
             return []
-        pending = sorted(
-            d.name for d in ai_dir.iterdir() if d.is_dir() and list(d.glob("run_*.json"))
-        )
+        pending = sorted(d.name for d in ai_dir.iterdir() if pdb_has_runs(d))
     else:
         pending = get_pending_pdb_ids()
 

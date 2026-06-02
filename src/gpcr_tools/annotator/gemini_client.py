@@ -111,14 +111,19 @@ class RateLimitedClient:
 # ---------------------------------------------------------------------------
 
 _rate_limiter: RateLimitedClient | None = None
+_init_lock = Lock()
 
 
 def _init_client() -> None:
     """Initialize the global rate-limited client from environment variables."""
     global _rate_limiter
-    if _rate_limiter is None:
-        api_key = _resolve_api_key()
-        _rate_limiter = RateLimitedClient(api_key)
+    # Double-checked locking: annotate runs threads concurrently, and two of
+    # them racing here would build two clients with independent rate limiters,
+    # splitting the RPM window and overshooting the quota.
+    with _init_lock:
+        if _rate_limiter is None:
+            api_key = _resolve_api_key()
+            _rate_limiter = RateLimitedClient(api_key)
 
 
 def get_client() -> Client:

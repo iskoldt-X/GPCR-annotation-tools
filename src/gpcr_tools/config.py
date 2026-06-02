@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from types import MappingProxyType
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # API base URLs
@@ -33,7 +34,6 @@ CROSSREF_API_URL: str = "https://api.crossref.org/works"
 UNPAYWALL_API_URL: str = "https://api.unpaywall.org/v2"
 
 NCBI_PMC_OA_URL: str = "https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi"
-NCBI_EUTILS_EFETCH_URL: str = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 
 # ---------------------------------------------------------------------------
 # HTTP User-Agent strings
@@ -72,7 +72,6 @@ TIMEOUT_PUBCHEM_VALIDATION: int = 5
 TIMEOUT_CROSSREF: int = 15
 TIMEOUT_UNPAYWALL: int = 15
 TIMEOUT_NCBI_PMC_OA: int = 20
-TIMEOUT_NCBI_EUTILS: int = 20
 TIMEOUT_PDF_DOWNLOAD: int = 60
 TIMEOUT_BATCH_RESULT_DOWNLOAD: int = 60
 
@@ -110,6 +109,15 @@ def get_gemini_model_name() -> str:
     return os.environ.get("GPCR_GEMINI_MODEL") or GEMINI_MODEL_NAME_DEFAULT
 
 
+def model_run_subdir(model_name: str | None) -> str:
+    """Filesystem-safe per-model subdirectory name for AI run outputs.
+
+    Runs are namespaced by model (``ai_results/<pdb>/<model>/run_N.json``) so
+    annotating the same structure with different models no longer overwrites.
+    """
+    return (model_name or "default").replace("/", "_")
+
+
 # Kept for backward-compat import; prefer get_gemini_model_name() for fresh reads.
 GEMINI_MODEL_NAME: str = GEMINI_MODEL_NAME_DEFAULT
 GEMINI_API_KEY_ENV: str = "GPCR_GEMINI_API_KEY"
@@ -120,6 +128,10 @@ GEMINI_MAX_RETRIES: int = 5
 GEMINI_BASE_BACKOFF: int = 10
 GEMINI_DEFAULT_RUNS: int = 10
 GEMINI_MAX_WORKERS: int = 10
+# Files uploaded to the Gemini Files API expire (~48h). A cached upload URI in
+# the batch registry older than this must be treated as gone and re-uploaded,
+# so a re-submission after a long-failed batch doesn't embed a dead fileUri.
+GEMINI_FILE_TTL_HOURS: int = 47
 
 # ---------------------------------------------------------------------------
 # Watcher polling configuration
@@ -128,6 +140,11 @@ GEMINI_MAX_WORKERS: int = 10
 WATCHER_POLL_INTERVAL: float = 2.0
 WATCHER_STABILITY_CHECKS: int = 2
 WATCHER_STABILITY_INTERVAL: float = 1.0
+# Give a matching-but-not-yet-ingestable file (mid-download, momentarily
+# invalid) several poll attempts before giving up, instead of abandoning it
+# after one try. The counter resets whenever the file's size changes (i.e. it
+# is still downloading), so only a genuinely stuck file is eventually skipped.
+WATCHER_MAX_INGEST_ATTEMPTS: int = 5
 
 # ---------------------------------------------------------------------------
 # Workspace contract
@@ -234,7 +251,7 @@ def get_config() -> WorkspaceConfig:
         download_log_file=state_dir / "download_log.json",
         current_batch_job_file=state_dir / "current_batch_job.txt",
         uploaded_files_registry_file=state_dir / "uploaded_files_registry.json",
-        default_prompt_file=workspace / "prompts" / "v5.txt",
+        default_prompt_file=workspace / "prompts" / "v5.md",
     )
 
 
@@ -255,8 +272,24 @@ SOFT_FIELD_KEYS: frozenset[str] = frozenset(
         "key_findings",
         "synonyms",
         "confidence",
+        # Provenance label (paper vs PDB metadata): explanatory, never an
+        # ingested decision value — excluded from cross-run voting like its
+        # sibling evidence fields above so it produces no vote churn.
+        "source",
+        # Per-run provenance block (model / prompt / run metadata): an internal
+        # record stamped at write time, never a voted value.
+        "_provenance",
     }
 )
+
+# Scalar majority votes whose top two candidates are within this many votes of
+# each other are flagged for human review: a near-tie is too fragile to present
+# as settled, even when the selected value equals the majority.
+VOTE_NEAR_TIE_MARGIN: int = 1
+
+# Self-reported confidence levels that should be promoted to human review even
+# when all runs agree — a unanimous low-confidence inference is still a guess.
+LOW_CONFIDENCE_LEVELS: frozenset[str] = frozenset({"Low"})
 
 GROUND_TRUTH_PATHS: frozenset[str] = frozenset(
     {
@@ -287,6 +320,47 @@ APO_SENTINEL: str = "apo"
 LIGAND_TYPE_PEPTIDE: str = "peptide"
 LIGAND_TYPE_PROTEIN: str = "protein"
 
+
+# ---------------------------------------------------------------------------
+# List-item grouping identity
+# ---------------------------------------------------------------------------
+# Shared by vote aggregation and curator review so both address the same list
+# item by the same path. Keeping it here (not in either consumer) prevents the
+# two from drifting — if they disagree, keyless items (protein/Apo ligands with
+# chem_comp_id="None") get controversies stored under one path and looked up
+# under another, silently hiding them from human review.
+
+
+def is_empty_key(value: Any) -> bool:
+    """True if *value* cannot serve as a grouping key.
+
+    Guards against the placeholder strings the schema injects for keyless
+    items (protein / Apo ligands get ``chem_comp_id="None"``) and blanks — see
+    ``EMPTY_VALUES``.  Without this, ``"None"`` is truthy and every protein
+    ligand would collapse into a single bogus ``"None"`` group.
+    """
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in EMPTY_VALUES
+    return not value
+
+
+def list_item_identity(item: dict[str, Any], key_field: str, idx: int) -> str:
+    """Stable grouping identity for a list item — the key field when usable,
+    else a namespaced fallback (name -> type -> index).
+
+    Used everywhere a list item needs a path-addressable identity (vote
+    grouping, discrepancy detection, and curator-review navigation) so the
+    same item resolves to the same string in every stage.
+    """
+    group_key = item.get(key_field)
+    if not is_empty_key(group_key):
+        return str(group_key)
+    fallback_id = item.get("name") or item.get("type") or f"idx{idx}"
+    return f"__keyless__:{fallback_id}"
+
+
 # ---------------------------------------------------------------------------
 # Validation statuses (Ligand / Receptor)
 # ---------------------------------------------------------------------------
@@ -298,6 +372,7 @@ VALIDATION_EXCLUDED_BUFFER: str = "EXCLUDED_BUFFER"
 VALIDATION_GHOST_LIGAND: str = "GHOST_LIGAND"
 VALIDATION_RECEPTOR_MATCH: str = "RECEPTOR_MATCH"
 VALIDATION_UNIPROT_CLASH: str = "UNIPROT_CLASH"
+VALIDATION_RECEPTOR_NO_API_DATA: str = "RECEPTOR_NO_API_DATA"
 
 # ---------------------------------------------------------------------------
 # Ligand exclude list (common buffers, ions, artifacts)
@@ -427,6 +502,7 @@ ALERT_CONFIRMED_OLIGOMER: str = "CONFIRMED_OLIGOMER"
 ALERT_CHAIN_ID_OVERRIDDEN: str = "CHAIN_ID_OVERRIDDEN"
 ALERT_7TM_UPGRADE: str = "7TM_UPGRADE"
 ALERT_SUSPICIOUS_7TM: str = "SUSPICIOUS_7TM"
+ALERT_MULTI_COPY_LIGAND: str = "MULTI_COPY_LIGAND"
 
 # ---------------------------------------------------------------------------
 # 7TM statuses & detection constants
@@ -437,6 +513,14 @@ TM_STATUS_COMPLETE: str = "COMPLETE"
 TM_STATUS_INCOMPLETE: str = "INCOMPLETE_7TM"
 
 TM_COVERAGE_THRESHOLD: float = 0.50
+
+# A chain counts as a 7TM GPCR protomer (for oligomer classification + the
+# missed-protomer check) only if its UniProt annotation carries at least this
+# many TM helices. Single-pass (1) / few-pass partners and soluble chains that
+# RCSB/GPCRdb mis-mapped to a GPCR slug are excluded, so they don't inflate
+# HETEROMER or trigger a false MISSED_PROTOMER (they remain in auxiliary_proteins
+# and are still surfaced by the SUSPICIOUS_7TM alert).
+GPCR_MIN_ANNOTATED_TM: int = 4
 
 TM_ENTITY_FEATURE_TYPES: frozenset[str] = frozenset(
     {
@@ -515,7 +599,6 @@ DL_STATUS_FAILED_NO_DOI: str = "failed_no_doi"
 DL_STATUS_FAILED_NO_DATA: str = "failed_no_data"
 DL_STATUS_PAYWALLED: str = "fallback_paywalled"
 DL_STATUS_MANUAL: str = "manual_user_provided"
-DL_STATUS_ABSTRACT_ONLY: str = "fallback_abstract_only"
 DL_STATUS_SKIPPED_NO_PAPER: str = "skipped_no_paper"
 
 # ---------------------------------------------------------------------------
@@ -535,6 +618,7 @@ ALERT_PREFIX_TIE_BREAKER_OVERRIDE: str = "[TIE-BREAKER OVERRIDE]"
 ALERT_PREFIX_HALLUCINATION: str = "[HALLUCINATION ALERT]"
 ALERT_PREFIX_ALGO_WARNING: str = "[ALGO WARNING]"
 ALERT_PREFIX_API_UNAVAILABLE: str = "[API_UNAVAILABLE]"
+ALERT_PREFIX_CHIMERIC_REVIEW: str = "[CHIMERIC G-PROTEIN]"
 
 # ---------------------------------------------------------------------------
 # Annotator function call name
@@ -555,14 +639,13 @@ CSV_SCHEMA: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
             "Resolution",
             "State",
             "ChainID",
-            "label_asym_id",
             "Note",
             "Date",
+            "label_asym_id",
         ),
         "ligands.csv": (
             "PDB",
             "ChainID",
-            "label_asym_id",
             "Name",
             "PubChemID",
             "Role",
@@ -570,6 +653,7 @@ CSV_SCHEMA: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
             "Type",
             "Date",
             "In structure",
+            "label_asym_id",
             "SMILES",
             "InChIKey",
             "Sequence",
@@ -578,16 +662,16 @@ CSV_SCHEMA: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
             "PDB",
             "Alpha_UniProt",
             "Alpha_ChainID",
-            "Alpha_label_asym_id",
             "Beta_UniProt",
             "Beta_ChainID",
-            "Beta_label_asym_id",
             "Gamma_UniProt",
             "Gamma_ChainID",
-            "Gamma_label_asym_id",
             "Note",
+            "Alpha_label_asym_id",
+            "Beta_label_asym_id",
+            "Gamma_label_asym_id",
         ),
-        "arrestins.csv": ("PDB", "UniProt", "ChainID", "label_asym_id", "Note"),
+        "arrestins.csv": ("PDB", "UniProt", "ChainID", "Note", "label_asym_id"),
         "fusion_proteins.csv": ("PDB", "Name"),
         "nanobodies.csv": ("PDB", "Name"),
         "grk.csv": ("PDB", "Name"),

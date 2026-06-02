@@ -5,6 +5,8 @@ and tracking which PDBs have been processed.
 """
 
 import json
+import os
+import tempfile
 from datetime import UTC
 from typing import Any
 
@@ -20,10 +22,15 @@ def load_processed_log() -> dict:
     try:
         with open(cfg.processed_log_file, encoding="utf-8") as f:
             data = json.load(f)
-            return data if isinstance(data, dict) else {}
-    except Exception as e:
-        console.print(f"[bold red]Error loading processed log: {e}[/bold red]")
-        return {}
+    except (json.JSONDecodeError, OSError) as e:
+        # The file exists but is unreadable/corrupt. Returning {} here would
+        # masquerade as "nothing processed yet" and re-emit duplicate CSV rows
+        # for already-completed PDBs — fail loudly instead.
+        raise RuntimeError(
+            f"Processed-PDB log {cfg.processed_log_file} is unreadable ({e}). "
+            "Fix or remove it before curating to avoid duplicate rows."
+        ) from e
+    return data if isinstance(data, dict) else {}
 
 
 def update_processed_log(pdb_id: str, status: str = AGG_STATUS_COMPLETED) -> None:
@@ -37,10 +44,16 @@ def update_processed_log(pdb_id: str, status: str = AGG_STATUS_COMPLETED) -> Non
         "status": status,
         "timestamp": datetime.now(UTC).isoformat(),
     }
+    # Atomic write (temp file + replace) so an interrupted write can't truncate
+    # the completion log and lose the record of already-processed PDBs.
     try:
-        with open(cfg.processed_log_file, "w", encoding="utf-8") as f:
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=cfg.state_dir, suffix=".tmp", delete=False
+        ) as f:
             json.dump(log_data, f, indent=4)
-    except Exception as e:
+            tmp_name = f.name
+        os.replace(tmp_name, cfg.processed_log_file)
+    except OSError as e:
         console.print(f"[bold red]FATAL: Failed to update log: {e}[/bold red]")
 
 

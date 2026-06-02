@@ -9,7 +9,9 @@ label_asym_id mapping, assembly cross-check, and warning format compliance.
 
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -19,6 +21,7 @@ from gpcr_tools.config import (
     ALERT_CONFIRMED_OLIGOMER,
     ALERT_HALLUCINATION,
     ALERT_MISSED_PROTOMER,
+    ALERT_MULTI_COPY_LIGAND,
     ALERT_SUSPICIOUS_7TM,
     OLIGOMER_HETEROMER,
     OLIGOMER_HOMOMER,
@@ -37,6 +40,8 @@ from gpcr_tools.validator.oligomer import (
     _get_assembly_cross_check,
     _suggest_primary_protomer,
     analyze_oligomer,
+    build_nonpolymer_instance_index,
+    find_multi_copy_components,
     get_sequence_length,
     is_gpcr_slug,
     map_uniprot_to_entity,
@@ -247,6 +252,58 @@ class TestClassification:
         assert result["classification"] == OLIGOMER_HETEROMER
 
 
+class TestRosterTmGating:
+    """A chain mis-mapped to a GPCR slug but whose annotation is not 7TM (a
+    peptide ligand, single-pass partner, soluble protein) must not count as a
+    protomer — no false HETEROMER, no false MISSED_PROTOMER."""
+
+    def _analyze(self, entities, tm_roster, ai_chain="A"):
+        enriched = _make_enriched_with_entities(entities)
+        data: dict[str, Any] = {"receptor_info": {"chain_id": ai_chain}}
+        with patch(
+            "gpcr_tools.validator.oligomer.scan_all_chains_7tm",
+            return_value=(tm_roster, None),
+        ):
+            analyze_oligomer("TEST", data, enriched)
+        return data["oligomer_analysis"]
+
+    def test_zero_tm_peptide_ligand_chain_excluded(self) -> None:
+        # 8XGR-shape: endothelin-1 peptide (0 TM) sharing the roster with EDNRB.
+        o = self._analyze(
+            [_make_entity("ednrb_human", "R"), _make_entity("edn1_human", "L")],
+            {
+                "R": {"resolved_tms": 7, "total_tms": 7, "status": TM_STATUS_COMPLETE},
+                "L": {"resolved_tms": 0, "total_tms": 0, "status": TM_STATUS_UNKNOWN},
+            },
+            ai_chain="R",
+        )
+        assert o["classification"] == OLIGOMER_MONOMER
+        assert not any(a["type"] == ALERT_MISSED_PROTOMER for a in o.get("alerts") or [])
+
+    def test_single_pass_partner_excluded(self) -> None:
+        # 8XFS-shape: single-pass E3 ligase ZNRF3 (1 TM) alongside 7TM LGR4.
+        o = self._analyze(
+            [_make_entity("lgr4_human", "A"), _make_entity("znrf3_human", "C")],
+            {
+                "A": {"resolved_tms": 7, "total_tms": 7, "status": TM_STATUS_COMPLETE},
+                "C": {"resolved_tms": 1, "total_tms": 1, "status": TM_STATUS_INCOMPLETE},
+            },
+        )
+        assert o["classification"] == OLIGOMER_MONOMER
+        assert not any(a["type"] == ALERT_MISSED_PROTOMER for a in o.get("alerts") or [])
+
+    def test_two_real_gpcrs_stay_heteromer(self) -> None:
+        # Guard against over-pruning: two genuine 7TM GPCRs remain a heteromer.
+        o = self._analyze(
+            [_make_entity("drd2_human", "A"), _make_entity("oprm_human", "B")],
+            {
+                "A": {"resolved_tms": 7, "total_tms": 7, "status": TM_STATUS_COMPLETE},
+                "B": {"resolved_tms": 7, "total_tms": 7, "status": TM_STATUS_COMPLETE},
+            },
+        )
+        assert o["classification"] == OLIGOMER_HETEROMER
+
+
 # ===================================================================
 # _suggest_primary_protomer
 # ===================================================================
@@ -294,6 +351,13 @@ class TestSuggestPrimaryProtomer:
         result = _suggest_primary_protomer(roster, {}, OLIGOMER_HETEROMER, "A", {}, [])
         assert result["chain_id"] == "A"
         assert result["rank_used"] == 4
+
+
+def test_map_uniprot_to_entity_skips_incomplete_region():
+    """An alignment region missing a coordinate field is skipped, not a KeyError
+    that would fail the whole PDB's oligomer analysis."""
+    regions = [{"ref_beg_seq_id": 1, "entity_beg_seq_id": 1}]  # no 'length'
+    assert map_uniprot_to_entity(1, 10, regions) == []
 
     def test_rank4_longest_sequence(self) -> None:
         roster = {
@@ -669,6 +733,7 @@ class TestAnalyzeOligomer:
         assert "alerts" in result
         assert "chain_id_override" in result
         assert "label_asym_id_map" in result
+        assert "nonpolymer_instance_index" in result
 
     def test_monomer_no_override(self) -> None:
         enriched = _make_enriched_with_entities([_make_entity("drd2_human", "A")])
@@ -785,3 +850,233 @@ class TestWarningFormat:
 
         assert len(suspicious_alerts) == 1
         assert _BL3_REGEX.search(suspicious_alerts[0]["message"])
+
+
+# ===================================================================
+# build_nonpolymer_instance_index / find_multi_copy_components
+# ===================================================================
+
+_ENRICHED_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "real_pdbs" / "enriched"
+
+
+def _load_enriched_entry(pdb_id: str) -> dict[str, Any]:
+    """Load a real enriched fixture and return its ``data.entry`` structure dict.
+
+    This is the same shape the pipeline hands to ``analyze_oligomer``
+    (``load_enriched_data`` returns the ``data.entry`` dict).
+    """
+    text = (_ENRICHED_FIXTURES / f"{pdb_id}.json").read_text(encoding="utf-8")
+    return json.loads(text)["data"]["entry"]
+
+
+class TestBuildNonpolymerInstanceIndex:
+    def test_indexes_real_multi_and_single_copies(self) -> None:
+        index = build_nonpolymer_instance_index(_load_enriched_entry("5G53"))
+        # Two copies of NEC on different author chains (A->E, B->H).
+        assert index["NEC"] == [
+            {"auth_asym_id": "A", "label_asym_id": "E", "auth_seq_id": "400"},
+            {"auth_asym_id": "B", "label_asym_id": "H", "auth_seq_id": "400"},
+        ]
+        # A single GDP copy.
+        assert index["GDP"] == [
+            {"auth_asym_id": "C", "label_asym_id": "I", "auth_seq_id": "400"},
+        ]
+
+    def test_distinguishes_copies_sharing_one_author_chain(self) -> None:
+        # SOG has two modelled copies, BOTH on author chain A; only the
+        # label_asym_id (F vs G) tells them apart -- the reason the author chain
+        # alone cannot distinguish copies.
+        index = build_nonpolymer_instance_index(_load_enriched_entry("5G53"))
+        sog = index["SOG"]
+        assert [r["auth_asym_id"] for r in sog] == ["A", "A"]
+        assert [r["label_asym_id"] for r in sog] == ["F", "G"]
+        assert [r["auth_seq_id"] for r in sog] == ["501", "502"]
+
+    def test_instances_sorted_by_label_asym_id(self) -> None:
+        index = build_nonpolymer_instance_index(_load_enriched_entry("9NOR"))
+        labels = [r["label_asym_id"] for r in index["NAG"]]
+        assert labels == sorted(labels)
+        assert len(labels) == 16
+
+    def test_empty_when_no_nonpolymer_entities(self) -> None:
+        assert build_nonpolymer_instance_index(_load_enriched_entry("8TII")) == {}
+
+    def test_handles_missing_and_null_keys(self) -> None:
+        assert build_nonpolymer_instance_index({}) == {}
+        assert build_nonpolymer_instance_index({"nonpolymer_entities": None}) == {}
+        assert build_nonpolymer_instance_index({"nonpolymer_entities": []}) == {}
+
+    def test_skips_entity_without_component_id(self) -> None:
+        enriched: dict[str, Any] = {
+            "nonpolymer_entities": [
+                {
+                    "rcsb_nonpolymer_entity_container_identifiers": {},
+                    "nonpolymer_entity_instances": [
+                        {
+                            "rcsb_nonpolymer_entity_instance_container_identifiers": {
+                                "auth_asym_id": "A",
+                                "asym_id": "D",
+                                "auth_seq_id": "201",
+                            }
+                        }
+                    ],
+                }
+            ]
+        }
+        assert build_nonpolymer_instance_index(enriched) == {}
+
+    def test_skips_instance_without_label_asym_id(self) -> None:
+        enriched: dict[str, Any] = {
+            "nonpolymer_entities": [
+                {
+                    "rcsb_nonpolymer_entity_container_identifiers": {"nonpolymer_comp_id": "NA"},
+                    "nonpolymer_entity_instances": [
+                        {
+                            "rcsb_nonpolymer_entity_instance_container_identifiers": {
+                                "auth_asym_id": "A",
+                                "auth_seq_id": "201",
+                            }
+                        },
+                        {
+                            "rcsb_nonpolymer_entity_instance_container_identifiers": {
+                                "auth_asym_id": "A",
+                                "asym_id": "D",
+                                "auth_seq_id": "202",
+                            }
+                        },
+                    ],
+                }
+            ]
+        }
+        # Only the instance carrying a label_asym_id survives.
+        assert build_nonpolymer_instance_index(enriched) == {
+            "NA": [{"auth_asym_id": "A", "label_asym_id": "D", "auth_seq_id": "202"}]
+        }
+
+
+class TestFindMultiCopyComponents:
+    def test_reports_only_repeated_components(self) -> None:
+        index = build_nonpolymer_instance_index(_load_enriched_entry("5G53"))
+        # NEC and SOG each have two copies; the single GDP copy is excluded.
+        assert find_multi_copy_components(index) == {"NEC": 2, "SOG": 2}
+
+    def test_counts_every_repeated_component(self) -> None:
+        index = build_nonpolymer_instance_index(_load_enriched_entry("9M88"))
+        assert find_multi_copy_components(index) == {
+            "5YM": 2,
+            "1DO": 8,
+            "A1EM3": 4,
+            "A1EQ8": 4,
+            "A1EM2": 2,
+            "A1EM1": 2,
+        }
+
+    def test_counts_repeated_glycosylation(self) -> None:
+        index = build_nonpolymer_instance_index(_load_enriched_entry("9NOR"))
+        assert find_multi_copy_components(index) == {"NAG": 16}
+
+    def test_empty_index_has_no_multi_copies(self) -> None:
+        assert find_multi_copy_components({}) == {}
+
+    def test_single_copy_excluded(self) -> None:
+        index = {"GDP": [{"auth_asym_id": "C", "label_asym_id": "I", "auth_seq_id": "400"}]}
+        assert find_multi_copy_components(index) == {}
+
+
+class TestAnalyzeOligomerAttachesInstanceIndex:
+    def test_index_attached_and_sorted(self) -> None:
+        # No GPCR polymer chains -> no 7TM scan -> the test stays offline.
+        enriched: dict[str, Any] = {
+            "polymer_entities": [],
+            "nonpolymer_entities": [
+                {
+                    "rcsb_nonpolymer_entity_container_identifiers": {"nonpolymer_comp_id": "NA"},
+                    "nonpolymer_entity_instances": [
+                        {
+                            "rcsb_nonpolymer_entity_instance_container_identifiers": {
+                                "auth_asym_id": "A",
+                                "asym_id": "E",
+                                "auth_seq_id": "202",
+                            }
+                        },
+                        {
+                            "rcsb_nonpolymer_entity_instance_container_identifiers": {
+                                "auth_asym_id": "A",
+                                "asym_id": "D",
+                                "auth_seq_id": "201",
+                            }
+                        },
+                    ],
+                }
+            ],
+        }
+        data: dict[str, Any] = {"receptor_info": {}}
+        analyze_oligomer("TEST", data, enriched)
+        assert data["oligomer_analysis"]["nonpolymer_instance_index"] == {
+            "NA": [
+                {"auth_asym_id": "A", "label_asym_id": "D", "auth_seq_id": "201"},
+                {"auth_asym_id": "A", "label_asym_id": "E", "auth_seq_id": "202"},
+            ]
+        }
+
+
+class TestMultiCopyLigandAlert:
+    """analyze_oligomer raises a review alert when a component the model
+    annotated as a ligand is modelled in more than one copy."""
+
+    def _enriched(self, comps: dict[str, list[tuple[str, str, str]]]) -> dict[str, Any]:
+        nonpolymer = [
+            {
+                "rcsb_nonpolymer_entity_container_identifiers": {"nonpolymer_comp_id": comp_id},
+                "nonpolymer_entity_instances": [
+                    {
+                        "rcsb_nonpolymer_entity_instance_container_identifiers": {
+                            "auth_asym_id": auth,
+                            "asym_id": label,
+                            "auth_seq_id": seq,
+                        }
+                    }
+                    for (auth, label, seq) in insts
+                ],
+            }
+            for comp_id, insts in comps.items()
+        ]
+        # No GPCR polymer chains -> no 7TM scan -> the test stays offline.
+        return {"polymer_entities": [], "nonpolymer_entities": nonpolymer}
+
+    def _multi_copy_alerts(self, data: dict[str, Any]) -> list[dict[str, Any]]:
+        return [
+            a for a in data["oligomer_analysis"]["alerts"] if a["type"] == ALERT_MULTI_COPY_LIGAND
+        ]
+
+    def test_annotated_multi_copy_emits_alert(self) -> None:
+        enriched = self._enriched({"CA": [("A", "D", "201"), ("A", "E", "202")]})
+        data: dict[str, Any] = {
+            "receptor_info": {},
+            "ligands": [{"chem_comp_id": "CA", "name": "Calcium ion"}],
+        }
+        analyze_oligomer("TEST", data, enriched)
+        alerts = self._multi_copy_alerts(data)
+        assert len(alerts) == 1
+        msg = alerts[0]["message"]
+        assert "ligands[CA]" in msg
+        assert "2 copies" in msg
+
+    def test_unannotated_multi_copy_stays_silent(self) -> None:
+        # NAG is modelled twice but the model did not annotate it as a ligand.
+        enriched = self._enriched({"NAG": [("A", "D", "301"), ("A", "E", "302")]})
+        data: dict[str, Any] = {
+            "receptor_info": {},
+            "ligands": [{"chem_comp_id": "CA", "name": "Calcium ion"}],
+        }
+        analyze_oligomer("TEST", data, enriched)
+        assert self._multi_copy_alerts(data) == []
+
+    def test_single_instance_no_alert(self) -> None:
+        enriched = self._enriched({"CA": [("A", "D", "201")]})
+        data: dict[str, Any] = {
+            "receptor_info": {},
+            "ligands": [{"chem_comp_id": "CA", "name": "Calcium ion"}],
+        }
+        analyze_oligomer("TEST", data, enriched)
+        assert self._multi_copy_alerts(data) == []

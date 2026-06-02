@@ -78,9 +78,9 @@ def init_workspace(workspace_root: Path | None = None) -> None:
             f.write("\n")
 
     # Copy bundled default prompt file if it does not exist
-    default_prompt = workspace_root / "prompts" / "v5.txt"
+    default_prompt = workspace_root / "prompts" / "v5.md"
     if not default_prompt.exists():
-        src = importlib.resources.files("gpcr_tools") / "data" / "prompts" / "v5.txt"
+        src = importlib.resources.files("gpcr_tools") / "data" / "prompts" / "v5.md"
         with importlib.resources.as_file(src) as src_path:
             shutil.copy2(src_path, default_prompt)
 

@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 
 
 def cli() -> None:
+    # Surface our own INFO progress (pipeline stages, fetch/annotate/aggregate)
+    # while keeping third-party libraries quiet. Without this, logging defaults
+    # to WARNING and all progress messages are swallowed.
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
+    logging.getLogger("gpcr_tools").setLevel(logging.INFO)
+
     parser = argparse.ArgumentParser(
         prog="gpcr-tools",
         description="GPCR Annotation Tools — Human-in-the-loop curation suite.",
@@ -195,6 +202,63 @@ def cli() -> None:
         help="Optional: target a specific PDB ID instead of processing all pending.",
     )
 
+    # pipeline ---------------------------------------------------------
+    pipe_parser = subparsers.add_parser(
+        "pipeline",
+        help="Run fetch -> fetch-papers -> annotate -> aggregate in dependency order.",
+    )
+    pipe_parser.add_argument(
+        "pdb_id",
+        nargs="?",
+        default=None,
+        help="Optional: run the pipeline for a specific PDB ID.",
+    )
+    pipe_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Print the planned stage sequence without running anything.",
+    )
+    pipe_parser.add_argument(
+        "--batch",
+        action="store_true",
+        default=False,
+        help="Annotate via the Batch API (the pipeline stops after submission).",
+    )
+    pipe_parser.add_argument(
+        "--runs",
+        type=_positive_int,
+        default=GEMINI_DEFAULT_RUNS,
+        help=f"Number of annotation runs per PDB (default: {GEMINI_DEFAULT_RUNS}).",
+    )
+    pipe_parser.add_argument(
+        "--skip-fetch-papers",
+        action="store_true",
+        default=False,
+        help="Skip the paper-download stage.",
+    )
+    pipe_parser.add_argument(
+        "--skip-api-checks",
+        action="store_true",
+        default=False,
+        help="Skip UniProt/PubChem/chimera validation in the aggregate stage.",
+    )
+
+    # report -----------------------------------------------------------
+    report_parser = subparsers.add_parser(
+        "report",
+        help="Print an operational report over pipeline outputs.",
+    )
+    report_parser.add_argument(
+        "kind",
+        choices=["pdf-coverage", "full-audit", "tail-analysis"],
+        help=(
+            "pdf-coverage: paper-PDF outcomes; "
+            "full-audit: validation warnings + chimera conflicts across PDBs; "
+            "tail-analysis: G-protein chimera score distribution."
+        ),
+    )
+
     args = parser.parse_args()
 
     if args.command == "init-workspace":
@@ -231,90 +295,20 @@ def cli() -> None:
 
             recover_batch()
         else:
-            import json
-            from pathlib import Path
+            from gpcr_tools.annotator.runner import run_annotation_stage
 
-            from gpcr_tools.config import get_config
-
-            cfg = get_config()
-
-            # Resolve target PDB IDs
-            if args.pdb_id:
-                pdb_ids = [args.pdb_id.upper()]
-            elif args.targets:
-                from gpcr_tools.fetcher.targets import read_targets
-
-                pdb_ids = read_targets(Path(args.targets))
-            else:
-                # Auto-discover: enriched PDBs missing complete ai_results
-                enriched_pdbs = {p.stem.upper() for p in cfg.enriched_dir.glob("*.json")}
-                done_pdbs: set[str] = set()
-                if cfg.ai_results_dir.exists():
-                    for d in cfg.ai_results_dir.iterdir():
-                        if d.is_dir():
-                            completed = sum(
-                                1 for n in range(1, args.runs + 1) if (d / f"run_{n}.json").exists()
-                            )
-                            if completed >= args.runs:
-                                done_pdbs.add(d.name.upper())
-                pdb_ids = sorted(enriched_pdbs - done_pdbs)
-
-            # Resolve prompt text
-            if args.prompt:
-                prompt_text = Path(args.prompt).read_text(encoding="utf-8")
-            else:
-                if not cfg.default_prompt_file.exists():
-                    print(
-                        f"Error: default prompt file not found at {cfg.default_prompt_file}\n"
-                        "Please create it or use --prompt to specify one.",
-                        file=sys.stderr,
-                    )
-                    sys.exit(1)
-                prompt_text = cfg.default_prompt_file.read_text(encoding="utf-8")
-
-            # Resolve model name: --model flag > GPCR_GEMINI_MODEL env > config default
-            from gpcr_tools.config import get_gemini_model_name
-
-            model_name = args.model or get_gemini_model_name()
-
-            if args.batch:
-                from gpcr_tools.annotator.runner import build_and_submit_batch
-
-                build_and_submit_batch(
-                    pdb_ids, prompt_text, num_runs=args.runs, model_name=model_name
+            try:
+                run_annotation_stage(
+                    pdb_id=args.pdb_id,
+                    targets_file=args.targets,
+                    prompt_file=args.prompt,
+                    model=args.model,
+                    num_runs=args.runs,
+                    batch=args.batch,
                 )
-            else:
-                from gpcr_tools.annotator.runner import run_single_pdb
-
-                for pdb_id in pdb_ids:
-                    enriched_path = cfg.enriched_dir / f"{pdb_id}.json"
-                    if not enriched_path.exists():
-                        print(
-                            f"Skipping {pdb_id}: no enriched data at {enriched_path}",
-                            file=sys.stderr,
-                        )
-                        continue
-
-                    with open(enriched_path, encoding="utf-8") as fh:
-                        enriched_data = json.load(fh)
-
-                    # Find PDF (required for annotation)
-                    pdf_path = cfg.papers_dir / f"{pdb_id}.pdf"
-                    if not pdf_path.exists():
-                        print(
-                            f"Skipping {pdb_id}: no PDF at {pdf_path}",
-                            file=sys.stderr,
-                        )
-                        continue
-
-                    run_single_pdb(
-                        pdb_id=pdb_id,
-                        enriched_data=enriched_data,
-                        prompt_text=prompt_text,
-                        pdf_path=pdf_path,
-                        num_runs=args.runs,
-                        model_name=model_name,
-                    )
+            except FileNotFoundError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                sys.exit(1)
 
     elif args.command == "csv-generator":
         import warnings
@@ -361,6 +355,28 @@ def cli() -> None:
 
         auto_accept = getattr(args, "auto_accept", False)
         main(target_pdb=args.pdb_id, auto_accept=auto_accept)
+
+    elif args.command == "pipeline":
+        from gpcr_tools.pipeline import run_pipeline
+
+        run_pipeline(
+            pdb_id=args.pdb_id,
+            dry_run=args.dry_run,
+            batch=args.batch,
+            num_runs=args.runs,
+            skip_fetch_papers=args.skip_fetch_papers,
+            skip_api_checks=args.skip_api_checks,
+        )
+
+    elif args.command == "report":
+        from gpcr_tools import reports
+
+        report_funcs = {
+            "pdf-coverage": reports.report_pdf_coverage,
+            "full-audit": reports.report_full_audit,
+            "tail-analysis": reports.report_tail_analysis,
+        }
+        print(report_funcs[args.kind]())
 
     elif args.command is None:
         parser.print_help()

@@ -159,18 +159,72 @@ class TestListOfDictVoting:
         assert "GTP" in ids
 
     def test_missing_grouping_key_fallback(self) -> None:
-        """Items without the key field fall back to index-based matching.
+        """Items without the key field fall back to identity/index grouping.
 
-        This is explicitly mandated by the migration plan — hallucinated
-        ligands may lack chem_comp_id.  They should not crash voting.
+        Hallucinated ligands may lack chem_comp_id.  They must not be silently
+        dropped — they survive through the fallback path.
         """
         runs = [
             [{"chem_comp_id": "ATP", "role": "agonist"}, {"role": "unknown"}],
             [{"chem_comp_id": "ATP", "role": "agonist"}],
         ]
         majority, _ = get_majority_votes(runs, path="ligands")
-        # ATP should still appear — the keyless item is silently skipped
         assert any(isinstance(m, dict) and m.get("chem_comp_id") == "ATP" for m in majority)
+        # the keyless item must survive, not be silently skipped
+        assert any(isinstance(m, dict) and m.get("role") == "unknown" for m in majority)
+
+
+class TestEmptyAndPlaceholderKeys:
+    """Placeholder/empty grouping keys must neither collapse distinct entities
+    nor silently drop keyless items.
+    """
+
+    def test_placeholder_none_string_does_not_collapse_protein_ligands(self) -> None:
+        # The schema fills chem_comp_id="None" (a string) for protein ligands.
+        # Treating the literal "None" as a real key would collapse every
+        # protein ligand into one bogus group, even when they are distinct.
+        runs = [
+            [
+                {"chem_comp_id": "None", "name": "R-spondin-2", "type": "protein"},
+                {"chem_comp_id": "None", "name": "ZNRF3", "type": "protein"},
+            ],
+            [
+                {"chem_comp_id": "None", "name": "R-spondin-2", "type": "protein"},
+                {"chem_comp_id": "None", "name": "ZNRF3", "type": "protein"},
+            ],
+        ]
+        majority, _ = get_majority_votes(runs, path="ligands")
+        names = {m.get("name") for m in majority if isinstance(m, dict)}
+        assert names == {"R-spondin-2", "ZNRF3"}
+
+    def test_empty_value_variants_not_used_as_key(self) -> None:
+        # Every EMPTY_VALUES variant must be treated as empty, so two distinct
+        # items are not merged under it.
+        runs = [
+            [
+                {"chem_comp_id": "n/a", "name": "Alpha", "type": "protein"},
+                {"chem_comp_id": "null", "name": "Beta", "type": "protein"},
+            ],
+        ]
+        majority, _ = get_majority_votes(runs, path="ligands")
+        names = {m.get("name") for m in majority if isinstance(m, dict)}
+        assert names == {"Alpha", "Beta"}
+
+    def test_keyless_item_not_silently_dropped(self) -> None:
+        # An item without chem_comp_id must survive voting, not vanish.
+        runs = [
+            [
+                {"chem_comp_id": "ATP", "role": "agonist"},
+                {"name": "mystery-ligand", "role": "unknown"},
+            ],
+            [
+                {"chem_comp_id": "ATP", "role": "agonist"},
+                {"name": "mystery-ligand", "role": "unknown"},
+            ],
+        ]
+        majority, _ = get_majority_votes(runs, path="ligands")
+        assert any(m.get("chem_comp_id") == "ATP" for m in majority if isinstance(m, dict))
+        assert any(m.get("name") == "mystery-ligand" for m in majority if isinstance(m, dict))
 
 
 # ===================================================================
@@ -197,6 +251,41 @@ class TestSoftFieldExclusion:
         majority, _ = get_majority_votes(runs)
         assert majority["info"]["value"] == "A"
         assert majority["info"]["note"] is None
+
+    def test_source_excluded(self) -> None:
+        # The evidence "source" field is explanatory provenance (paper vs PDB
+        # metadata), not an ingested decision value; like reasoning/quote it
+        # must not drive cross-run voting.
+        runs = [
+            {"value": "X", "source": "Paper"},
+            {"value": "X", "source": "Both Paper and PDB Metadata"},
+        ]
+        majority, _ = get_majority_votes(runs)
+        assert majority["value"] == "X"
+        assert majority["source"] is None
+
+    def test_source_not_a_discrepancy(self) -> None:
+        best = {"value": "X", "source": "Paper"}
+        majority = {"value": "X", "source": "Both Paper and PDB Metadata"}
+        votes = {
+            "value": {"X": 2},
+            "source": {"Paper": 1, "Both Paper and PDB Metadata": 1},
+        }
+        discs = find_discrepancies(best, majority, votes)
+        assert all(not d["path"].endswith("source") for d in discs)
+
+    def test_provenance_excluded(self) -> None:
+        # The per-run _provenance block (model/prompt/run metadata) must never
+        # enter cross-run voting or produce discrepancies.
+        runs = [
+            {"value": "X", "_provenance": {"model_served": "a", "run": 1}},
+            {"value": "X", "_provenance": {"model_served": "b", "run": 2}},
+        ]
+        majority, _ = get_majority_votes(runs)
+        assert majority["value"] == "X"
+        assert majority["_provenance"] is None
+        discs = find_discrepancies(runs[0], majority, {})
+        assert all(not d["path"].endswith("_provenance") for d in discs)
 
 
 # ===================================================================
@@ -304,6 +393,43 @@ class TestDiscrepancies:
     def test_no_discrepancy_on_match(self) -> None:
         data = {"a": 1, "b": 2}
         assert find_discrepancies(data, data, {}) == []
+
+    def test_near_tie_flagged_even_when_best_matches_majority(self) -> None:
+        # A 6:5 majority is a near coin-flip — surface it for review even
+        # though the best run agrees with the majority.
+        best = {"a": "Y"}
+        majority = {"a": "Y"}
+        votes = {"a": {"Y": 6, "X": 5}}
+        discs = find_discrepancies(best, majority, votes)
+        flagged = [d for d in discs if d["path"] == "a"]
+        assert flagged and flagged[0].get("needs_review") is True
+        assert flagged[0].get("vote_margin") == 1
+
+    def test_exact_tie_flagged(self) -> None:
+        best = {"a": "Y"}
+        majority = {"a": "Y"}
+        votes = {"a": {"Y": 5, "X": 5}}
+        discs = find_discrepancies(best, majority, votes)
+        assert any(d.get("needs_review") for d in discs)
+
+    def test_clear_majority_not_flagged(self) -> None:
+        best = {"a": "Y"}
+        majority = {"a": "Y"}
+        votes = {"a": {"Y": 9, "X": 1}}
+        assert find_discrepancies(best, majority, votes) == []
+
+    def test_moderate_margin_not_flagged(self) -> None:
+        # 6:4 (margin 2) is a clear enough majority; conservative — no flag.
+        best = {"a": "Y"}
+        majority = {"a": "Y"}
+        votes = {"a": {"Y": 6, "X": 4}}
+        assert find_discrepancies(best, majority, votes) == []
+
+    def test_single_candidate_no_crash_no_flag(self) -> None:
+        best = {"a": "Y"}
+        majority = {"a": "Y"}
+        votes = {"a": {"Y": 3}}
+        assert find_discrepancies(best, majority, votes) == []
 
     def test_scalar_discrepancy(self) -> None:
         best = {"a": "X"}
@@ -453,3 +579,88 @@ class TestEdgeCases:
         majority, votes = get_majority_votes([None, None])
         assert majority is None
         assert votes == {None: 2}
+
+
+class TestKeylessDiscrepancyDetection:
+    def test_keyless_ligands_not_cross_wired(self) -> None:
+        # Two protein ligands both with chem_comp_id="None" must stay distinct
+        # in discrepancy detection (they collapsed under "None" before).
+        best = {
+            "ligands": [
+                {"chem_comp_id": "None", "name": "Alpha", "role": "X"},
+                {"chem_comp_id": "None", "name": "Beta", "role": "Y"},
+            ]
+        }
+        majority = {
+            "ligands": [
+                {"chem_comp_id": "None", "name": "Alpha", "role": "Z"},
+                {"chem_comp_id": "None", "name": "Beta", "role": "Y"},
+            ]
+        }
+        votes = {"ligands": [{}, {}]}
+        discs = find_discrepancies(best, majority, votes)
+        paths = [d["path"] for d in discs]
+        # Alpha's role disagreement surfaces on Alpha's own path, never ligands[None]
+        assert any("Alpha" in p and p.endswith(".role") for p in paths)
+        assert not any(p == "ligands[None].role" for p in paths)
+
+
+class TestLowConfidenceConsensus:
+    def test_low_confidence_state_flagged(self) -> None:
+        from gpcr_tools.aggregator.voting import flag_low_confidence_consensus
+
+        best = {"structure_info": {"state": {"value": "active", "confidence": "Low"}}}
+        flags = flag_low_confidence_consensus(best, frozenset({"Low"}))
+        assert any(
+            f["path"] == "structure_info.state.value" and f.get("needs_review") for f in flags
+        )
+
+    def test_high_confidence_not_flagged(self) -> None:
+        from gpcr_tools.aggregator.voting import flag_low_confidence_consensus
+
+        best = {"structure_info": {"state": {"value": "active", "confidence": "High"}}}
+        assert flag_low_confidence_consensus(best, frozenset({"Low"})) == []
+
+    def test_low_confidence_ligand_role_flagged(self) -> None:
+        from gpcr_tools.aggregator.voting import flag_low_confidence_consensus
+
+        best = {
+            "ligands": [{"chem_comp_id": "ATP", "role": {"value": "agonist", "confidence": "Low"}}]
+        }
+        flags = flag_low_confidence_consensus(best, frozenset({"Low"}))
+        assert any(f["path"] == "ligands[ATP].role.value" for f in flags)
+
+    def test_low_confidence_aux_type_flagged(self) -> None:
+        from gpcr_tools.aggregator.voting import flag_low_confidence_consensus
+
+        best = {
+            "auxiliary_proteins": [
+                {"name": "Nb35", "type": {"value": "nanobody", "confidence": "Low"}}
+            ]
+        }
+        flags = flag_low_confidence_consensus(best, frozenset({"Low"}))
+        assert any(f["path"] == "auxiliary_proteins[Nb35].type.value" for f in flags)
+
+
+class TestObjectListScoring:
+    def test_object_list_scored_by_structured_match(self) -> None:
+        # An object list (ligands) must contribute to the score via per-item
+        # match; whole-object equality fails once soft fields are None.
+        majority = {"ligands": [{"chem_comp_id": "ATP", "role": "agonist", "reasoning": None}]}
+        run = {"ligands": [{"chem_comp_id": "ATP", "role": "agonist", "reasoning": "text"}]}
+        assert score_run(run, majority) >= 1
+
+    def test_scalar_list_membership_preserved(self) -> None:
+        # Plain scalar lists keep whole-item membership scoring.
+        assert score_run([1, 2, 99], [1, 2, 3]) == 2
+
+    def test_best_run_counts_ligand_match(self) -> None:
+        # The run whose ligand role matches the majority is selected, even
+        # though both runs tie on scalar fields.
+        majority = {"ligands": [{"chem_comp_id": "ATP", "role": "agonist", "reasoning": None}]}
+        runs = [
+            {"ligands": [{"chem_comp_id": "ATP", "role": "antagonist", "reasoning": "a"}]},
+            {"ligands": [{"chem_comp_id": "ATP", "role": "agonist", "reasoning": "b"}]},
+        ]
+        idx, _ = select_best_run(runs, majority)
+        assert idx == 1
