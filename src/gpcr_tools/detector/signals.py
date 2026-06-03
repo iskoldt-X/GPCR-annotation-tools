@@ -16,6 +16,7 @@ SIGNAL_CHIMERIC_GPROTEIN: str = "chimeric_g_protein"
 SIGNAL_EXCLUDED_REAL_LIGAND: str = "excluded_real_ligand"
 SIGNAL_DISPUTED_LIGAND: str = "disputed_ligand"
 SIGNAL_DUAL_ROLE_LIGAND: str = "dual_role_ligand"
+SIGNAL_SITE_REF: str = "site_ref"
 
 SEVERITY_ADVISORY: str = "advisory"
 SEVERITY_REVIEW: str = "review"

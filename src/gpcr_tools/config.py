@@ -366,6 +366,16 @@ def list_item_identity(item: dict[str, Any], key_field: str, idx: int) -> str:
     """
     group_key = item.get(key_field)
     if not is_empty_key(group_key):
+        # A ligand modelled at two distinct sites is emitted as two entries with
+        # the same component id but different site_ref; without the site in the
+        # identity the two would collapse into one during voting. Only ligands
+        # carry site_ref, so other list types are unaffected. (A single-site
+        # ligand keys as "comp:site"; if some runs in a batch instead emit
+        # 'unknown', those key as "comp" and surface as a real cross-run
+        # disagreement -- which is correct to flag, not hide.)
+        site_ref = item.get("site_ref")
+        if site_ref and not is_empty_key(site_ref) and str(site_ref).lower() != SITE_REF_UNKNOWN:
+            return f"{group_key}:{site_ref}"
         return str(group_key)
     fallback_id = item.get("name") or item.get("type") or f"idx{idx}"
     return f"__keyless__:{fallback_id}"
@@ -517,6 +527,57 @@ GEOMETRY_NEIGHBOR_SEARCH_RADIUS: float = 6.0  # >= every query radius above
 # genuinely different (orthosteric vs. allosteric), not the same site re-modelled.
 GEOMETRY_DUAL_ROLE_MAX_COPIES: int = 3
 GEOMETRY_DUAL_ROLE_POCKET_JACCARD_MAX: float = 0.5
+
+# ---------------------------------------------------------------------------
+# Ligand binding-site classification (site_ref)
+# ---------------------------------------------------------------------------
+# A ligand's binding site is computed upstream from its receptor contact
+# residues: structure contacts -> UniProt positions (via RCSB alignment) ->
+# GPCRdb generic numbers + segments (via the shipped table) -> a controlled
+# site_ref. The generic-numbering reference is sequence-level (like the slug),
+# never GPCRdb's downstream per-structure curation.
+SITE_REF_DATA_FILE: str = "gpcrdb_generic_numbers.json.gz"
+
+SITE_REF_ORTHOSTERIC: str = "orthosteric"
+SITE_REF_ALLOSTERIC_7TM: str = "allosteric_7tm"
+SITE_REF_EXTRACELLULAR_VESTIBULE: str = "extracellular_vestibule"
+SITE_REF_INTRACELLULAR: str = "intracellular"
+SITE_REF_EXTRACELLULAR_DOMAIN: str = "extracellular_domain"
+SITE_REF_UNKNOWN: str = "unknown"
+SITE_REF_VALUES: tuple[str, ...] = (
+    SITE_REF_ORTHOSTERIC,
+    SITE_REF_ALLOSTERIC_7TM,
+    SITE_REF_EXTRACELLULAR_VESTIBULE,
+    SITE_REF_INTRACELLULAR,
+    SITE_REF_EXTRACELLULAR_DOMAIN,
+    SITE_REF_UNKNOWN,
+)
+
+# Orthosteric-pocket generic-number signature (GPCRdb structure-based "x"
+# numbers). Most classes share the 7TM mid-bundle core; the taste-type-2 pocket
+# (class 009) sits deeper, so it has its own signature.
+ORTHOSTERIC_CORE_GENERIC: frozenset[str] = frozenset(
+    {"3x32", "3x33", "3x36", "5x43", "5x461", "6x48", "6x51", "6x55", "7x38", "7x39", "7x42", "7x43"}
+)
+ORTHOSTERIC_CORE_GENERIC_T2: frozenset[str] = frozenset(
+    {"3x47", "3x50", "3x51", "5x54", "5x58", "6x37", "6x38", "7x49", "7x53", "7x56"}
+)
+
+# Segment zones for the non-core sites (segments are reliable; intra-helix
+# depth from the bare number is NOT — TM2/4/6 are numbered in reverse).
+INTRACELLULAR_SEGMENTS: frozenset[str] = frozenset({"ICL1", "ICL2", "ICL3", "H8"})
+VESTIBULE_SEGMENTS: frozenset[str] = frozenset({"ECL1", "ECL2", "ECL3"})
+EXTRACELLULAR_DOMAIN_SEGMENT: str = "N-term"
+
+# GPCR class slug prefixes whose orthosteric site is in an extracellular domain
+# (class C Venus flytrap) or large ECD (B1 secretin, B2 adhesion, F Frizzled CRD).
+GPCR_CLASS_C: str = "004"
+GPCR_CLASS_T2: str = "009"
+GPCR_CLASSES_LARGE_ECD: frozenset[str] = frozenset({"002", "003", "006"})
+
+# A ligand needs at least this many mapped receptor contacts to be classified
+# (fewer -> the signature is too sparse, so site_ref is unknown).
+SITE_REF_MIN_MAPPED_CONTACTS: int = 5
 
 # How a subtype call was resolved against the alpha5 window.
 CHIMERA_SUBTYPE_RESOLVED: str = "resolved"

@@ -20,8 +20,19 @@ from gpcr_tools.detector.signals import (
     SIGNAL_CHIMERIC_GPROTEIN,
     SIGNAL_DISPUTED_LIGAND,
     SIGNAL_DUAL_ROLE_LIGAND,
+    SIGNAL_SITE_REF,
     DetectSignal,
 )
+
+
+def _site_ref(comp: str, sites: list[str]) -> DetectSignal:
+    return DetectSignal(
+        kind=SIGNAL_SITE_REF,
+        target_ref="ligands",
+        summary=f"{comp} site",
+        payload={"comp_id": comp, "sites": sites},
+        severity=SEVERITY_ADVISORY,
+    )
 
 
 def _chimeric_advisory() -> DetectSignal:
@@ -107,6 +118,31 @@ class TestAssembleDetectBlock:
         b = assemble_detect_block([_chimeric_advisory(), _disputed("PLM")])
         assert a == b
 
+    def test_site_ref_single_site_evidence(self) -> None:
+        block = assemble_detect_block([_site_ref("ADN", ["orthosteric"])])
+        assert block is not None
+        assert "ADN" in block and "orthosteric" in block and "site_ref" in block
+
+    def test_site_ref_multi_site_evidence(self) -> None:
+        block = assemble_detect_block(
+            [_site_ref("A1AEI", ["extracellular_vestibule", "orthosteric"])]
+        )
+        assert block is not None
+        assert "2 distinct sites" in block
+        assert "one ligand entry per site" in block
+
+    def test_split_instruction_owned_by_site_ref_not_dual_role(self) -> None:
+        # The dual-role signal gives burial evidence but must NOT command a split;
+        # only the site_ref multi-site signal owns the "one entry per site" nudge.
+        dual = assemble_detect_block([_dual_role("A1AEI")])
+        assert dual is not None
+        assert "more than one role" in dual
+        assert "entry per" not in dual  # no split command from dual-role
+        site = assemble_detect_block(
+            [_site_ref("A1AEI", ["extracellular_vestibule", "orthosteric"])]
+        )
+        assert "one ligand entry per site" in site
+
     def test_dual_role_renders_per_copy_evidence_and_site_ref(self) -> None:
         block = assemble_detect_block([_dual_role("A1AEI")])
         assert block is not None
@@ -132,19 +168,21 @@ class TestBuildToolForSignals:
         base_items = ANNOTATION_TOOL.function_declarations[0].parameters.properties["ligands"].items
         assert "disputed_assessment" not in base_items.properties
 
-    def test_dual_role_adds_site_ref_without_mutating_base(self) -> None:
-        tool = build_tool_for_signals(ANNOTATION_TOOL, [_dual_role()])
-        assert tool is not ANNOTATION_TOOL
-        items = tool.function_declarations[0].parameters.properties["ligands"].items
-        assert "site_ref" in items.properties
+    def test_site_ref_is_in_base_schema(self) -> None:
+        # site_ref is a permanent field on every ligand, not injected per-signal.
         base_items = ANNOTATION_TOOL.function_declarations[0].parameters.properties["ligands"].items
-        assert "site_ref" not in base_items.properties
+        assert "site_ref" in base_items.properties
 
-    def test_disputed_and_dual_role_add_both_fields(self) -> None:
+    def test_dual_role_alone_does_not_mutate_schema(self) -> None:
+        # A dual-role advisory only adds prompt evidence; site_ref is already in
+        # the base schema, so the tool is returned by identity.
+        assert build_tool_for_signals(ANNOTATION_TOOL, [_dual_role()]) is ANNOTATION_TOOL
+
+    def test_disputed_adds_assessment_with_site_ref_already_present(self) -> None:
         tool = build_tool_for_signals(ANNOTATION_TOOL, [_disputed(), _dual_role()])
         items = tool.function_declarations[0].parameters.properties["ligands"].items
         assert "disputed_assessment" in items.properties
-        assert "site_ref" in items.properties
+        assert "site_ref" in items.properties  # inherited from the base schema
 
 
 class TestBuildToolConfig:
@@ -152,11 +190,9 @@ class TestBuildToolConfig:
         assert build_tool_config([]) is TOOL_CONFIG
         assert build_tool_config([_chimeric_advisory()]) is TOOL_CONFIG
 
-    def test_dual_role_returns_new_config_leaving_base_unchanged(self) -> None:
-        cfg = build_tool_config([_dual_role()])
-        assert cfg is not TOOL_CONFIG
-        assert cfg.tools[0] is not ANNOTATION_TOOL
-        assert TOOL_CONFIG.tools[0] is ANNOTATION_TOOL
+    def test_dual_role_alone_returns_base_config_identity(self) -> None:
+        # Dual-role no longer mutates the schema, so the config is unchanged.
+        assert build_tool_config([_dual_role()]) is TOOL_CONFIG
 
     def test_disputed_returns_new_config_leaving_base_unchanged(self) -> None:
         cfg = build_tool_config([_disputed()])

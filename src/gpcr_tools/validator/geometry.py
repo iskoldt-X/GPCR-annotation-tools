@@ -239,3 +239,44 @@ def analyze_ligand_copies(
             if residue.name == comp_id:
                 copies.append(_analyze_copy(model, neighbor_search, chain.name, residue, gpcr_chains))
     return copies
+
+
+def ligand_contact_residues(
+    structure: gemmi.Structure,
+    comp_id: str,
+    receptor_chains: set[str],
+) -> list[list[tuple[str, int, str]]]:
+    """Per-copy receptor contacts of *comp_id*, for binding-site classification.
+
+    Returns one list per modelled copy; each entry is
+    ``(receptor_auth_chain, label_seq, amino_acid_one_letter)`` for a receptor
+    residue the copy touches. ``label_seq`` (the entity SEQRES index, not the
+    author number) is what the RCSB alignment maps to a UniProt position, and the
+    amino acid lets the caller gate the mapping against the reference sequence.
+    """
+    model = structure[0]
+    neighbor_search = gemmi.NeighborSearch(
+        model, structure.cell, GEOMETRY_NEIGHBOR_SEARCH_RADIUS
+    ).populate()
+    copies: list[list[tuple[str, int, str]]] = []
+    for chain in model:
+        for residue in chain:
+            if residue.name != comp_id:
+                continue
+            contacts: dict[tuple[str, int], str] = {}
+            for atom in residue:
+                for mark in neighbor_search.find_atoms(
+                    atom.pos, "\0", radius=GEOMETRY_CONTACT_RADIUS
+                ):
+                    cra = mark.to_cra(model)
+                    if not _is_protein_atom(cra.residue) or cra.chain.name not in receptor_chains:
+                        continue
+                    label_seq = cra.residue.label_seq
+                    if label_seq is None:
+                        continue
+                    info = gemmi.find_tabulated_residue(cra.residue.name)
+                    contacts[(cra.chain.name, label_seq)] = (
+                        info.one_letter_code.upper() if info else "X"
+                    )
+            copies.append([(chain_name, ls, aa) for (chain_name, ls), aa in contacts.items()])
+    return copies
