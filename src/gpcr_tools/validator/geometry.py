@@ -245,38 +245,50 @@ def ligand_contact_residues(
     structure: gemmi.Structure,
     comp_id: str,
     receptor_chains: set[str],
-) -> list[list[tuple[str, int, str]]]:
-    """Per-copy receptor contacts of *comp_id*, for binding-site classification.
+) -> list[tuple[float, list[tuple[str, int, str]]]]:
+    """Per-copy burial + receptor contacts of *comp_id*, for site classification.
 
-    Returns one list per modelled copy; each entry is
-    ``(receptor_auth_chain, label_seq, amino_acid_one_letter)`` for a receptor
-    residue the copy touches. ``label_seq`` (the entity SEQRES index, not the
-    author number) is what the RCSB alignment maps to a UniProt position, and the
-    amino acid lets the caller gate the mapping against the reference sequence.
+    Returns one ``(burial, contacts)`` per modelled copy. *burial* is the angular
+    coverage in [0, 1] (how enclosed the copy is, by any protein atom) -- it lets
+    the caller require that a multi-site split come from deeply-buried copies (real
+    pockets) rather than a structural lipid scattered across surface grooves.
+    *contacts* are ``(receptor_auth_chain, label_seq, amino_acid_one_letter)`` for
+    each receptor residue the copy touches; ``label_seq`` (the entity SEQRES index)
+    is what the RCSB alignment maps to a UniProt position, and the amino acid lets
+    the caller gate the mapping against the reference sequence.
     """
     model = structure[0]
     neighbor_search = gemmi.NeighborSearch(
         model, structure.cell, GEOMETRY_NEIGHBOR_SEARCH_RADIUS
     ).populate()
-    copies: list[list[tuple[str, int, str]]] = []
+    copies: list[tuple[float, list[tuple[str, int, str]]]] = []
     for chain in model:
         for residue in chain:
             if residue.name != comp_id:
                 continue
+            ligand_atoms = list(residue)
+            env: dict[tuple[str, int, str], gemmi.Position] = {}
             contacts: dict[tuple[str, int], str] = {}
-            for atom in residue:
+            for atom in ligand_atoms:
                 for mark in neighbor_search.find_atoms(
-                    atom.pos, "\0", radius=GEOMETRY_CONTACT_RADIUS
+                    atom.pos, "\0", radius=GEOMETRY_NEIGHBOR_SEARCH_RADIUS
                 ):
                     cra = mark.to_cra(model)
-                    if not _is_protein_atom(cra.residue) or cra.chain.name not in receptor_chains:
+                    if not _is_protein_atom(cra.residue):
                         continue
-                    label_seq = cra.residue.label_seq
-                    if label_seq is None:
-                        continue
-                    info = gemmi.find_tabulated_residue(cra.residue.name)
-                    contacts[(cra.chain.name, label_seq)] = (
-                        info.one_letter_code.upper() if info else "X"
-                    )
-            copies.append([(chain_name, ls, aa) for (chain_name, ls), aa in contacts.items()])
+                    distance = cra.atom.pos.dist(atom.pos)
+                    res_num = cra.residue.seqid.num
+                    if distance <= GEOMETRY_ENV_RADIUS and res_num is not None:
+                        env[(cra.chain.name, res_num, cra.atom.name)] = cra.atom.pos
+                    if distance <= GEOMETRY_CONTACT_RADIUS and cra.chain.name in receptor_chains:
+                        label_seq = cra.residue.label_seq
+                        if label_seq is not None:
+                            info = gemmi.find_tabulated_residue(cra.residue.name)
+                            contacts[(cra.chain.name, label_seq)] = (
+                                info.one_letter_code.upper() if info else "X"
+                            )
+            burial = _burial(_centroid(ligand_atoms), list(env.values())) if ligand_atoms else 0.0
+            copies.append(
+                (burial, [(chain_name, ls, aa) for (chain_name, ls), aa in contacts.items()])
+            )
     return copies

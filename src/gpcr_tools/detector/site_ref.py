@@ -24,6 +24,7 @@ from typing import Any
 from gpcr_tools.config import (
     DISPUTED_MOLECULES,
     EXTRACELLULAR_DOMAIN_SEGMENT,
+    GEOMETRY_BURIAL_MIN,
     GPCR_CLASS_C,
     GPCR_CLASS_T2,
     GPCR_CLASSES_LARGE_ECD,
@@ -32,7 +33,6 @@ from gpcr_tools.config import (
     LOCUS_LIGANDS,
     ORTHOSTERIC_CORE_GENERIC,
     ORTHOSTERIC_CORE_GENERIC_T2,
-    RCSB_SUBJECT_OF_INVESTIGATION,
     SITE_REF_ALLOSTERIC_7TM,
     SITE_REF_EXTRACELLULAR_DOMAIN,
     SITE_REF_EXTRACELLULAR_VESTIBULE,
@@ -149,34 +149,6 @@ def _annotated_ligands(enriched_entry: dict[str, Any]) -> set[str]:
     return present - (LIGAND_EXCLUDE_LIST - DISPUTED_MOLECULES)
 
 
-def _studied_ligands(enriched_entry: dict[str, Any]) -> set[str]:
-    """Ligands flagged by RCSB as a subject of investigation.
-
-    Only these earn a multi-site "emit one entry per site" nudge. Disputed
-    molecules (cholesterol, palmitate) are deliberately NOT included here: they
-    are usually scattered structural lipid with many copies in different grooves,
-    and telling the model to emit one entry per copy would mislead it. A disputed
-    molecule that is genuinely a studied dual-site ligand is also marked subject
-    of investigation, so it still qualifies through the check below.
-    """
-    studied: set[str] = set()
-    for entity in enriched_entry.get("nonpolymer_entities") or []:
-        if not isinstance(entity, dict):
-            continue
-        comp_id = (entity.get("rcsb_nonpolymer_entity_container_identifiers") or {}).get(
-            "nonpolymer_comp_id"
-        )
-        if not comp_id:
-            continue
-        annotations = entity.get("rcsb_nonpolymer_entity_annotation")
-        if isinstance(annotations, list) and any(
-            isinstance(a, dict) and a.get("type") == RCSB_SUBJECT_OF_INVESTIGATION
-            for a in annotations
-        ):
-            studied.add(comp_id)
-    return studied
-
-
 def _classify_copy(
     contacts: list[tuple[str, int, str]],
     chain_accessions: dict[str, str],
@@ -248,21 +220,28 @@ def detect_site_refs(
     if not alignment:
         return []
 
-    studied = _studied_ligands(enriched_entry)
     receptor_chains = set(chain_accessions)
     signals: list[DetectSignal] = []
     for comp_id in sorted(comp_ids):
-        sites: dict[str, int] = {}
-        for contacts in ligand_contact_residues(structure, comp_id, receptor_chains):
+        all_sites: dict[str, int] = {}  # every copy's site -> best mapped count
+        buried_sites: dict[str, int] = {}  # only deeply-buried copies
+        for burial, contacts in ligand_contact_residues(structure, comp_id, receptor_chains):
             site, mapped = _classify_copy(contacts, chain_accessions, alignment)
-            if site != SITE_REF_UNKNOWN and mapped > sites.get(site, 0):
-                sites[site] = mapped
-        if not sites:
+            if site == SITE_REF_UNKNOWN:
+                continue
+            if mapped > all_sites.get(site, 0):
+                all_sites[site] = mapped
+            if burial >= GEOMETRY_BURIAL_MIN and mapped > buried_sites.get(site, 0):
+                buried_sites[site] = mapped
+        if not all_sites:
             continue
-        site_list = sorted(sites)
-        # Only a studied/disputed ligand earns the multi-site "one entry per site"
-        # nudge; an incidental additive reports just its dominant site.
-        if len(site_list) > 1 and comp_id not in studied:
-            site_list = [max(sites, key=lambda s: sites[s])]
+        # A multi-site "emit one entry per site" nudge requires >=2 distinct sites
+        # each from a DEEPLY BURIED copy (a real pocket). A structural lipid
+        # scattered across shallow surface grooves never qualifies, regardless of
+        # how many sites its copies span -- it reports just its dominant site.
+        if len(buried_sites) > 1:
+            site_list = sorted(buried_sites)
+        else:
+            site_list = [max(all_sites, key=lambda s: all_sites[s])]
         signals.append(_build_signal(comp_id, site_list))
     return signals
