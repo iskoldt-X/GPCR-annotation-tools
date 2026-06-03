@@ -579,6 +579,12 @@ GPCR_CLASSES_LARGE_ECD: frozenset[str] = frozenset({"002", "003", "006"})
 # (fewer -> the signature is too sparse, so site_ref is unknown).
 SITE_REF_MIN_MAPPED_CONTACTS: int = 5
 
+# Orthosteric requires at least this many distinct core-pocket generic positions.
+# A genuine orthosteric ligand contacts ~9-10; a single grazing core contact (a
+# vestibule ligand brushing the top of TM3, or a lipid on the bundle's outer
+# face) must NOT be called orthosteric.
+SITE_REF_MIN_ORTHOSTERIC_CORE: int = 2
+
 # How a subtype call was resolved against the alpha5 window.
 CHIMERA_SUBTYPE_RESOLVED: str = "resolved"
 CHIMERA_SUBTYPE_INSEPARABLE_SET: str = "inseparable_set"

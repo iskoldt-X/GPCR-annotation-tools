@@ -48,10 +48,18 @@ class TestClassifySite:
     def test_class_a_orthosteric_core(self) -> None:
         assert classify_site("001", {"3x32", "6x48"}, {"TM3", "TM6"}) == SITE_REF_ORTHOSTERIC
 
-    def test_orthosteric_core_beats_vestibule(self) -> None:
-        # A ligand reaching the core but also touching ECL2 is orthosteric.
+    def test_multiple_core_beats_vestibule(self) -> None:
+        # A ligand reaching several core residues but also touching ECL2 is orthosteric.
         assert (
-            classify_site("001", {"3x32"}, {"TM3", "ECL2"}) == SITE_REF_ORTHOSTERIC
+            classify_site("001", {"3x32", "6x48"}, {"TM3", "ECL2"}) == SITE_REF_ORTHOSTERIC
+        )
+
+    def test_single_core_with_vestibule_is_vestibule(self) -> None:
+        # One grazing core residue + a vestibule signature -> vestibule, not
+        # orthosteric (the M2 PAM LY2119620 case that brushes the top of TM3).
+        assert (
+            classify_site("001", {"3x32"}, {"TM3", "ECL2"})
+            == SITE_REF_EXTRACELLULAR_VESTIBULE
         )
 
     def test_taste_t2_deep_pocket_is_orthosteric(self) -> None:
@@ -91,7 +99,7 @@ class TestClassifySite:
 
     def test_unknown_class_falls_back_to_generic_core(self) -> None:
         # An unrecognised class still classifies on the shared core signature.
-        assert classify_site(None, {"6x48"}, {"TM6"}) == SITE_REF_ORTHOSTERIC
+        assert classify_site(None, {"6x48", "3x32"}, {"TM6", "TM3"}) == SITE_REF_ORTHOSTERIC
 
 
 class TestEnrichedParsing:
@@ -105,13 +113,34 @@ class TestEnrichedParsing:
         # A real ligand is annotated whether or not it is flagged studied (recall).
         assert sr._annotated_ligands(_entry("LIG", soi=False)) == {"LIG"}
 
-    def test_studied_requires_soi_or_disputed(self) -> None:
+    def test_studied_requires_soi(self) -> None:
         assert sr._studied_ligands(_entry("LIG", soi=True)) == {"LIG"}
         assert sr._studied_ligands(_entry("SOG", soi=False)) == set()
 
-    def test_disputed_is_studied_without_soi(self) -> None:
+    def test_disputed_not_studied_unless_soi(self) -> None:
+        # A disputed molecule is still annotated (gets a site) but does NOT earn
+        # the multi-site split nudge unless it is also a subject of investigation.
         disputed = sorted(DISPUTED_MOLECULES)[0]
-        assert sr._studied_ligands(_entry(disputed, soi=False)) == {disputed}
+        assert sr._studied_ligands(_entry(disputed, soi=False)) == set()
+        assert disputed in sr._annotated_ligands(_entry(disputed, soi=False))
+
+    def test_prefers_table_accession_over_fusion_partner(self) -> None:
+        # Both UniProts pass the permissive slug denylist; the real receptor
+        # (in the shipped table) must win over a crystallization fusion partner.
+        entry = {
+            "polymer_entities": [
+                {
+                    "uniprots": [
+                        {"gpcrdb_entry_name_slug": "rubr_clopa", "rcsb_id": "P00268"},
+                        {"gpcrdb_entry_name_slug": "adrb2_human", "rcsb_id": "P07550"},
+                    ],
+                    "polymer_entity_instances": [
+                        {"rcsb_polymer_entity_instance_container_identifiers": {"auth_asym_id": "A"}}
+                    ],
+                }
+            ]
+        }
+        assert sr._gpcr_chain_accessions(entry) == {"A": "P07550"}
 
 
 @pytest.fixture
