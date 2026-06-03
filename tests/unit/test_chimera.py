@@ -373,6 +373,58 @@ class TestGetChimeraAnalysis:
             "a5_window",
             "a5_tail",
             "candidates_checked",
+            "backbone_family",
+            "backbone_slug",
+            "is_alpha5_graft",
             "error",
         ):
             assert key in result
+
+
+class TestAlpha5Graft:
+    def test_graft_detected_when_backbone_differs_from_alpha5(self, tmp_path: Path) -> None:
+        # Scaffold is gnas2 (Gs) but the modelled alpha5 is a Gq tail = a graft.
+        cache = SequenceCache(tmp_path / "seq.json")
+        gq_tail = "LQMNLREYNLV"
+        enriched = _make_enriched(
+            sequence="MMMMMMMMMM" + gq_tail,
+            uniprots=[{"rcsb_id": "P63092", "gpcrdb_entry_name_slug": "gnas2_human"}],
+        )
+        tails = {"gnaq_human": gq_tail, "gnas2_human": "ACDEFGHIKLM"}
+        with patch(
+            "gpcr_tools.validator.chimera.get_sequence_from_uniprot",
+            side_effect=_mock_refs(tails),
+        ):
+            result = get_chimera_analysis("TEST", enriched, cache)
+        assert result["family"] == "Gq/11"  # functional alpha5 wins
+        assert result["backbone_slug"] == "gnas2_human"
+        assert result["backbone_family"] == "Gs"  # scaffold
+        assert result["is_alpha5_graft"] is True
+
+    def test_no_graft_when_backbone_matches_alpha5(self, tmp_path: Path) -> None:
+        cache = SequenceCache(tmp_path / "seq.json")
+        gs_tail = "ACDEFGHIKLM"
+        enriched = _make_enriched(
+            sequence="MMMMMMMMMM" + gs_tail,
+            uniprots=[{"rcsb_id": "P63092", "gpcrdb_entry_name_slug": "gnas2_human"}],
+        )
+        with patch(
+            "gpcr_tools.validator.chimera.get_sequence_from_uniprot",
+            side_effect=_mock_refs({"gnas2_human": gs_tail}),
+        ):
+            result = get_chimera_analysis("TEST", enriched, cache)
+        assert result["family"] == "Gs"
+        assert result["backbone_family"] == "Gs"
+        assert result["is_alpha5_graft"] is False
+
+    def test_no_backbone_slug_means_no_graft(self, tmp_path: Path) -> None:
+        # No attached G-alpha slug -> backbone unknown -> never a graft.
+        cache = SequenceCache(tmp_path / "seq.json")
+        enriched = _make_enriched(sequence="MMMMMMMMMM" + "ACDEFGHIKLM")
+        with patch(
+            "gpcr_tools.validator.chimera.get_sequence_from_uniprot",
+            side_effect=_mock_refs({"gnas2_human": "ACDEFGHIKLM"}),
+        ):
+            result = get_chimera_analysis("TEST", enriched, cache)
+        assert result["backbone_slug"] is None
+        assert result["is_alpha5_graft"] is False

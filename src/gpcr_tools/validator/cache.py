@@ -13,8 +13,11 @@ import json
 import logging
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
+
+from gpcr_tools.config import SEQUENCE_CACHE_TTL_DAYS
 
 logger = logging.getLogger(__name__)
 
@@ -60,15 +63,19 @@ class ValidationCache:
 
 
 class SequenceCache:
-    """Persistent cache for UniProt FASTA sequences.
+    """Persistent, time-bounded cache for UniProt FASTA sequences.
 
-    Keys are UniProt accessions, values are sequence strings.
-    Uses the same atomic write pattern as :class:`ValidationCache`.
+    Keys are UniProt accessions. Each entry stores the sequence plus the epoch
+    time it was fetched; an entry older than ``ttl_days`` is treated as a miss so
+    a drifted upstream reference is eventually refetched rather than persisting
+    forever. Legacy plain-string entries (pre-TTL caches) have an unknown age and
+    are treated as expired, so they refresh once on next use. Atomic writes.
     """
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, ttl_days: int = SEQUENCE_CACHE_TTL_DAYS) -> None:
         self._path = path
-        self._data: dict[str, str] = {}
+        self._ttl_seconds = ttl_days * 86400
+        self._data: dict[str, dict[str, Any]] = {}
         self._load()
 
     def _load(self) -> None:
@@ -77,24 +84,40 @@ class SequenceCache:
         try:
             with self._path.open("r", encoding="utf-8") as f:
                 raw = json.load(f)
-            if isinstance(raw, dict):
-                self._data = {k: str(v) for k, v in raw.items()}
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning("Failed to read sequence cache %s: %s", self._path, exc)
+            return
+        if not isinstance(raw, dict):
+            return
+        for key, value in raw.items():
+            if isinstance(value, dict) and "seq" in value:
+                self._data[key] = {
+                    "seq": str(value["seq"]),
+                    "fetched_at": float(value.get("fetched_at") or 0.0),
+                }
+            else:
+                # Legacy plain-string entry: unknown age -> treat as expired.
+                self._data[key] = {"seq": str(value), "fetched_at": 0.0}
 
-    def get(self, key: str) -> str | None:
-        """Return cached sequence, or ``None`` on cache miss."""
-        return self._data.get(key)
+    def get(self, key: str, *, now: float | None = None) -> str | None:
+        """Return cached sequence, or ``None`` on cache miss or expiry."""
+        entry = self._data.get(key)
+        if entry is None:
+            return None
+        current = time.time() if now is None else now
+        if current - entry["fetched_at"] > self._ttl_seconds:
+            return None
+        return str(entry["seq"])
 
     def __contains__(self, key: str) -> bool:
         return key in self._data
 
-    def set(self, key: str, value: str) -> None:
-        """Store a sequence string."""
-        self._data[key] = value
+    def set(self, key: str, value: str, *, now: float | None = None) -> None:
+        """Store a sequence string, stamped with the fetch time."""
+        self._data[key] = {"seq": value, "fetched_at": time.time() if now is None else now}
 
     def save(self) -> None:
-        """Persist cache to disk using atomic write (Blood Lesson 2)."""
+        """Persist cache to disk using atomic write."""
         _atomic_json_write(self._path, self._data)
 
 
