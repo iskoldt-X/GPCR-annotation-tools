@@ -219,8 +219,11 @@ class TestMultiChain:
         assert "Chain A" in warnings[0]
         assert "Chain C" in warnings[0]
 
-    def test_different_entities_partial_clash(self) -> None:
-        """One chain matches, the other doesn't — still a clash."""
+    def test_partner_chain_present_is_not_a_clash(self) -> None:
+        """The AI's receptor is on one reported chain; the other carries a different
+        gene (a hetero-oligomer partner / fusion entity). Identity is confirmed on
+        its own chain, so this is a MATCH, not a clash -- the partner is surfaced by
+        the oligomer analysis, not here."""
         data: dict[str, Any] = {
             "receptor_info": {
                 "uniprot_entry_name": "drd2_human",
@@ -234,14 +237,51 @@ class TestMultiChain:
             ]
         )
         warnings = validate_receptor_identity("TEST", data, enriched)
-        assert len(warnings) == 1
-        assert data["receptor_info"]["validation_status"] == VALIDATION_UNIPROT_CLASH
-        # Only the clashing chain appears in the warning
-        assert "Chain F" in warnings[0]
-        assert "Chain B" not in warnings[0]
-        # api_reality aggregates slugs from all matched entities
+        assert not any("UNIPROT_CLASH" in w for w in warnings)
+        assert data["receptor_info"]["validation_status"] == VALIDATION_RECEPTOR_MATCH
+        # api_reality still aggregates slugs from all matched entities (partner visible).
         assert "drd2_human" in data["receptor_info"]["api_reality"]
         assert "oprm_human" in data["receptor_info"]["api_reality"]
+
+    def test_class_c_heterodimer_no_false_clash(self) -> None:
+        """Class C heterodimer (GABA-B): AI names GABBR2 with both protomer chains;
+        chain A carries GABBR1 (the partner). Must NOT false-clash -- this is the
+        47-structure Class C bug. Regression for 7C7Q/9NOR-style heterodimers."""
+        data: dict[str, Any] = {
+            "receptor_info": {
+                "uniprot_entry_name": "gabr2_human",
+                "chain_id": "A, B",
+            }
+        }
+        enriched = _make_enriched(
+            [
+                _make_entity(["A"], ["gabr1_human"]),
+                _make_entity(["B"], ["gabr2_human"]),
+            ]
+        )
+        warnings = validate_receptor_identity("TEST", data, enriched)
+        assert not any("UNIPROT_CLASH" in w for w in warnings)
+        assert data["receptor_info"]["validation_status"] == VALIDATION_RECEPTOR_MATCH
+
+    def test_named_receptor_absent_is_a_clash(self) -> None:
+        """True masking/hallucination: the AI's receptor is on NONE of its reported
+        chains (both carry other genes). This must still clash."""
+        data: dict[str, Any] = {
+            "receptor_info": {
+                "uniprot_entry_name": "drd2_human",
+                "chain_id": "A, B",
+            }
+        }
+        enriched = _make_enriched(
+            [
+                _make_entity(["A"], ["gabr1_human"]),
+                _make_entity(["B"], ["gabr2_human"]),
+            ]
+        )
+        warnings = validate_receptor_identity("TEST", data, enriched)
+        assert len(warnings) == 1
+        assert "UNIPROT_CLASH" in warnings[0]
+        assert data["receptor_info"]["validation_status"] == VALIDATION_UNIPROT_CLASH
 
     def test_one_chain_found_one_missing(self) -> None:
         """One chain exists in enriched, the other doesn't — validate what we can."""
