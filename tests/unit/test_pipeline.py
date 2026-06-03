@@ -26,6 +26,9 @@ def _patch_stages(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
         "gpcr_tools.papers.runner.run_fetch_papers", lambda **k: calls.append("fetch-papers")
     )
     monkeypatch.setattr(
+        "gpcr_tools.detector.stage.run_detect_stage", lambda **k: calls.append("detect")
+    )
+    monkeypatch.setattr(
         "gpcr_tools.annotator.runner.run_annotation_stage", lambda **k: calls.append("annotate")
     )
     monkeypatch.setattr(
@@ -53,7 +56,7 @@ def test_runs_stages_in_dependency_order(cfg: Any, monkeypatch: pytest.MonkeyPat
     calls: list[str] = []
     _patch_stages(monkeypatch, calls)
     pipeline.run_pipeline()
-    assert calls == ["fetch", "fetch-papers", "annotate", "aggregate"]
+    assert calls == ["fetch", "fetch-papers", "detect", "annotate", "aggregate"]
 
 
 def test_batch_mode_stops_after_submit(cfg: Any, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -62,7 +65,7 @@ def test_batch_mode_stops_after_submit(cfg: Any, monkeypatch: pytest.MonkeyPatch
     _patch_stages(monkeypatch, calls)
     pipeline.run_pipeline(batch=True)
     # Batch results arrive asynchronously -> do not aggregate in the same run.
-    assert calls == ["fetch", "fetch-papers", "annotate"]
+    assert calls == ["fetch", "fetch-papers", "detect", "annotate"]
 
 
 def test_skip_fetch_papers(cfg: Any, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -70,7 +73,7 @@ def test_skip_fetch_papers(cfg: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
     _patch_stages(monkeypatch, calls)
     pipeline.run_pipeline(skip_fetch_papers=True)
-    assert calls == ["fetch", "annotate", "aggregate"]
+    assert calls == ["fetch", "detect", "annotate", "aggregate"]
 
 
 def test_stops_when_no_enriched_data(cfg: Any, monkeypatch: pytest.MonkeyPatch) -> None:

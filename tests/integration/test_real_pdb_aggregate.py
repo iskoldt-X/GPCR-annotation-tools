@@ -75,7 +75,7 @@ def real_aggregate_workspace(
     (contract_dir / "storage_contract.json").write_text(
         json.dumps(
             {
-                "storage_contract_version": 1,
+                "storage_contract_version": 2,
                 "created_by": "test",
                 "created_at_utc": "2026-01-01T00:00:00+00:00",
             }

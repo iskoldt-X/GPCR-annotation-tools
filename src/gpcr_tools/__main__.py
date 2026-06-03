@@ -166,6 +166,24 @@ def cli() -> None:
         help="Re-process raw JSONL output files.",
     )
 
+    # detect -----------------------------------------------------------
+    detect_parser = subparsers.add_parser(
+        "detect",
+        help="Pre-annotation structural detection: flag hard cases before annotate.",
+    )
+    detect_parser.add_argument(
+        "pdb_id",
+        nargs="?",
+        default=None,
+        help="Optional: detect on a specific PDB ID instead of all enriched.",
+    )
+    detect_parser.add_argument(
+        "--skip-api-checks",
+        action="store_true",
+        default=False,
+        help="Skip sequence-based detectors that need UniProt reference fetches.",
+    )
+
     # aggregate --------------------------------------------------------
     agg_parser = subparsers.add_parser(
         "aggregate",
@@ -205,7 +223,7 @@ def cli() -> None:
     # pipeline ---------------------------------------------------------
     pipe_parser = subparsers.add_parser(
         "pipeline",
-        help="Run fetch -> fetch-papers -> annotate -> aggregate in dependency order.",
+        help="Run fetch -> fetch-papers -> detect -> annotate -> aggregate in dependency order.",
     )
     pipe_parser.add_argument(
         "pdb_id",
@@ -325,6 +343,13 @@ def cli() -> None:
         from gpcr_tools.csv_generator.app import main
 
         main(target_pdb=args.pdb_id, auto_accept=False)
+
+    elif args.command == "detect":
+        from gpcr_tools.detector.stage import run_detect_stage
+
+        summary = run_detect_stage(args.pdb_id, skip_api_checks=args.skip_api_checks)
+        total = sum(summary.values())
+        print(f"Detect complete: {len(summary)} PDB(s), {total} signal(s).")
 
     elif args.command == "aggregate":
         from gpcr_tools.aggregator.runner import aggregate_all, aggregate_pdb

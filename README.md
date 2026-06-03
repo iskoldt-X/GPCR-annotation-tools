@@ -20,15 +20,18 @@ GPCR Annotation Tools automates the extraction of structured metadata from GPCR 
 │                                (Unpaywall → PMC OA → abstract       │
 │                                 fallback + manual watch mode)       │
 ├─────────────────────────────────────────────────────────────────────┤
-│  3. gpcr-tools annotate       AI annotation via Gemini              │
+│  3. gpcr-tools detect         Pre-annotation structural detection   │
+│                               (flag hard cases before the AI)       │
+├─────────────────────────────────────────────────────────────────────┤
+│  4. gpcr-tools annotate       AI annotation via Gemini              │
 │                                (10 independent runs per PDB,        │
 │                                 structured output via tool calling) │
 ├─────────────────────────────────────────────────────────────────────┤
-│  4. gpcr-tools aggregate      Majority-vote consensus + validation  │
+│  5. gpcr-tools aggregate      Majority-vote consensus + validation  │
 │                                (7-validator chain against PDB/      │
 │                                 UniProt/PubChem ground truth)       │
 ├─────────────────────────────────────────────────────────────────────┤
-│  5. gpcr-tools curate         Interactive expert review dashboard   │
+│  6. gpcr-tools curate         Interactive expert review dashboard   │
 │                                (Rich terminal UI + audit trail)     │
 └───────────────────────────────┬─────────────────────────────────────┘
                                 │
@@ -235,6 +238,7 @@ For non-standard workspace layouts (e.g., separate storage mounts), each subdire
 | `GPCR_ENRICHED_PATH` | `{workspace}/enriched` |
 | `GPCR_PAPERS_PATH` | `{workspace}/papers` |
 | `GPCR_AI_RESULTS_PATH` | `{workspace}/ai_results` |
+| `GPCR_DETECT_PATH` | `{workspace}/detect` |
 | `GPCR_AGGREGATED_PATH` | `{workspace}/aggregated` |
 | `GPCR_OUTPUT_PATH` | `{workspace}/output` |
 | `GPCR_CACHE_PATH` | `{workspace}/cache` |
@@ -257,6 +261,7 @@ For non-standard workspace layouts (e.g., separate storage mounts), each subdire
 ├── enriched/                         # Enriched PDB metadata (AI input)
 ├── papers/                           # Downloaded PDFs and abstracts
 ├── ai_results/{pdb_id}/run_*.json   # 10 independent AI annotation runs
+├── detect/{pdb_id}.json             # Pre-annotation detect signals
 │
 ├── aggregated/                       # Voted + validated annotations
 │   ├── {pdb_id}.json
@@ -323,6 +328,11 @@ src/gpcr_tools/
 │   ├── downloader.py          #   Tiered PDF download (Unpaywall → PMC → abstract)
 │   └── watcher.py             #   Filesystem watcher for manual PDF drops
 │
+├── detector/                  # Pre-annotation detect stage (runs before annotate)
+│   ├── signals.py             #   DetectSignal contract + critical-warning formatting
+│   ├── gprotein.py            #   G-protein alpha5 identity detector
+│   └── stage.py               #   enriched -> signals -> detect/{pdb_id}.json
+│
 ├── annotator/                 # Stage 3: Gemini AI annotation
 │   ├── gemini_client.py       #   Rate-limited API client
 │   ├── prompt_builder.py      #   Context-rich prompt assembly
@@ -337,7 +347,7 @@ src/gpcr_tools/
 │   └── runner.py              #   12-step orchestration with error isolation
 │
 ├── validator/                 # 7-validator cross-check chain
-│   ├── chimera.py             #   Fusion protein detection (C-terminal tail matching)
+│   ├── chimera.py             #   G-protein alpha5 identity (sequence matching)
 │   ├── receptor_validator.py  #   UniProt identity verification
 │   ├── ligand_validator.py    #   PDB-CCD existence check
 │   ├── oligomer.py            #   Complex classification + 7TM completeness

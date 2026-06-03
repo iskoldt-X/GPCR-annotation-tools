@@ -78,10 +78,10 @@ jobs:
 
           # Verify contract content
           VERSION=$(python3 -c "import json; print(json.load(open('$WORKSPACE/contract/storage_contract.json'))['storage_contract_version'])")
-          test "$VERSION" = "1"
+          test "$VERSION" = "2"
 
           # Required directories must exist
-          for dir in raw enriched papers ai_results aggregated output output/csv output/audit cache state state/pipeline_runs tmp; do
+          for dir in raw enriched papers ai_results detect aggregated output output/csv output/audit cache state state/pipeline_runs tmp; do
             test -d "$WORKSPACE/$dir" || { echo "Missing directory: $dir"; exit 1; }
           done
 
