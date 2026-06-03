@@ -3,7 +3,8 @@
 ADVISORY detect signals become evidence in the prompt (the model weighs them
 against the paper); REVIEW signals are not handled here -- they route silently to
 human review. A disputed-molecule advisory additionally augments the tool schema
-with an optional ``disputed_assessment`` field. No I/O, no AI calls.
+with an optional ``disputed_assessment`` field, and a dual-role advisory with an
+optional ``site_ref`` field. No I/O, no AI calls.
 
 When there are no advisory signals the prompt block is ``None`` and the tool /
 config are returned by identity, so an ordinary structure is byte-for-byte
@@ -14,19 +15,26 @@ NOTE: the user-facing wording in the prompt block is a DRAFT pending review.
 
 from __future__ import annotations
 
+from typing import Any
+
 from google.genai import types
 
 from gpcr_tools.annotator.schema import (
     ANNOTATION_TOOL,
     DISPUTED_ASSESSMENT_SCHEMA,
+    SITE_REF_SCHEMA,
     TOOL_CONFIG,
 )
 from gpcr_tools.detector.signals import (
     SEVERITY_ADVISORY,
     SIGNAL_CHIMERIC_GPROTEIN,
     SIGNAL_DISPUTED_LIGAND,
+    SIGNAL_DUAL_ROLE_LIGAND,
     DetectSignal,
 )
+
+# A pocket-residue list is truncated to this many numbers in the prompt evidence.
+_MAX_POCKET_RESIDUES_SHOWN = 12
 
 # DRAFT wording -- pending Binghan's word-by-word review.
 _DETECT_BLOCK_HEADER = (
@@ -56,8 +64,39 @@ def _format_signal(signal: DetectSignal) -> str:
             f"structures, an incidental structural lipid in others). Assess its role from "
             f"the paper and record a disputed_assessment for it."
         )
+    if signal.kind == SIGNAL_DUAL_ROLE_LIGAND:
+        return _format_dual_role(payload)
     # Unknown advisory kind: fall back to the signal's own one-line summary.
     return signal.summary or signal.kind
+
+
+def _format_dual_role(payload: dict[str, Any]) -> str:
+    """Render the dual-role signal: a guidance line plus one line per buried copy."""
+    comp = payload.get("comp_id") or "?"
+    chain = payload.get("gpcr_chain") or "?"
+    copies = payload.get("copies") or []
+    copy_lines = []
+    for copy in copies:
+        residues = copy.get("pocket_residues") or []
+        shown = ", ".join(str(r) for r in residues[:_MAX_POCKET_RESIDUES_SHOWN])
+        if len(residues) > _MAX_POCKET_RESIDUES_SHOWN:
+            shown += ", ..."
+        partner = (
+            " and also contacts a non-receptor protein partner (possible active-state pocket)"
+            if copy.get("contacts_partner")
+            else ""
+        )
+        copy_lines.append(
+            f"  copy {copy.get('chain')}/{copy.get('seq_id')}: buried "
+            f"(enclosure {copy.get('burial')}), lines {copy.get('n_pocket_residues')} "
+            f"receptor residues [{shown}]{partner}"
+        )
+    body = "\n".join(copy_lines)
+    return (
+        f"{comp} is modelled in {len(copies)} distinct buried pockets on receptor chain "
+        f"{chain} (geometry below), so it may play more than one role. Emit a SEPARATE "
+        f"ligand entry per pocket, each with its own site_ref and role:\n{body}"
+    )
 
 
 def _advisory_signals(signals: list[DetectSignal]) -> list[DetectSignal]:
@@ -81,17 +120,20 @@ def assemble_detect_block(signals: list[DetectSignal]) -> str | None:
 
 
 def build_tool_for_signals(base_tool: types.Tool, signals: list[DetectSignal]) -> types.Tool:
-    """Return *base_tool* augmented for disputed molecules, else *base_tool* itself.
+    """Return *base_tool* augmented for ligand advisories, else *base_tool* itself.
 
-    Only a disputed advisory signal mutates the schema (adds the optional
-    ``disputed_assessment`` field to each ligand item). With no such signal the
-    base tool is returned by identity, guaranteeing zero schema perturbation.
-    The base tool is never mutated (deep copy before any change).
+    A disputed advisory adds the optional ``disputed_assessment`` field, and a
+    dual-role advisory adds the optional ``site_ref`` field, to each ligand item.
+    With neither signal the base tool is returned by identity, guaranteeing zero
+    schema perturbation. The base tool is never mutated (deep copy before change).
     """
     has_disputed = any(
         s.kind == SIGNAL_DISPUTED_LIGAND and s.severity == SEVERITY_ADVISORY for s in signals
     )
-    if not has_disputed:
+    has_dual_role = any(
+        s.kind == SIGNAL_DUAL_ROLE_LIGAND and s.severity == SEVERITY_ADVISORY for s in signals
+    )
+    if not (has_disputed or has_dual_role):
         return base_tool
     declarations = base_tool.function_declarations or []
     if not declarations:
@@ -113,7 +155,10 @@ def build_tool_for_signals(base_tool: types.Tool, signals: list[DetectSignal]) -
             "Tool.model_copy(deep=True) did not deep-copy nested Schema properties; "
             "refusing to mutate the shared base tool (check the google-genai version)."
         )
-    items.properties["disputed_assessment"] = DISPUTED_ASSESSMENT_SCHEMA
+    if has_disputed:
+        items.properties["disputed_assessment"] = DISPUTED_ASSESSMENT_SCHEMA
+    if has_dual_role:
+        items.properties["site_ref"] = SITE_REF_SCHEMA
     return tool
 
 

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from gpcr_tools.config import get_config
+from gpcr_tools.detector.geometry import detect_dual_role_ligands
 from gpcr_tools.detector.gprotein import detect_g_protein_identity
 from gpcr_tools.detector.ligands import detect_disputed_ligands, detect_excluded_real_ligands
 from gpcr_tools.detector.signals import DetectSignal
@@ -69,11 +70,12 @@ def run_detect(pdb_id: str, *, skip_api_checks: bool = False) -> list[DetectSign
     signals.extend(detect_excluded_real_ligands(pdb_id, entry))
     signals.extend(detect_disputed_ligands(pdb_id, entry))
 
-    # Sequence-based detectors need UniProt reference fetches.
+    # Detectors needing a network fetch (UniProt references, coordinate files).
     if not skip_api_checks:
         cache = SequenceCache(cfg.cache_dir / _SEQUENCE_CACHE_NAME)
         signals.extend(detect_g_protein_identity(pdb_id, entry, cache))
-    # Future detectors (entity reconciliation, geometry, ...) append here.
+        signals.extend(detect_dual_role_ligands(pdb_id, entry, cfg.cache_dir))
+    # Future detectors (entity reconciliation, ...) append here.
 
     out_path = cfg.detect_dir / f"{pdb_id}.json"
     _atomic_write_json(

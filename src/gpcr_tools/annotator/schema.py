@@ -406,6 +406,20 @@ DISPUTED_ASSESSMENT_SCHEMA = types.Schema(
     },
 )
 
+# Optional per-ligand field injected by detect_orchestrator.build_tool_for_signals
+# ONLY when a dual-role signal is present (the same ligand modelled in two distinct
+# functional pockets on one receptor chain). It lets the model record one entry per
+# site instead of merging the copies into a single role. Never part of the base tool.
+SITE_REF_SCHEMA = types.Schema(
+    type=types.Type.STRING,
+    description=(
+        "Only for a ligand the detector flags as occupying more than one distinct "
+        "functional pocket: a short label for the binding site this entry refers to "
+        "(e.g. 'orthosteric', 'allosteric'). Provide one ligand entry per site, each "
+        "with its own site_ref and role, so the two sites are not merged."
+    ),
+)
+
 TOOL_CONFIG = types.GenerateContentConfig(
     tools=[ANNOTATION_TOOL],
     temperature=0.0,
