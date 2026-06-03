@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from gpcr_tools.aggregator.runner import _build_validation_report
+from gpcr_tools.aggregator.runner import _build_validation_report, _coupling_protomer
 from gpcr_tools.config import (
     CHIMERA_STATUS_SUCCESS,
     CHIMERA_SUBTYPE_FAMILY_ONLY,
@@ -10,6 +10,45 @@ from gpcr_tools.config import (
     CHIMERA_SUBTYPE_LOW_CONFIDENCE,
     CHIMERA_SUBTYPE_RESOLVED,
 )
+from gpcr_tools.detector.signals import (
+    SEVERITY_ADVISORY,
+    SIGNAL_COUPLING_PROTOMER,
+    SIGNAL_SITE_REF,
+    DetectSignal,
+)
+
+
+def _sig(kind, payload):
+    return DetectSignal(kind=kind, target_ref="receptor_info", summary="", payload=payload,
+                        severity=SEVERITY_ADVISORY)
+
+
+class TestCouplingProtomer:
+    def test_extracts_coupling_chain(self, monkeypatch):
+        monkeypatch.setattr(
+            "gpcr_tools.aggregator.runner.load_detect_signals",
+            lambda pdb: [_sig(SIGNAL_COUPLING_PROTOMER, {"coupling_chain": "B"})],
+        )
+        assert _coupling_protomer("7C7Q") == "B"
+
+    def test_no_coupling_signal_returns_none(self, monkeypatch):
+        monkeypatch.setattr(
+            "gpcr_tools.aggregator.runner.load_detect_signals",
+            lambda pdb: [_sig(SIGNAL_SITE_REF, {"x": 1})],  # other kinds ignored
+        )
+        assert _coupling_protomer("X") is None
+
+    def test_no_signals_returns_none(self, monkeypatch):
+        monkeypatch.setattr("gpcr_tools.aggregator.runner.load_detect_signals", lambda pdb: [])
+        assert _coupling_protomer("X") is None
+
+    def test_non_string_coupling_chain_returns_none(self, monkeypatch):
+        # A malformed payload must not crash or return a non-chain value.
+        monkeypatch.setattr(
+            "gpcr_tools.aggregator.runner.load_detect_signals",
+            lambda pdb: [_sig(SIGNAL_COUPLING_PROTOMER, {"coupling_chain": 42})],
+        )
+        assert _coupling_protomer("X") is None
 
 
 def _report(best, monkeypatch):
