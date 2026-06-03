@@ -31,7 +31,7 @@ def validate_receptor_identity(
     Mutates *best_run_data["receptor_info"]* in-place.
     Returns a list of warning strings for ``UNIPROT_CLASH`` detections.
 
-    Blood Lesson 3 — Warning format:
+    Warning format:
         ``f"UNIPROT_CLASH at 'receptor_info': '{ai_uid}' on Chain {chain} vs API reality [...]"``
     """
     warnings: list[str] = []

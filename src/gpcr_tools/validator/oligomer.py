@@ -65,7 +65,7 @@ def is_gpcr_slug(slug: str) -> bool:
 def get_sequence_length(entity: dict[str, Any]) -> int:
     """Extract sample sequence length from *entity*'s polymer data.
 
-    Blood Lesson 1: guard ``rcsb_sample_sequence_length`` for None.
+    Guard ``rcsb_sample_sequence_length`` for None.
     """
     poly = entity.get("entity_poly") or {}
     length = poly.get("rcsb_sample_sequence_length")
@@ -736,7 +736,7 @@ def _generate_alerts(
 ) -> list[dict[str, str]]:
     """Generate non-invasive oligomer alerts.
 
-    Blood Lesson 3: alert messages follow
+    Alert messages follow
     ``f"[{ALERT_TYPE}] at 'oligomer_analysis': ..."``
     """
     alerts: list[dict[str, str]] = []
@@ -815,7 +815,7 @@ def _apply_chain_override(
     When triggered, both ``chain_id`` and ``uniprot_entry_name`` are corrected.
     Original AI values are recorded for transparency.
 
-    Blood Lesson 7: return dict includes ``original_chain_id`` and
+    The return dict includes ``original_chain_id`` and
     ``corrected_chain_id`` as explicit keys.
     """
     suggested_chain = suggestion.get("chain_id")

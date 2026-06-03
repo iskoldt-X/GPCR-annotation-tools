@@ -34,8 +34,7 @@ def _build_ligand_api_context(
     """Build lookup indexes from enriched entry.
 
     Returns ``{"np_by_comp": {...}, "poly_by_chain": {...}}``.
-    All `.get()` calls use the None-safe ``or {}`` / ``or ""`` pattern
-    (Blood Lesson 1).
+    All `.get()` calls use the None-safe ``or {}`` / ``or ""`` pattern.
     """
     np_by_comp: dict[str, dict[str, Any]] = {}
     for np_ent in enriched_entry.get("nonpolymer_entities") or []:
@@ -85,7 +84,7 @@ def validate_and_enrich_ligands(
     Returns a list of warning strings (``GHOST_LIGAND`` detections, plus apo
     placeholders that coexist with real ligands).
 
-    Blood Lesson 3 — Warning format:
+    Warning format:
         ``f"GHOST_LIGAND at 'ligands[{label}]': '{name}' ({cid}) not found in API entities."``
     """
     warnings: list[str] = []
