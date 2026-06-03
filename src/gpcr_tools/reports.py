@@ -12,7 +12,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from gpcr_tools.config import get_config
+from gpcr_tools.config import CHIMERA_A5_ANCHOR_MIN_SCORE, get_config
 
 logger = logging.getLogger(__name__)
 
@@ -89,15 +89,15 @@ def report_full_audit() -> str:
 
 
 def report_tail_analysis() -> str:
-    """Summarise the G-protein chimera ('4-residue tail') analysis: the score
+    """Summarise the G-protein alpha5 identity analysis: the score
     distribution, status breakdown, and which structures to review.
 
-    (The historical report also catalogued tail sequences and candidate pools;
-    those need per-run data not kept in the validation logs and are out of scope
-    here.)"""
+    (The historical report also catalogued alpha5 sequences and candidate
+    pools; those need per-run data not kept in the validation logs and are out
+    of scope here.)"""
     files = _validation_log_files()
     if not files:
-        return "Tail analysis: no validation logs found (run 'aggregate' first)."
+        return "alpha5 analysis: no validation logs found (run 'aggregate' first)."
 
     score_dist: Counter[Any] = Counter()
     status_dist: Counter[str] = Counter()
@@ -109,12 +109,15 @@ def report_tail_analysis() -> str:
         status = data.get("chimera_status") or "unknown"
         score_dist[score] += 1
         status_dist[status] += 1
-        # A non-success status or an imperfect score is worth a curator's eye.
-        if status != "success" or (isinstance(score, (int, float)) and score < 4):
+        # A non-success status or a sub-anchor alpha5 score (the window did not
+        # confidently match any reference) is worth a curator's eye.
+        if status != "success" or (
+            isinstance(score, (int, float)) and score < CHIMERA_A5_ANCHOR_MIN_SCORE
+        ):
             flagged.append((pdb, score))
 
     lines = [
-        f"G-protein tail (chimera) analysis ({len(files)} PDB(s)):",
+        f"G-protein alpha5 identity analysis ({len(files)} PDB(s)):",
         "",
         "  Score distribution:",
     ]
@@ -125,7 +128,10 @@ def report_tail_analysis() -> str:
     lines.append("  Status:")
     for status, n in status_dist.most_common():
         lines.append(f"    {n:4d}  {status}")
-    lines.append(f"  Flagged for review (non-success or score < 4): {len(flagged)}")
+    lines.append(
+        f"  Flagged for review (non-success or score < {CHIMERA_A5_ANCHOR_MIN_SCORE}): "
+        f"{len(flagged)}"
+    )
     for pdb, score in sorted(flagged):
         lines.append(f"    {pdb}: score={score}")
     return "\n".join(lines)

@@ -177,13 +177,31 @@ class TestLoaderSidecarPrecision:
         assert "UNIPROT_CLASH" in warning_text
         assert "gpr3_human" in warning_text
 
-    def test_9o38_algo_conflict_tiebreaker(self, real_pdb_workspace: Path) -> None:
-        from gpcr_tools.csv_generator.data_loader import load_pdb_data
+    def test_9o38_transducin_alpha5_resolves_family_not_subtype(self) -> None:
+        # 9O38 carries a transducin/gustducin alpha5, the receptor-coupling
+        # determinant. Its sequence cannot tell the three transducins apart, so
+        # the call must stop at the Gi/o family and route the subtype to review
+        # rather than force one member.
+        import json
 
-        _, _, validation_data = load_pdb_data("9O38")
-        conflicts = validation_data.get("algo_conflicts", [])
-        assert len(conflicts) == 1
-        assert "TIE-BREAKER OVERRIDE" in conflicts[0]
+        from gpcr_tools.config import CHIMERA_SUBTYPE_INSEPARABLE_SET
+        from gpcr_tools.validator.cache import SequenceCache
+        from gpcr_tools.validator.chimera import get_chimera_analysis
+        from tests.conftest import REAL_PDB_DIR
+
+        raw = json.loads((REAL_PDB_DIR / "enriched" / "9O38.json").read_text())
+        entry = (raw.get("data") or {}).get("entry") or raw
+        cache = SequenceCache(REAL_PDB_DIR / "cache" / "uniprot_sequence_cache.json")
+        result = get_chimera_analysis("9O38", entry, cache)
+
+        assert result["family"] == "Gi/o"
+        assert result["subtype"] is None
+        assert result["subtype_resolution"] == CHIMERA_SUBTYPE_INSEPARABLE_SET
+        assert set(result["candidate_set"]) == {
+            "gnat1_human",
+            "gnat2_human",
+            "gnat3_human",
+        }
 
 
 # ── RP-2.3: Focused Transform Tests ─────────────────────────────────────

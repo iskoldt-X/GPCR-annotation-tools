@@ -1,12 +1,19 @@
-"""G-protein identity verification via C-terminal tail sequence matching.
+"""G-protein identity verification via alpha5-helix sequence matching.
 
-Compares the C-terminal tail of the G-alpha entity found in the PDB structure
-against reference sequences of known G-alpha proteins fetched from UniProt.
+The receptor-coupling determinant of a G-alpha subunit is its C-terminal alpha5
+helix. This module compares the alpha5 window of the G-alpha entity found in the
+PDB structure against reference sequences of known G-alpha proteins fetched from
+UniProt, and reports the coupling family plus, where the sequence allows it, the
+subtype.
 
-Blood Lesson 1 — None-safety:
-    ``(entity.get("rcsb_polymer_entity") or {}).get("pdbx_description") or ""``
-Blood Lesson 4 — Magic strings:
-    All status strings are constants from ``config.py``.
+Identity is taken from the alpha5 itself, including engineered chimeras: a
+mini-G scaffold carrying a grafted alpha5 is reported by the family of that
+grafted alpha5 (the coupling determinant), not the scaffold.
+
+Several subtypes share an identical alpha5 (e.g. the transducins, or Gi1/Gi2)
+and cannot be told apart by this window. In those cases the call stops at the
+family and the subtype is routed to human review rather than forced to one
+member.
 """
 
 from __future__ import annotations
@@ -19,13 +26,19 @@ from typing import Any
 import requests
 
 from gpcr_tools.config import (
+    A5_INSEPARABLE_SUBTYPE_SETS,
+    A5_SUBTYPE_FAMILY,
     API_MAX_RETRIES,
+    CHIMERA_A5_ANCHOR_MIN_SCORE,
+    CHIMERA_A5_WINDOW,
     CHIMERA_STATUS_NO_G_PROTEIN,
     CHIMERA_STATUS_NO_VALID_COMPARISONS,
     CHIMERA_STATUS_SUCCESS,
     CHIMERA_STATUS_TOO_SHORT,
-    CHIMERA_TAIL_LENGTH,
-    FAMILY_LEADERS,
+    CHIMERA_SUBTYPE_FAMILY_ONLY,
+    CHIMERA_SUBTYPE_INSEPARABLE_SET,
+    CHIMERA_SUBTYPE_LOW_CONFIDENCE,
+    CHIMERA_SUBTYPE_RESOLVED,
     FULL_G_ALPHA_CANDIDATES,
     G_ALPHA_EXCLUDE_KEYWORDS,
     SLEEP_VALIDATION_RETRY,
@@ -123,13 +136,70 @@ def get_sequence_from_uniprot(
 
 
 def calculate_match_score(seq1: str, seq2: str) -> int:
-    """Count matching residues between two equal-length sequence tails.
+    """Count matching residues between two equal-length sequence windows.
 
     Returns 0 if either sequence is empty or lengths differ.
     """
     if not seq1 or not seq2 or len(seq1) != len(seq2):
         return 0
     return sum(1 for a, b in zip(seq1, seq2, strict=True) if a == b)
+
+
+def _best_alpha5_match(struct_seq: str, ref_tail: str, *, slide: bool) -> tuple[int, str]:
+    """Score *ref_tail* against the structure's alpha5 window.
+
+    The structure's alpha5 is almost always its C-terminus, so that window is
+    tried first. When ``slide`` is set (the C-terminal window scored poorly
+    against every reference, suggesting a fusion/tag/truncation has displaced
+    the alpha5) every window of the structure is scanned for the best match.
+
+    Returns ``(score, window)`` where *window* is the structure segment scored.
+    """
+    w = len(ref_tail)
+    c_terminal = struct_seq[-w:]
+    best_score = calculate_match_score(c_terminal, ref_tail)
+    best_window = c_terminal
+    if slide:
+        for i in range(len(struct_seq) - w + 1):
+            window = struct_seq[i : i + w]
+            score = calculate_match_score(window, ref_tail)
+            if score > best_score:
+                best_score, best_window = score, window
+    return best_score, best_window
+
+
+def _resolve_subtype(winners: list[str], best_score: int) -> tuple[str | None, str]:
+    """Map the set of equally-scoring slugs to (subtype, resolution).
+
+    A single winner resolves to that subtype. A winner set contained in one of
+    the inseparable subtype sets stops at the family. Anything else is reported
+    family-only. A weak best score is low confidence regardless.
+    """
+    if best_score < CHIMERA_A5_ANCHOR_MIN_SCORE:
+        return None, CHIMERA_SUBTYPE_LOW_CONFIDENCE
+    unique = set(winners)
+    if len(unique) == 1:
+        return winners[0], CHIMERA_SUBTYPE_RESOLVED
+    if any(unique <= group for group in A5_INSEPARABLE_SUBTYPE_SETS):
+        return None, CHIMERA_SUBTYPE_INSEPARABLE_SET
+    return None, CHIMERA_SUBTYPE_FAMILY_ONLY
+
+
+def _base_result() -> dict[str, Any]:
+    """A result dict with every key defaulted, for the early-exit paths."""
+    return {
+        "status": CHIMERA_STATUS_NO_G_PROTEIN,
+        "family": None,
+        "family_confident": False,
+        "subtype": None,
+        "subtype_resolution": None,
+        "candidate_set": [],
+        "score": 0,
+        "a5_window": CHIMERA_A5_WINDOW,
+        "a5_tail": None,
+        "candidates_checked": [],
+        "error": None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -142,53 +212,44 @@ def get_chimera_analysis(
     enriched_entry: dict[str, Any],
     cache: SequenceCache,
 ) -> dict[str, Any]:
-    """Run G-protein tail-matching analysis on *enriched_entry*.
+    """Identify the G-alpha coupling family (and subtype where resolvable).
 
-    Returns a result dict with keys: ``status``, ``best_match``, ``score``,
-    ``candidates_checked``, ``error``, ``tail_seq``, ``can_best``,
-    ``max_score_matches``.
+    Returns a result dict with keys: ``status``, ``family``,
+    ``family_confident``, ``subtype``, ``subtype_resolution``,
+    ``candidate_set``, ``score``, ``a5_window``, ``a5_tail``,
+    ``candidates_checked``, ``error``.
     """
-    result: dict[str, Any] = {
-        "status": CHIMERA_STATUS_NO_G_PROTEIN,
-        "best_match": None,
-        "score": 0,
-        "candidates_checked": [],
-        "error": None,
-        "tail_seq": None,
-    }
+    result = _base_result()
+    w = CHIMERA_A5_WINDOW
 
-    # 1. Find G-alpha entity
+    # 1. Find the G-alpha entity. None-safe access throughout.
     g_alpha_entity: dict[str, Any] | None = None
-    entities = enriched_entry.get("polymer_entities") or []
-
-    for entity in entities:
+    for entity in enriched_entry.get("polymer_entities") or []:
         if not isinstance(entity, dict):
             continue
-        # BL1: (entity.get("rcsb_polymer_entity") or {}).get("pdbx_description") or ""
         desc = (entity.get("rcsb_polymer_entity") or {}).get("pdbx_description") or ""
         if is_g_alpha_description(desc):
             g_alpha_entity = entity
             break
 
     if g_alpha_entity is None:
-        result["status"] = CHIMERA_STATUS_NO_G_PROTEIN
+        # status already defaults to no-G-protein in _base_result().
         return result
 
-    # 2. Get structure sequence
-    # BL1: (entity.get("entity_poly") or {})
+    # 2. Get the modelled sequence.
     entity_poly = g_alpha_entity.get("entity_poly") or {}
     struct_seq: str | None = entity_poly.get("pdbx_seq_one_letter_code_can")
     if not struct_seq:
         struct_seq = entity_poly.get("pdbx_seq_one_letter_code")
 
-    if not struct_seq or len(struct_seq) < CHIMERA_TAIL_LENGTH:
+    if not struct_seq or len(struct_seq) < w:
         result["status"] = CHIMERA_STATUS_TOO_SHORT
         return result
 
-    # 3. Prepare candidates — mutable working copy of immutable constant
-    candidates: dict[str, str] = dict(FULL_G_ALPHA_CANDIDATES)  # explicit copy
-    uniprots = g_alpha_entity.get("uniprots") or []
-    for u in uniprots:
+    # 3. Candidates: the wild-type roster plus any UniProt entries the API
+    #    attached to this entity.
+    candidates: dict[str, str] = dict(FULL_G_ALPHA_CANDIDATES)
+    for u in g_alpha_entity.get("uniprots") or []:
         if not isinstance(u, dict):
             continue
         rcsb_id = u.get("rcsb_id")
@@ -196,46 +257,48 @@ def get_chimera_analysis(
         if rcsb_id and slug:
             candidates[rcsb_id] = slug
 
-    # 4. Run comparison
-    struct_tail = struct_seq[-CHIMERA_TAIL_LENGTH:]
-    scores: dict[str, int] = {}
-
+    # 4. Fetch reference sequences once (cached across calls).
+    ref_tails: dict[str, str] = {}
     for acc_id, slug in candidates.items():
         ref_seq = get_sequence_from_uniprot(acc_id, cache)
-        if ref_seq and len(ref_seq) >= CHIMERA_TAIL_LENGTH:
-            ref_tail = ref_seq[-CHIMERA_TAIL_LENGTH:]
-            score = calculate_match_score(struct_tail, ref_tail)
-            scores[slug] = score
+        if ref_seq and len(ref_seq) >= w:
+            ref_tails[slug] = ref_seq[-w:]
 
-    if not scores:
+    if not ref_tails:
         result["status"] = CHIMERA_STATUS_NO_VALID_COMPARISONS
         return result
 
-    best_score = max(scores.values())
-    max_score_matches: list[str] = [slug for slug, score in scores.items() if score == best_score]
+    # 5. Score the structure's alpha5 against each reference. Try the
+    #    C-terminal window first; only if it matches nothing well do we pay for
+    #    a full sliding scan to locate a displaced alpha5.
+    def score_all(*, slide: bool) -> dict[str, tuple[int, str]]:
+        return {
+            slug: _best_alpha5_match(struct_seq, ref_tail, slide=slide)
+            for slug, ref_tail in ref_tails.items()
+        }
 
-    # Tie-breaker: canonical priority via family leaders
-    dynamic_canonical_map: dict[str, str] = {}
-    for leader_slug in FAMILY_LEADERS:
-        leader_acc = next(
-            (k for k, v in FULL_G_ALPHA_CANDIDATES.items() if v == leader_slug),
-            None,
-        )
-        if leader_acc:
-            ref_seq = get_sequence_from_uniprot(leader_acc, cache)
-            if ref_seq and len(ref_seq) >= CHIMERA_TAIL_LENGTH:
-                ref_tail = ref_seq[-CHIMERA_TAIL_LENGTH:]
-                if ref_tail not in dynamic_canonical_map:
-                    dynamic_canonical_map[ref_tail] = leader_slug
+    scored = score_all(slide=False)
+    best_score = max(score for score, _ in scored.values())
+    if best_score < CHIMERA_A5_ANCHOR_MIN_SCORE:
+        scored = score_all(slide=True)
+        best_score = max(score for score, _ in scored.values())
 
-    canonical_best = dynamic_canonical_map.get(struct_tail, max_score_matches[0])
+    winners = sorted(slug for slug, (score, _) in scored.items() if score == best_score)
+    a5_tail = scored[winners[0]][1]
 
-    result["status"] = CHIMERA_STATUS_SUCCESS
-    result["best_match"] = canonical_best
-    result["score"] = best_score
-    result["tail_seq"] = struct_tail
-    result["can_best"] = canonical_best
-    result["max_score_matches"] = max_score_matches
-    result["candidates_checked"] = list(scores.keys())
+    families = {A5_SUBTYPE_FAMILY[s] for s in winners if s in A5_SUBTYPE_FAMILY}
+    family = next(iter(families)) if len(families) == 1 else None
+    subtype, resolution = _resolve_subtype(winners, best_score)
 
+    result.update(
+        status=CHIMERA_STATUS_SUCCESS,
+        family=family,
+        family_confident=len(families) == 1,
+        subtype=subtype,
+        subtype_resolution=resolution,
+        candidate_set=winners,
+        score=best_score,
+        a5_tail=a5_tail,
+        candidates_checked=list(scored.keys()),
+    )
     return result

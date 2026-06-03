@@ -72,14 +72,14 @@ class TestTailAnalysis:
         assert "no validation logs" in reports.report_tail_analysis()
 
     def test_score_distribution_and_flagging(self, cfg: Any) -> None:
-        _write_validation(cfg, "AAA", chimera_score=4, chimera_status="success")
-        _write_validation(cfg, "BBB", chimera_score=2, chimera_status="success")  # low -> flagged
-        _write_validation(cfg, "CCC", chimera_score=4, chimera_status="conflict")  # non-ok -> flag
+        _write_validation(cfg, "AAA", chimera_score=11, chimera_status="success")  # clean
+        _write_validation(cfg, "BBB", chimera_score=5, chimera_status="success")  # sub-anchor
+        _write_validation(cfg, "CCC", chimera_score=11, chimera_status="conflict")  # non-ok
         out = reports.report_tail_analysis()
         assert "3 PDB" in out
-        assert "score 4" in out
-        assert "score 2" in out
-        assert "Flagged for review (non-success or score < 4): 2" in out
+        assert "score 11" in out
+        assert "score 5" in out
+        assert "Flagged for review (non-success or score < 8): 2" in out
         assert "BBB" in out
         assert "CCC" in out
 

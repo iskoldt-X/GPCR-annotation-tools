@@ -42,6 +42,7 @@ from gpcr_tools.aggregator.voting import (
     select_best_run,
 )
 from gpcr_tools.config import (
+    A5_SUBTYPE_FAMILY,
     AGG_STATUS_COMPLETED,
     AGG_STATUS_FAILED,
     ALERT_PREFIX_ALGO_WARNING,
@@ -52,6 +53,7 @@ from gpcr_tools.config import (
     CHIMERA_STATUS_NO_G_PROTEIN,
     CHIMERA_STATUS_SKIPPED,
     CHIMERA_STATUS_SUCCESS,
+    CHIMERA_SUBTYPE_LOW_CONFIDENCE,
     EMPTY_VALUES,
     LOW_CONFIDENCE_LEVELS,
     get_config,
@@ -99,12 +101,10 @@ def _build_validation_report(
 ) -> dict[str, Any]:
     """Assemble the validation report from all warning sources.
 
-    Blood Lesson 1: ``chimera_result.get("score") or 0`` — NOT
-    ``chimera_result.get("score", 0)``.
-
-    Blood Lesson 4: all status comparisons use constants.
-
-    Review 4 A-2, Review 7: full chimera vs AI conflict classification.
+    None-safe reads throughout (``chimera_result.get("score") or 0``) and all
+    status comparisons go through the shared constants. The G-alpha sequence
+    finding is classified against the model's claim: family agreement, subtype
+    resolution, and routing of an indistinguishable subtype to human review.
     """
     report: dict[str, Any] = {
         "critical_warnings": list(all_warnings),
@@ -130,31 +130,64 @@ def _build_validation_report(
             f"confirm the alpha-subunit identity manually."
         )
 
-    # Chimera vs AI comparison (Review 4 A-2, Review 7)
+    # Compare the alpha5 sequence finding against the model's G-alpha claim.
     status = chimera_result.get("status") or CHIMERA_STATUS_SKIPPED
-    can_best = chimera_result.get("can_best")
     ai_uniprot = extract_ai_g_protein(best_run_data)
 
     if status == CHIMERA_STATUS_SUCCESS:
-        max_matches = chimera_result.get("max_score_matches") or ([can_best] if can_best else [])
-        if ai_uniprot:
-            tail_seq = chimera_result.get("tail_seq") or "N/A"
-            if ai_uniprot in max_matches:
-                report["algo_notes"].append(
-                    f"{ALERT_PREFIX_TIE_BREAKER_ALIGNED} at 'chimera_analysis': "
-                    f"Tail '{tail_seq}' matched {len(max_matches)} slugs. "
-                    f"AI choice '{ai_uniprot}' retained."
-                )
-            else:
+        family = chimera_result.get("family")
+        subtype = chimera_result.get("subtype")
+        resolution = chimera_result.get("subtype_resolution")
+        candidate_set = chimera_result.get("candidate_set") or []
+        a5_tail = chimera_result.get("a5_tail") or "N/A"
+        ai_family = A5_SUBTYPE_FAMILY.get(ai_uniprot) if ai_uniprot else None
+
+        if subtype is not None:
+            # The alpha5 resolves to a single subtype.
+            if ai_uniprot and ai_uniprot != subtype:
                 report["algo_conflicts"].append(
                     f"{ALERT_PREFIX_TIE_BREAKER_OVERRIDE} at 'chimera_analysis': "
-                    f"Tail '{tail_seq}' matched {len(max_matches)} slugs. "
-                    f"AI '{ai_uniprot}' failed. "
-                    f"Defaulted to canonical '{can_best}'."
+                    f"alpha5 '{a5_tail}' resolves G-alpha to '{subtype}', but the "
+                    f"model chose '{ai_uniprot}'. Confirm the identity."
                 )
-        # Review 4 L-4: guard None interpolation
-        if can_best:
-            report["algo_notes"].append(f"Matched G-alpha tail to '{can_best}'.")
+            else:
+                report["algo_notes"].append(
+                    f"{ALERT_PREFIX_TIE_BREAKER_ALIGNED} at 'chimera_analysis': "
+                    f"alpha5 '{a5_tail}' resolves G-alpha to '{subtype}'."
+                )
+        elif resolution == CHIMERA_SUBTYPE_LOW_CONFIDENCE:
+            report["algo_notes"].append(
+                f"{ALERT_PREFIX_ALGO_WARNING} at 'chimera_analysis': "
+                f"alpha5 match is weak (best window score "
+                f"{chimera_result.get('score') or 0}); G-alpha identity unverified."
+            )
+        elif ai_family and family and ai_family != family:
+            # The model's family disagrees with the alpha5 coupling family.
+            report["algo_conflicts"].append(
+                f"{ALERT_PREFIX_TIE_BREAKER_OVERRIDE} at 'chimera_analysis': "
+                f"alpha5 '{a5_tail}' indicates the {family} family, but the model "
+                f"chose '{ai_uniprot}' ({ai_family}). Confirm the G-alpha identity."
+            )
+        elif family:
+            # Family is confident but the subtype cannot be told apart by the
+            # alpha5; route the subtype to a human rather than forcing a member.
+            members = ", ".join(candidate_set) or "indistinguishable subtypes"
+            report["critical_warnings"].append(
+                f"{ALERT_PREFIX_CHIMERIC_REVIEW} at "
+                f"'signaling_partners.g_protein.alpha_subunit': alpha5 confirms the "
+                f"{family} family but cannot distinguish the subtype ({members}); "
+                f"confirm manually."
+            )
+        else:
+            # The best match spans more than one coupling family or an
+            # unrecognised slug, so even the family is undetermined. Never leave
+            # this silent: surface it as a conflict for manual resolution.
+            members = ", ".join(candidate_set) or "no recognised subtype"
+            report["algo_conflicts"].append(
+                f"{ALERT_PREFIX_ALGO_WARNING} at 'chimera_analysis': "
+                f"alpha5 '{a5_tail}' does not map to a single coupling family "
+                f"({members}); G-alpha identity cannot be determined automatically."
+            )
     elif status == CHIMERA_STATUS_NO_G_PROTEIN:
         if ai_uniprot and str(ai_uniprot).lower() not in EMPTY_VALUES:
             report["algo_conflicts"].append(
