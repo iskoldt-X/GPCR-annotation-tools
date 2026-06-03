@@ -150,7 +150,11 @@ WATCHER_MAX_INGEST_ATTEMPTS: int = 5
 # Workspace contract
 # ---------------------------------------------------------------------------
 
-SUPPORTED_CONTRACT_VERSION: int = 1
+# Bumped to 2 when the pre-annotation detect stage added the `detect/` directory
+# to the workspace layout. Workspaces created under version 1 must be re-created
+# with `init-workspace` (or have a `detect/` directory added and the contract
+# version updated).
+SUPPORTED_CONTRACT_VERSION: int = 2
 
 # ---------------------------------------------------------------------------
 # Workspace configuration
@@ -170,6 +174,7 @@ class WorkspaceConfig:
     enriched_dir: Path
     papers_dir: Path
     ai_results_dir: Path
+    detect_dir: Path
     aggregated_dir: Path
     output_dir: Path
     cache_dir: Path
@@ -197,6 +202,7 @@ OVERRIDE_VARS: MappingProxyType[str, str] = MappingProxyType(
         "enriched": "GPCR_ENRICHED_PATH",
         "papers": "GPCR_PAPERS_PATH",
         "ai_results": "GPCR_AI_RESULTS_PATH",
+        "detect": "GPCR_DETECT_PATH",
         "aggregated": "GPCR_AGGREGATED_PATH",
         "output": "GPCR_OUTPUT_PATH",
         "cache": "GPCR_CACHE_PATH",
@@ -224,6 +230,7 @@ def get_config() -> WorkspaceConfig:
     enriched_dir = _resolve(workspace, "GPCR_ENRICHED_PATH", "enriched")
     papers_dir = _resolve(workspace, "GPCR_PAPERS_PATH", "papers")
     ai_results_dir = _resolve(workspace, "GPCR_AI_RESULTS_PATH", "ai_results")
+    detect_dir = _resolve(workspace, "GPCR_DETECT_PATH", "detect")
     aggregated_dir = _resolve(workspace, "GPCR_AGGREGATED_PATH", "aggregated")
     output_dir = _resolve(workspace, "GPCR_OUTPUT_PATH", "output")
     cache_dir = _resolve(workspace, "GPCR_CACHE_PATH", "cache")
@@ -236,6 +243,7 @@ def get_config() -> WorkspaceConfig:
         enriched_dir=enriched_dir,
         papers_dir=papers_dir,
         ai_results_dir=ai_results_dir,
+        detect_dir=detect_dir,
         aggregated_dir=aggregated_dir,
         output_dir=output_dir,
         cache_dir=cache_dir,
