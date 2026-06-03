@@ -13,6 +13,7 @@ from typing import Any
 
 # Signal kinds (domain vocabulary; more are added as detectors land).
 SIGNAL_CHIMERIC_GPROTEIN: str = "chimeric_g_protein"
+SIGNAL_EXCLUDED_REAL_LIGAND: str = "excluded_real_ligand"
 
 SEVERITY_ADVISORY: str = "advisory"
 SEVERITY_REVIEW: str = "review"

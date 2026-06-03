@@ -427,6 +427,14 @@ LIGAND_EXCLUDE_LIST: frozenset[str] = frozenset(
     }
 )
 
+# Exclude-list members that can nonetheless be a real functional ligand: a
+# detector surfaces them for review when present, since they are stripped from
+# the metadata before the model sees them. Cholesterol (CLR) is intentionally
+# NOT here — it is not on the exclude list (the model already sees it), and its
+# agonist-vs-structural-lipid role is handled by the disputed-molecule prompt
+# fork, not this detector.
+EXCLUDED_REAL_LIGAND_INTEREST: frozenset[str] = frozenset({"PLM"})
+
 # ---------------------------------------------------------------------------
 # Chimera statuses
 # ---------------------------------------------------------------------------

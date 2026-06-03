@@ -12,10 +12,12 @@ import pytest
 
 from gpcr_tools.config import FULL_G_ALPHA_CANDIDATES, reset_config
 from gpcr_tools.detector.gprotein import G_PROTEIN_LOCUS, detect_g_protein_identity
+from gpcr_tools.detector.ligands import detect_excluded_real_ligands
 from gpcr_tools.detector.signals import (
     SEVERITY_ADVISORY,
     SEVERITY_REVIEW,
     SIGNAL_CHIMERIC_GPROTEIN,
+    SIGNAL_EXCLUDED_REAL_LIGAND,
     DetectSignal,
     to_critical_warnings,
 )
@@ -46,7 +48,41 @@ def _galpha_entry(sequence: str) -> dict[str, Any]:
     }
 
 
+def _nonpoly_entry(comp_ids: list[str]) -> dict[str, Any]:
+    return {
+        "nonpolymer_entities": [{"nonpolymer_comp": {"chem_comp": {"id": c}}} for c in comp_ids]
+    }
+
+
 _TRANSDUCIN_TAILS = dict.fromkeys(("gnat1_human", "gnat2_human", "gnat3_human"), TRANSDUCIN_A5)
+
+
+class TestExcludedRealLigandDetector:
+    def test_hidden_palmitate_emits_review(self) -> None:
+        entry = _nonpoly_entry(["PLM", "HOH", "SO4"])  # PLM excluded; HOH/SO4 buffers
+        sigs = detect_excluded_real_ligands("X", entry)
+        assert len(sigs) == 1
+        assert sigs[0].kind == SIGNAL_EXCLUDED_REAL_LIGAND
+        assert sigs[0].severity == SEVERITY_REVIEW
+        assert sigs[0].payload["comp_id"] == "PLM"
+
+    def test_cholesterol_not_flagged(self) -> None:
+        # CLR is NOT on the exclude list (the model already sees it), so it is
+        # never an "excluded real ligand" — its role is the disputed-fork's job.
+        assert detect_excluded_real_ligands("X", _nonpoly_entry(["CLR"])) == []
+
+    def test_no_nonpolymer_no_signal(self) -> None:
+        assert detect_excluded_real_ligands("X", {"polymer_entities": []}) == []
+
+    def test_multiple_hidden_emit_one_signal_each(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # When the interest set grows, each hidden ligand gets its own signal.
+        monkeypatch.setattr(
+            "gpcr_tools.detector.ligands.EXCLUDED_REAL_LIGAND_INTEREST",
+            frozenset({"PLM", "NAG"}),  # both also on LIGAND_EXCLUDE_LIST
+        )
+        sigs = detect_excluded_real_ligands("X", _nonpoly_entry(["PLM", "NAG", "HOH"]))
+        assert len(sigs) == 2
+        assert {s.payload["comp_id"] for s in sigs} == {"PLM", "NAG"}
 
 
 class TestDetectSignal:
@@ -156,8 +192,17 @@ class TestDetectStage:
         assert len(sigs) == 1
         assert sigs[0].severity == SEVERITY_REVIEW
 
+    def test_run_detect_unwraps_envelope_for_ligand_detector(self, ws: Path) -> None:
+        # The envelope unwrap must reach the ligand detector too, not just gprotein.
+        enveloped = {"data": {"entry": _nonpoly_entry(["PLM"])}}
+        (ws / "enriched" / "9XYZ.json").write_text(json.dumps(enveloped))
+        sigs = run_detect("9XYZ", skip_api_checks=True)
+        assert len(sigs) == 1
+        assert sigs[0].kind == SIGNAL_EXCLUDED_REAL_LIGAND
+
     def test_run_detect_missing_enriched(self, ws: Path) -> None:
         assert run_detect("NOPE") == []
+        assert not (ws / "detect" / "NOPE.json").is_file()  # no file when no input
 
     def test_skip_api_checks_writes_empty_signal_file(self, ws: Path) -> None:
         (ws / "enriched" / "9IIX.json").write_text(
@@ -166,3 +211,11 @@ class TestDetectStage:
         sigs = run_detect("9IIX", skip_api_checks=True)
         assert sigs == []
         assert (ws / "detect" / "9IIX.json").is_file()  # stage output always present
+
+    def test_metadata_detector_runs_under_skip_api(self, ws: Path) -> None:
+        # The excluded-ligand detector is metadata-only, so it runs even when
+        # sequence-based detectors are skipped.
+        (ws / "enriched" / "9XYZ.json").write_text(json.dumps(_nonpoly_entry(["PLM"])))
+        sigs = run_detect("9XYZ", skip_api_checks=True)
+        assert len(sigs) == 1
+        assert sigs[0].kind == SIGNAL_EXCLUDED_REAL_LIGAND
