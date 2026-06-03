@@ -247,7 +247,7 @@ def _write_outputs(
 ) -> AggregateResult:
     """Write aggregated JSON, voting log, and validation report atomically.
 
-    Blood Lesson 2: all temp files written first, then ``os.replace``-d.
+    All temp files are written first, then ``os.replace``-d (atomic write).
     ``try...finally`` guarantees cleanup on failure.
     """
     cfg = get_config()
@@ -322,7 +322,7 @@ def _update_aggregate_log(
 ) -> None:
     """Record *pdb_id* processing status in ``aggregate_log.json``.
 
-    Blood Lesson 2: uses atomic write.
+    Uses atomic write.
     Never swallows exceptions silently — logs warnings.
     """
     cfg = get_config()
@@ -393,7 +393,7 @@ def aggregate_pdb(
         11. Assemble validation report
         12. Atomic write block
 
-    Blood Lesson 5: ``if enriched is None:`` — NOT ``if not enriched:``.
+    Use ``if enriched is None:`` — NOT ``if not enriched:`` (an empty dict is valid).
     """
     # 1. Load AI runs
     runs = load_ai_runs(pdb_id)
@@ -413,7 +413,7 @@ def aggregate_pdb(
 
     # 4. Load enriched data
     enriched = load_enriched_data(pdb_id)
-    # BL5: if enriched is None — empty dict {} is valid
+    # if enriched is None — empty dict {} is valid
     if enriched is None:
         return AggregateResult(
             pdb_id=pdb_id,
@@ -497,7 +497,7 @@ def aggregate_all(
         logger.error("Failed to initialize workspace config: %s", exc)
         return []
 
-    # Cache initialization (Review 5 H4)
+    # Cache initialization
     try:
         validation_cache = ValidationCache(cfg.cache_dir / "id_validation_cache.json")
         sequence_cache = SequenceCache(cfg.cache_dir / "uniprot_sequence_cache.json")
