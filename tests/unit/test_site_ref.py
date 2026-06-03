@@ -19,15 +19,7 @@ from gpcr_tools.detector import site_ref as sr
 from gpcr_tools.detector.site_ref import classify_site
 
 
-def _entry(comp: str = "LIG", slug: str = "t2r14_human", acc: str = "Q9NYV8", soi: bool = True) -> dict:
-    nonpoly = {
-        "rcsb_nonpolymer_entity_container_identifiers": {"nonpolymer_comp_id": comp},
-        "nonpolymer_entity_instances": [
-            {"rcsb_nonpolymer_entity_instance_container_identifiers": {"asym_id": "B"}}
-        ],
-    }
-    if soi:
-        nonpoly["rcsb_nonpolymer_entity_annotation"] = [{"type": "SUBJECT_OF_INVESTIGATION"}]
+def _entry(comp: str = "LIG", slug: str = "t2r14_human", acc: str = "Q9NYV8") -> dict:
     return {
         "polymer_entities": [
             {
@@ -37,7 +29,14 @@ def _entry(comp: str = "LIG", slug: str = "t2r14_human", acc: str = "Q9NYV8", so
                 ],
             }
         ],
-        "nonpolymer_entities": [nonpoly],
+        "nonpolymer_entities": [
+            {
+                "rcsb_nonpolymer_entity_container_identifiers": {"nonpolymer_comp_id": comp},
+                "nonpolymer_entity_instances": [
+                    {"rcsb_nonpolymer_entity_instance_container_identifiers": {"asym_id": "B"}}
+                ],
+            }
+        ],
     }
 
 
@@ -110,19 +109,13 @@ class TestEnrichedParsing:
         assert sr._gpcr_chain_accessions(_entry(slug="gnas2_human")) == {}
 
     def test_annotated_keeps_real_ligand(self) -> None:
-        # A real ligand is annotated whether or not it is flagged studied (recall).
-        assert sr._annotated_ligands(_entry("LIG", soi=False)) == {"LIG"}
+        # Every real (non-buffer) ligand is annotated and gets a site (recall);
+        # the multi-site split is gated later by burial, not by ligand identity.
+        assert sr._annotated_ligands(_entry("LIG")) == {"LIG"}
 
-    def test_studied_requires_soi(self) -> None:
-        assert sr._studied_ligands(_entry("LIG", soi=True)) == {"LIG"}
-        assert sr._studied_ligands(_entry("SOG", soi=False)) == set()
-
-    def test_disputed_not_studied_unless_soi(self) -> None:
-        # A disputed molecule is still annotated (gets a site) but does NOT earn
-        # the multi-site split nudge unless it is also a subject of investigation.
+    def test_disputed_molecule_annotated(self) -> None:
         disputed = sorted(DISPUTED_MOLECULES)[0]
-        assert sr._studied_ligands(_entry(disputed, soi=False)) == set()
-        assert disputed in sr._annotated_ligands(_entry(disputed, soi=False))
+        assert disputed in sr._annotated_ligands(_entry(disputed))
 
     def test_prefers_table_accession_over_fusion_partner(self) -> None:
         # Both UniProts pass the permissive slug denylist; the real receptor
@@ -145,41 +138,83 @@ class TestEnrichedParsing:
 
 @pytest.fixture
 def stub_pipeline(monkeypatch: pytest.MonkeyPatch):
-    """Stub the I/O so detect_site_refs exercises only its orchestration."""
+    """Stub the I/O so detect_site_refs exercises only its orchestration.
+
+    Set the fixture list to (burial, site, mapped) per copy; the stub feeds each
+    copy's burial through ligand_contact_residues and its (site, mapped) through
+    _classify_copy.
+    """
+    copies: list[tuple[float, str, int]] = []
     monkeypatch.setattr(sr, "load_structure", lambda *a, **k: object())
     monkeypatch.setattr(sr, "fetch_polymer_alignment", lambda *a, **k: {"R": {"Q9NYV8": [(1, 1, 400)]}})
-    monkeypatch.setattr(sr, "ligand_contact_residues", lambda *a, **k: [["copy1"], ["copy2"]])
-    per_copy: list[tuple[str, int]] = []
-    monkeypatch.setattr(sr, "_classify_copy", lambda *a, **k: per_copy.pop(0))
-    return per_copy
+    monkeypatch.setattr(
+        sr, "ligand_contact_residues", lambda *a, **k: [(b, (s, m)) for b, s, m in copies]
+    )
+    monkeypatch.setattr(sr, "_classify_copy", lambda contacts, *a, **k: contacts)
+    return copies
+
+
+_BURIED = 0.95  # >= GEOMETRY_BURIAL_MIN
+_SHALLOW = 0.45  # < GEOMETRY_BURIAL_MIN (surface lipid)
 
 
 class TestDetectSiteRefs:
     def test_single_site_signal(self, stub_pipeline, tmp_path: Path) -> None:
-        stub_pipeline[:] = [(SITE_REF_ORTHOSTERIC, 10), (SITE_REF_ORTHOSTERIC, 8)]
+        stub_pipeline[:] = [(_BURIED, SITE_REF_ORTHOSTERIC, 10), (_BURIED, SITE_REF_ORTHOSTERIC, 8)]
         signals = sr.detect_site_refs("X", _entry("LIG"), tmp_path)
         assert len(signals) == 1
         assert signals[0].payload["sites"] == [SITE_REF_ORTHOSTERIC]
 
-    def test_studied_ligand_keeps_multiple_sites(self, stub_pipeline, tmp_path: Path) -> None:
-        stub_pipeline[:] = [(SITE_REF_ORTHOSTERIC, 10), (SITE_REF_EXTRACELLULAR_VESTIBULE, 8)]
-        signals = sr.detect_site_refs("X", _entry("LIG", soi=True), tmp_path)
+    def test_buried_copies_in_distinct_sites_split(self, stub_pipeline, tmp_path: Path) -> None:
+        stub_pipeline[:] = [
+            (_BURIED, SITE_REF_ORTHOSTERIC, 10),
+            (_BURIED, SITE_REF_EXTRACELLULAR_VESTIBULE, 8),
+        ]
+        signals = sr.detect_site_refs("X", _entry("LIG"), tmp_path)
         assert signals[0].payload["sites"] == [
             SITE_REF_EXTRACELLULAR_VESTIBULE,
             SITE_REF_ORTHOSTERIC,
         ]
 
-    def test_non_studied_multi_site_collapses_to_dominant(
+    def test_shallow_scattered_copies_collapse_to_dominant(
         self, stub_pipeline, tmp_path: Path
     ) -> None:
-        # A detergent scattered across grooves must NOT be told to emit 3 entries;
-        # it reports only its most-contacted site.
-        stub_pipeline[:] = [(SITE_REF_ORTHOSTERIC, 6), (SITE_REF_EXTRACELLULAR_VESTIBULE, 12)]
-        signals = sr.detect_site_refs("X", _entry("SOG", soi=False), tmp_path)
+        # Cholesterol scattered across shallow surface grooves (low burial) must
+        # NOT be split into multiple entries, even spanning several site classes.
+        stub_pipeline[:] = [
+            (_SHALLOW, SITE_REF_ALLOSTERIC_7TM, 6),
+            (_SHALLOW, SITE_REF_EXTRACELLULAR_VESTIBULE, 12),
+        ]
+        signals = sr.detect_site_refs("X", _entry("CLR"), tmp_path)
         assert signals[0].payload["sites"] == [SITE_REF_EXTRACELLULAR_VESTIBULE]
 
+    def test_one_buried_one_shallow_does_not_split(self, stub_pipeline, tmp_path: Path) -> None:
+        # Only one real (buried) pocket -> no split, even though a shallower copy
+        # sits at a different site with more contacts. The dominant of all sites
+        # (the shallow one, by contact count) is reported as the single site.
+        stub_pipeline[:] = [
+            (_BURIED, SITE_REF_ORTHOSTERIC, 5),
+            (_SHALLOW, SITE_REF_EXTRACELLULAR_VESTIBULE, 12),
+        ]
+        signals = sr.detect_site_refs("X", _entry("LIG"), tmp_path)
+        assert signals[0].payload["sites"] == [SITE_REF_EXTRACELLULAR_VESTIBULE]
+
+    def test_split_uses_only_buried_sites(self, stub_pipeline, tmp_path: Path) -> None:
+        # Two buried pockets drive the split; a third, shallow copy at another
+        # site is excluded from the per-site list (only real pockets split).
+        stub_pipeline[:] = [
+            (_BURIED, SITE_REF_ORTHOSTERIC, 10),
+            (_BURIED, SITE_REF_EXTRACELLULAR_VESTIBULE, 8),
+            (_SHALLOW, SITE_REF_INTRACELLULAR, 20),
+        ]
+        signals = sr.detect_site_refs("X", _entry("LIG"), tmp_path)
+        assert signals[0].payload["sites"] == [
+            SITE_REF_EXTRACELLULAR_VESTIBULE,
+            SITE_REF_ORTHOSTERIC,
+        ]
+
     def test_unknown_copies_emit_no_signal(self, stub_pipeline, tmp_path: Path) -> None:
-        stub_pipeline[:] = [(SITE_REF_UNKNOWN, 2), (SITE_REF_UNKNOWN, 1)]
+        stub_pipeline[:] = [(_BURIED, SITE_REF_UNKNOWN, 2), (_BURIED, SITE_REF_UNKNOWN, 1)]
         assert sr.detect_site_refs("X", _entry("LIG"), tmp_path) == []
 
     def test_no_gpcr_chain_short_circuits(self, tmp_path: Path) -> None:
