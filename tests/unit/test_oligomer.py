@@ -352,13 +352,6 @@ class TestSuggestPrimaryProtomer:
         assert result["chain_id"] == "A"
         assert result["rank_used"] == 4
 
-
-def test_map_uniprot_to_entity_skips_incomplete_region():
-    """An alignment region missing a coordinate field is skipped, not a KeyError
-    that would fail the whole PDB's oligomer analysis."""
-    regions = [{"ref_beg_seq_id": 1, "entity_beg_seq_id": 1}]  # no 'length'
-    assert map_uniprot_to_entity(1, 10, regions) == []
-
     def test_rank4_longest_sequence(self) -> None:
         roster = {
             "A": {"slug": "drd2_human", "length": 300, "asym_id": "A"},
@@ -376,6 +369,52 @@ def test_map_uniprot_to_entity_skips_incomplete_region():
         result = _suggest_primary_protomer(roster, {}, OLIGOMER_HOMOMER, "A", {"g_protein": {}}, [])
         assert result["rank_used"] == 0
         assert "Homomer" in result["reason"]
+
+    def test_rank0_coupling_override_beats_ai_and_ligand(self) -> None:
+        # GABA-B shape: agonist on GABBR1 (chain A), but the G protein couples GABBR2
+        # (chain B). The geometric coupling protomer must win over the AI's chain
+        # (Rank 1) and the ligand-binding chain (Rank 2).
+        roster = {
+            "A": {"slug": "gabr1_human", "length": 900, "asym_id": "A"},
+            "B": {"slug": "gabr2_human", "length": 900, "asym_id": "B"},
+        }
+        ligands: list[dict[str, Any]] = [{"chain_id": "A"}]
+        result = _suggest_primary_protomer(
+            roster, {}, OLIGOMER_HETEROMER, "A", {"g_protein": {}}, ligands, coupling_chain="B"
+        )
+        assert result["chain_id"] == "B"
+        assert result["rank_used"] == 0
+        assert "coupling" in result["reason"].lower()
+
+    def test_coupling_chain_absent_from_roster_falls_back(self) -> None:
+        # A coupling chain not in the roster is ignored; lower ranks decide.
+        roster = {"A": {"slug": "drd2_human", "length": 300, "asym_id": "A"}}
+        result = _suggest_primary_protomer(
+            roster, {}, OLIGOMER_MONOMER, "A", {"g_protein": {}}, [], coupling_chain="Z"
+        )
+        assert result["chain_id"] == "A"
+        assert result["rank_used"] == 1
+
+    def test_homomer_with_coupling_chain(self) -> None:
+        # Both rank-0 paths active: the coupling block picks the chain, then the
+        # homomer relabel prefixes the reason. rank stays 0; reason carries both.
+        roster = {
+            "A": {"slug": "grm2_human", "length": 800, "asym_id": "A"},
+            "B": {"slug": "grm2_human", "length": 800, "asym_id": "B"},
+        }
+        result = _suggest_primary_protomer(
+            roster, {}, OLIGOMER_HOMOMER, "A", {"g_protein": {}}, [], coupling_chain="B"
+        )
+        assert result["chain_id"] == "B"
+        assert result["rank_used"] == 0
+        assert "Homomer" in result["reason"] and "coupling" in result["reason"].lower()
+
+
+def test_map_uniprot_to_entity_skips_incomplete_region():
+    """An alignment region missing a coordinate field is skipped, not a KeyError
+    that would fail the whole PDB's oligomer analysis."""
+    regions = [{"ref_beg_seq_id": 1, "entity_beg_seq_id": 1}]  # no 'length'
+    assert map_uniprot_to_entity(1, 10, regions) == []
 
 
 # ===================================================================

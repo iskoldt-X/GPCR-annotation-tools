@@ -635,14 +635,19 @@ def _suggest_primary_protomer(
     ai_chain: str | None,
     signaling_partners: dict[str, Any],
     ligands: list[dict[str, Any]],
+    coupling_chain: str | None = None,
 ) -> dict[str, Any]:
-    """Suggest a primary protomer chain using the 5-rank framework.
+    """Suggest a primary protomer chain using the rank framework.
 
-    Rank 0: Homomer context (identical chains, prefer better 7TM).
+    Rank 0: Geometric G-protein coupling protomer (the detect stage measured which
+        protomer the G-alpha engages -- an objective fact that beats the AI guess).
     Rank 1: G-protein bound (AI's chain if in roster and G-protein present).
     Rank 2: Exclusive ligand-binding chain.
     Rank 3: Best 7TM completeness.
     Rank 4: Longest sequence OR valid AI choice.
+
+    A homomer keeps its selected chain but is relabelled rank 0 with a "Homomer"
+    context prefix (the protomers are identical, so the choice is informational).
     """
     if not gpcr_roster:
         return {"chain_id": None, "reason": "No GPCR chains found", "rank_used": None}
@@ -650,6 +655,16 @@ def _suggest_primary_protomer(
     primary: str | None = None
     reason = ""
     rank: int | None = None
+
+    # Rank 0: geometric G-protein coupling. Only one protomer of an obligate dimer
+    # couples the G protein, and in a heterodimer it is often NOT the agonist-binding
+    # one (GABA-B: GABBR1 binds, GABBR2 couples). The detect stage reads the coupling
+    # protomer from the G-alpha interface in the coordinates; that measured fact wins
+    # over the AI's chain choice. (Computed upstream, no GPCRdb per-structure data.)
+    if coupling_chain and coupling_chain in gpcr_roster:
+        primary = coupling_chain
+        reason = f"Rank 0: G-protein coupling protomer (structure geometry) on Chain {primary}"
+        rank = 0
 
     # Rank 1: G-protein bound
     has_gprotein = False
@@ -661,7 +676,7 @@ def _suggest_primary_protomer(
             if any(tag in sp_str for tag in ("gnai", "gnas", "gnaq", "gnao")):
                 has_gprotein = True
 
-    if has_gprotein and ai_chain and ai_chain in gpcr_roster:
+    if not primary and has_gprotein and ai_chain and ai_chain in gpcr_roster:
         primary = ai_chain
         reason = f"Rank 1: G-protein bound — AI-determined active complex on Chain {primary}"
         rank = 1
@@ -715,7 +730,9 @@ def _suggest_primary_protomer(
             reason = f"Rank 4: Longest sequence ({len_str})"
             rank = 4
 
-    # Prepend classification context for Rank 0 (homomer)
+    # A homomer's primary is informational (the protomers are identical), so relabel
+    # it rank 0 with a "Homomer" context prefix regardless of which rank actually
+    # selected the chain. (A coupling-driven rank-0 keeps its reason, now prefixed.)
     if classification == OLIGOMER_HOMOMER:
         reason = f"Homomer ({len(gpcr_roster)} identical GPCR chains) — {reason}"
         rank = 0
@@ -900,12 +917,16 @@ def analyze_oligomer(
     pdb_id: str,
     best_run_data: dict[str, Any],
     enriched_entry: dict[str, Any],
+    coupling_chain: str | None = None,
 ) -> None:
     """Run oligomer analysis on *best_run_data* against *enriched_entry*.
 
     Writes ``best_run_data["oligomer_analysis"]`` in-place.
     May correct ``receptor_info.chain_id`` and ``uniprot_entry_name``
     when AI is objectively wrong (HALLUCINATION or 7TM_UPGRADE).
+
+    *coupling_chain* is the detect stage's geometric G-protein-coupling protomer (or
+    ``None``); when set it is the highest-priority primary-protomer choice.
     """
     # 1. Build GPCR roster
     gpcr_roster = _build_gpcr_roster(enriched_entry)
@@ -976,6 +997,7 @@ def analyze_oligomer(
         ai_chain,
         signaling_partners,
         ligands_data,
+        coupling_chain=coupling_chain,
     )
 
     # 6. Alerts — use the validated roster so non-7TM partners don't trigger a

@@ -57,6 +57,8 @@ from gpcr_tools.config import (
     LOW_CONFIDENCE_LEVELS,
     get_config,
 )
+from gpcr_tools.detector.signals import SIGNAL_COUPLING_PROTOMER
+from gpcr_tools.detector.stage import load_detect_signals
 from gpcr_tools.validator.cache import SequenceCache, ValidationCache
 from gpcr_tools.validator.chimera import get_chimera_analysis
 from gpcr_tools.validator.integrity_checker import validate_all
@@ -69,6 +71,20 @@ from gpcr_tools.validator.oligomer import (
 from gpcr_tools.validator.receptor_validator import validate_receptor_identity
 
 logger = logging.getLogger(__name__)
+
+
+def _coupling_protomer(pdb_id: str) -> str | None:
+    """The geometric G-protein-coupling protomer chain from the detect sidecar, if any.
+
+    Returns ``None`` when the detect stage did not run, found no G protein, or could
+    not resolve a single protomer -- in which case primary selection falls back to the
+    lower ranks.
+    """
+    for signal in load_detect_signals(pdb_id):
+        if signal.kind == SIGNAL_COUPLING_PROTOMER:
+            chain = signal.payload.get("coupling_chain")
+            return chain if isinstance(chain, str) else None
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -434,8 +450,12 @@ def aggregate_pdb(
         receptor_warnings = validate_receptor_identity(pdb_id, best_run_data, enriched)
         all_warnings.extend(receptor_warnings)
 
-        # 8. Oligomer analysis (mutates best_run_data — may override chain_id)
-        analyze_oligomer(pdb_id, best_run_data, enriched)
+        # 8. Oligomer analysis (mutates best_run_data — may override chain_id). The
+        # detect stage's geometric coupling-protomer signal, when present, selects the
+        # primary protomer (the G-protein coupler) over the AI's chain guess.
+        analyze_oligomer(
+            pdb_id, best_run_data, enriched, coupling_chain=_coupling_protomer(pdb_id)
+        )
 
         # 9. Compute discrepancies
         discrepancies = find_discrepancies(best_run_data, majority_votes, all_votes)
