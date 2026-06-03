@@ -22,12 +22,12 @@ from pathlib import Path
 from typing import Any
 
 from gpcr_tools.config import (
-    DISPUTED_MOLECULES,
     EXTRACELLULAR_DOMAIN_SEGMENT,
     GEOMETRY_BURIAL_MIN,
     GPCR_CLASS_C,
     GPCR_CLASS_T2,
     GPCR_CLASSES_LARGE_ECD,
+    INCIDENTAL_CANDIDATES,
     INTRACELLULAR_SEGMENTS,
     LIGAND_EXCLUDE_LIST,
     LOCUS_LIGANDS,
@@ -143,10 +143,10 @@ def _gpcr_chain_accessions(enriched_entry: dict[str, Any]) -> dict[str, str]:
 
 def _annotated_ligands(enriched_entry: dict[str, Any]) -> set[str]:
     """Component ids the model annotates: present non-polymers minus the stripped
-    buffers (disputed molecules are un-stripped, so kept). Broad on purpose -- a
+    buffers (incidental-candidate molecules are un-stripped, so kept). Broad on purpose -- a
     site label helps every real ligand, not only the studied one."""
     present = set(build_nonpolymer_instance_index(enriched_entry).keys())
-    return present - (LIGAND_EXCLUDE_LIST - DISPUTED_MOLECULES)
+    return present - (LIGAND_EXCLUDE_LIST - INCIDENTAL_CANDIDATES)
 
 
 def _classify_copy(

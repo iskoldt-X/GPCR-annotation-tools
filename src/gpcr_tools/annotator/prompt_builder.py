@@ -5,7 +5,7 @@ from collections import defaultdict
 from typing import Any
 
 from gpcr_tools.annotator.detect_orchestrator import assemble_detect_block
-from gpcr_tools.config import DISPUTED_MOLECULES, LIGAND_EXCLUDE_LIST
+from gpcr_tools.config import INCIDENTAL_CANDIDATES, LIGAND_EXCLUDE_LIST
 from gpcr_tools.detector.signals import DetectSignal
 
 
@@ -128,10 +128,10 @@ def enhanced_simplify_pdb_json(enriched_data: dict) -> dict:
         if not chem_comp_id:
             continue
 
-        # Exclude common buffers and ions -- but never strip a disputed molecule
+        # Exclude common buffers and ions -- but never strip an incidental-candidate molecule
         # (e.g. palmitate): the model must see it to judge its role (accommodate
         # and guide, rather than conceal).
-        if chem_comp_id in LIGAND_EXCLUDE_LIST and chem_comp_id not in DISPUTED_MOLECULES:
+        if chem_comp_id in LIGAND_EXCLUDE_LIST and chem_comp_id not in INCIDENTAL_CANDIDATES:
             continue
 
         name = chem_comp.get("name") or chem_comp_id

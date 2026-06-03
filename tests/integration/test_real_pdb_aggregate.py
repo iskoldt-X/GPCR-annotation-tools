@@ -157,7 +157,7 @@ class TestRealPdbAggregate:
 
         assert "critical_warnings" in report
         assert "algo_conflicts" in report
-        assert "algo_notes" in report
+        assert "detector_notes" in report
         assert "chimera_score" in report
         assert "chimera_status" in report
         assert "timestamp" in report

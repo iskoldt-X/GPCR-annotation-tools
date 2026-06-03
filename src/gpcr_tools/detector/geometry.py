@@ -25,11 +25,11 @@ from pathlib import Path
 from typing import Any
 
 from gpcr_tools.config import (
-    DISPUTED_MOLECULES,
     GEOMETRY_BURIAL_MIN,
     GEOMETRY_DUAL_ROLE_MAX_COPIES,
     GEOMETRY_DUAL_ROLE_POCKET_JACCARD_MAX,
     GEOMETRY_MIN_POCKET_RESIDUES,
+    INCIDENTAL_CANDIDATES,
     LIGAND_EXCLUDE_LIST,
     LOCUS_LIGANDS,
 )
@@ -73,7 +73,7 @@ def _gpcr_auth_chains(enriched_entry: dict[str, Any]) -> set[str]:
 def _candidate_comp_ids(enriched_entry: dict[str, Any]) -> set[str]:
     """Non-polymer component ids worth checking for a dual-role pocket (None-safe).
 
-    Every present non-polymer minus the stripped buffers (disputed molecules are
+    Every present non-polymer minus the stripped buffers (incidental-candidate molecules are
     kept). Identity is NOT filtered by RCSB's subject-of-investigation flag --
     that flag is unreliable (it misses many real ligands), so the geometry gates
     (deep burial + a small copy count + distinct pockets) do the discrimination
@@ -89,7 +89,7 @@ def _candidate_comp_ids(enriched_entry: dict[str, Any]) -> set[str]:
         )
         if comp_id:
             comp_ids.add(comp_id)
-    return comp_ids - (LIGAND_EXCLUDE_LIST - DISPUTED_MOLECULES)
+    return comp_ids - (LIGAND_EXCLUDE_LIST - INCIDENTAL_CANDIDATES)
 
 
 def _cluster_pockets(

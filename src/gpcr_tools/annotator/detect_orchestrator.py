@@ -2,8 +2,8 @@
 
 ADVISORY detect signals become evidence in the prompt (the model weighs them
 against the paper); REVIEW signals are not handled here -- they route silently to
-human review. A disputed-molecule advisory additionally augments the tool schema
-with an optional ``disputed_assessment`` field, and a dual-role advisory with an
+human review. An incidental-candidate advisory additionally augments the tool schema
+with an optional ``pharmacological_role_check`` field, and a dual-role advisory with an
 optional ``site_ref`` field. No I/O, no AI calls.
 
 When there are no advisory signals the prompt block is ``None`` and the tool /
@@ -21,14 +21,14 @@ from google.genai import types
 
 from gpcr_tools.annotator.schema import (
     ANNOTATION_TOOL,
-    DISPUTED_ASSESSMENT_SCHEMA,
+    PHARMACOLOGICAL_ROLE_CHECK_SCHEMA,
     TOOL_CONFIG,
 )
 from gpcr_tools.detector.signals import (
     SEVERITY_ADVISORY,
     SIGNAL_CHIMERIC_GPROTEIN,
-    SIGNAL_DISPUTED_LIGAND,
     SIGNAL_DUAL_ROLE_LIGAND,
+    SIGNAL_INCIDENTAL_CANDIDATE,
     SIGNAL_SITE_REF,
     DetectSignal,
 )
@@ -57,12 +57,12 @@ def _format_signal(signal: DetectSignal) -> str:
             f"{family} family (subtype {subtype}, score {score}). Weigh this against the "
             f"paper before assigning the G-alpha identity."
         )
-    if signal.kind == SIGNAL_DISPUTED_LIGAND:
+    if signal.kind == SIGNAL_INCIDENTAL_CANDIDATE:
         comp = payload.get("comp_id") or "?"
         return (
             f"{comp} is present and is a disputed molecule (a functional ligand in some "
             f"structures, an incidental structural lipid in others). Assess its role from "
-            f"the paper and record a disputed_assessment for it."
+            f"the paper and record a pharmacological_role_check for it."
         )
     if signal.kind == SIGNAL_DUAL_ROLE_LIGAND:
         return _format_dual_role(payload)
@@ -140,18 +140,18 @@ def assemble_detect_block(signals: list[DetectSignal]) -> str | None:
 
 
 def build_tool_for_signals(base_tool: types.Tool, signals: list[DetectSignal]) -> types.Tool:
-    """Return *base_tool* augmented for a disputed-molecule advisory, else itself.
+    """Return *base_tool* augmented for an incidental-candidate advisory, else itself.
 
-    A disputed advisory adds the optional ``disputed_assessment`` field to each
+    An incidental-candidate advisory adds the optional ``pharmacological_role_check`` field to each
     ligand item. (``site_ref`` is a permanent base-schema field for every ligand,
     so it is not injected here; the dual-role advisory only adds prompt evidence.)
-    With no disputed signal the base tool is returned by identity, guaranteeing
+    With no incidental-candidate signal the base tool is returned by identity, guaranteeing
     zero schema perturbation. The base tool is never mutated (deep copy first).
     """
-    has_disputed = any(
-        s.kind == SIGNAL_DISPUTED_LIGAND and s.severity == SEVERITY_ADVISORY for s in signals
+    has_incidental = any(
+        s.kind == SIGNAL_INCIDENTAL_CANDIDATE and s.severity == SEVERITY_ADVISORY for s in signals
     )
-    if not has_disputed:
+    if not has_incidental:
         return base_tool
     declarations = base_tool.function_declarations or []
     if not declarations:
@@ -173,7 +173,7 @@ def build_tool_for_signals(base_tool: types.Tool, signals: list[DetectSignal]) -
             "Tool.model_copy(deep=True) did not deep-copy nested Schema properties; "
             "refusing to mutate the shared base tool (check the google-genai version)."
         )
-    items.properties["disputed_assessment"] = DISPUTED_ASSESSMENT_SCHEMA
+    items.properties["pharmacological_role_check"] = PHARMACOLOGICAL_ROLE_CHECK_SCHEMA
     return tool
 
 

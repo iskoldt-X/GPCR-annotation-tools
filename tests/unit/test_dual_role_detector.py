@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from gpcr_tools.config import DISPUTED_MOLECULES, LIGAND_EXCLUDE_LIST
+from gpcr_tools.config import INCIDENTAL_CANDIDATES, LIGAND_EXCLUDE_LIST
 from gpcr_tools.detector import geometry as detector_geometry
 from gpcr_tools.detector.geometry import (
     _candidate_comp_ids,
@@ -77,14 +77,14 @@ class TestEnrichedParsing:
     def test_non_gpcr_slug_yields_no_chains(self) -> None:
         assert _gpcr_auth_chains(_entry(gpcr_slug="gnas2_human")) == set()
 
-    def test_candidate_comp_ids_keeps_real_and_disputed(self) -> None:
-        # Use a disputed molecule that is ALSO on the exclude list (PLM), so the
-        # "- DISPUTED_MOLECULES" override is genuinely exercised (it must survive).
-        disputed = sorted(DISPUTED_MOLECULES & LIGAND_EXCLUDE_LIST)[0]
-        assert _candidate_comp_ids(_entry(("A1AEI", disputed))) == {"A1AEI", disputed}
+    def test_candidate_comp_ids_keeps_real_and_incidental_candidate(self) -> None:
+        # Use an incidental_candidate molecule that is ALSO on the exclude list (PLM), so the
+        # "- INCIDENTAL_CANDIDATES" override is genuinely exercised (it must survive).
+        incidental_candidate = sorted(INCIDENTAL_CANDIDATES & LIGAND_EXCLUDE_LIST)[0]
+        assert _candidate_comp_ids(_entry(("A1AEI", incidental_candidate))) == {"A1AEI", incidental_candidate}
 
     def test_candidate_comp_ids_drops_buffers(self) -> None:
-        buffer = sorted(LIGAND_EXCLUDE_LIST - DISPUTED_MOLECULES)[0]
+        buffer = sorted(LIGAND_EXCLUDE_LIST - INCIDENTAL_CANDIDATES)[0]
         assert _candidate_comp_ids(_entry(("A1AEI", buffer))) == {"A1AEI"}
 
 

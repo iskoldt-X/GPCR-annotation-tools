@@ -397,9 +397,9 @@ ANNOTATION_TOOL = types.Tool(
 )
 
 # Optional per-ligand field injected by detect_orchestrator.build_tool_for_signals
-# ONLY when a disputed-molecule signal is present (e.g. cholesterol, palmitate).
+# ONLY when an incidental-candidate signal is present (e.g. cholesterol, palmitate).
 # It is never part of the base tool, so an ordinary structure's schema is unchanged.
-DISPUTED_ASSESSMENT_SCHEMA = types.Schema(
+PHARMACOLOGICAL_ROLE_CHECK_SCHEMA = types.Schema(
     type=types.Type.OBJECT,
     description=(
         "Only for a disputed molecule flagged by the detector (e.g. cholesterol, "
