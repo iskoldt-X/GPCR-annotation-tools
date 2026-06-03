@@ -206,6 +206,18 @@ ANNOTATION_TOOL = types.Tool(
                                         "description": "List of synonyms from the PDB metadata. Can be an empty list.",
                                         "items": {"type": "string"},
                                     },
+                                    "site_ref": {
+                                        "type": "string",
+                                        "description": "The binding site of this ligand on the receptor. A value computed from the structure geometry is supplied to you as detector evidence — use it unless the paper clearly places the ligand elsewhere; use 'unknown' if unclear. If one ligand is modelled at more than one distinct site, emit a separate entry per site, each with its own site_ref.",
+                                        "enum": [
+                                            "orthosteric",
+                                            "allosteric_7tm",
+                                            "extracellular_vestibule",
+                                            "intracellular",
+                                            "extracellular_domain",
+                                            "unknown",
+                                        ],
+                                    },
                                 },
                                 "required": [
                                     "name",
@@ -215,6 +227,7 @@ ANNOTATION_TOOL = types.Tool(
                                     "type",
                                     "pubchem_id",
                                     "synonyms",
+                                    "site_ref",
                                 ],
                             },
                         },
@@ -404,20 +417,6 @@ DISPUTED_ASSESSMENT_SCHEMA = types.Schema(
             description="A direct paper quote or brief reasoning supporting the judgment.",
         ),
     },
-)
-
-# Optional per-ligand field injected by detect_orchestrator.build_tool_for_signals
-# ONLY when a dual-role signal is present (the same ligand modelled in two distinct
-# functional pockets on one receptor chain). It lets the model record one entry per
-# site instead of merging the copies into a single role. Never part of the base tool.
-SITE_REF_SCHEMA = types.Schema(
-    type=types.Type.STRING,
-    description=(
-        "Only for a ligand the detector flags as occupying more than one distinct "
-        "functional pocket: a short label for the binding site this entry refers to "
-        "(e.g. 'orthosteric', 'allosteric'). Provide one ligand entry per site, each "
-        "with its own site_ref and role, so the two sites are not merged."
-    ),
 )
 
 TOOL_CONFIG = types.GenerateContentConfig(

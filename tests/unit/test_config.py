@@ -4,7 +4,28 @@ from pathlib import Path
 
 import pytest
 
-from gpcr_tools.config import WorkspaceConfig, get_config, reset_config
+from gpcr_tools.config import WorkspaceConfig, get_config, list_item_identity, reset_config
+
+
+class TestListItemIdentity:
+    """site_ref keeps two same-component ligand entries distinct in voting."""
+
+    def test_plain_component_key(self) -> None:
+        assert list_item_identity({"chem_comp_id": "CLR"}, "chem_comp_id", 0) == "CLR"
+
+    def test_distinct_sites_do_not_collapse(self) -> None:
+        a = list_item_identity({"chem_comp_id": "A1AEI", "site_ref": "orthosteric"}, "chem_comp_id", 0)
+        b = list_item_identity(
+            {"chem_comp_id": "A1AEI", "site_ref": "extracellular_vestibule"}, "chem_comp_id", 1
+        )
+        assert a != b
+
+    def test_unknown_site_ref_ignored(self) -> None:
+        # An 'unknown' (or absent) site_ref must not change the identity.
+        assert (
+            list_item_identity({"chem_comp_id": "CLR", "site_ref": "unknown"}, "chem_comp_id", 0)
+            == "CLR"
+        )
 
 
 @pytest.fixture(autouse=True)

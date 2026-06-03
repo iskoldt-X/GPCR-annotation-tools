@@ -176,3 +176,77 @@ def fetch_polymer_features(pdb_id: str) -> dict[str, Any] | None:
     except (requests.RequestException, OSError, ValueError) as exc:
         logger.warning("[%s] GraphQL fetch error: %s", pdb_id, exc)
         return None
+
+
+GRAPHQL_POLYMER_ALIGNMENT_QUERY: str = """\
+query structure($id: String!) {
+  entry(entry_id: $id) {
+    polymer_entities {
+      rcsb_polymer_entity_align {
+        reference_database_name
+        reference_database_accession
+        aligned_regions { entity_beg_seq_id ref_beg_seq_id length }
+      }
+      polymer_entity_instances {
+        rcsb_polymer_entity_instance_container_identifiers { auth_asym_id }
+      }
+    }
+  }
+}
+"""
+
+
+def fetch_polymer_alignment(
+    pdb_id: str,
+) -> dict[str, dict[str, list[tuple[int, int, int]]]] | None:
+    """Fetch the RCSB SIFTS-derived entity->UniProt alignment, keyed by author chain.
+
+    Returns ``{auth_chain: {uniprot_accession: [(entity_beg, ref_beg, length), ...]}}``
+    -- multi-region per accession, so a fusion chain maps each segment to its own
+    reference. ``None`` on network / parse failure.
+    """
+    payload = {"query": GRAPHQL_POLYMER_ALIGNMENT_QUERY, "variables": {"id": pdb_id.upper()}}
+    try:
+        resp = requests.post(
+            RCSB_GRAPHQL_URL, json=payload, timeout=TIMEOUT_RCSB_GRAPHQL_VALIDATION
+        )
+        if resp.status_code != 200:
+            logger.warning("[%s] alignment GraphQL status %d", pdb_id, resp.status_code)
+            return None
+        data = resp.json()
+        if data.get("errors"):
+            logger.warning("[%s] alignment GraphQL errors: %s", pdb_id, data["errors"])
+            return None
+    except (requests.RequestException, OSError, ValueError) as exc:
+        logger.warning("[%s] alignment GraphQL fetch error: %s", pdb_id, exc)
+        return None
+
+    entry = (data.get("data") or {}).get("entry") or {}
+    chains: dict[str, dict[str, list[tuple[int, int, int]]]] = {}
+    for entity in entry.get("polymer_entities") or []:
+        if not isinstance(entity, dict):
+            continue
+        regions: dict[str, list[tuple[int, int, int]]] = {}
+        for align in entity.get("rcsb_polymer_entity_align") or []:
+            if not isinstance(align, dict) or align.get("reference_database_name") != "UniProt":
+                continue
+            acc = align.get("reference_database_accession")
+            if not acc:
+                continue
+            for region in align.get("aligned_regions") or []:
+                beg = region.get("entity_beg_seq_id")
+                ref = region.get("ref_beg_seq_id")
+                length = region.get("length")
+                if beg is not None and ref is not None and length is not None:
+                    regions.setdefault(acc, []).append((int(beg), int(ref), int(length)))
+        if not regions:
+            continue
+        for inst in entity.get("polymer_entity_instances") or []:
+            if not isinstance(inst, dict):
+                continue
+            auth = (inst.get("rcsb_polymer_entity_instance_container_identifiers") or {}).get(
+                "auth_asym_id"
+            )
+            if auth:
+                chains[auth] = regions
+    return chains

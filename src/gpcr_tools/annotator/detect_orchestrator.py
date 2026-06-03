@@ -22,7 +22,6 @@ from google.genai import types
 from gpcr_tools.annotator.schema import (
     ANNOTATION_TOOL,
     DISPUTED_ASSESSMENT_SCHEMA,
-    SITE_REF_SCHEMA,
     TOOL_CONFIG,
 )
 from gpcr_tools.detector.signals import (
@@ -30,6 +29,7 @@ from gpcr_tools.detector.signals import (
     SIGNAL_CHIMERIC_GPROTEIN,
     SIGNAL_DISPUTED_LIGAND,
     SIGNAL_DUAL_ROLE_LIGAND,
+    SIGNAL_SITE_REF,
     DetectSignal,
 )
 
@@ -66,12 +66,31 @@ def _format_signal(signal: DetectSignal) -> str:
         )
     if signal.kind == SIGNAL_DUAL_ROLE_LIGAND:
         return _format_dual_role(payload)
+    if signal.kind == SIGNAL_SITE_REF:
+        comp = payload.get("comp_id") or "?"
+        sites = payload.get("sites") or []
+        if len(sites) == 1:
+            return (
+                f"{comp}: structure geometry places it at the {sites[0]} site — record "
+                f"site_ref='{sites[0]}' unless the paper clearly says otherwise."
+            )
+        return (
+            f"{comp}: structure geometry shows it at {len(sites)} distinct sites "
+            f"({', '.join(sites)}) — emit one ligand entry per site, each with its site_ref."
+        )
     # Unknown advisory kind: fall back to the signal's own one-line summary.
     return signal.summary or signal.kind
 
 
 def _format_dual_role(payload: dict[str, Any]) -> str:
-    """Render the dual-role signal: a guidance line plus one line per buried copy."""
+    """Render the dual-role signal as burial evidence, one line per buried copy.
+
+    This provides geometric evidence that the ligand sits in more than one pocket
+    (so it may play more than one role); it deliberately does NOT command a split
+    into one entry per site -- the site_ref signal owns that instruction, since it
+    names each site. Both detectors gate on subject-of-investigation, so a
+    dual-role ligand always also carries the site_ref split nudge.
+    """
     comp = payload.get("comp_id") or "?"
     chain = payload.get("gpcr_chain") or "?"
     copies = payload.get("copies") or []
@@ -93,9 +112,9 @@ def _format_dual_role(payload: dict[str, Any]) -> str:
         )
     body = "\n".join(copy_lines)
     return (
-        f"{comp} is modelled in {len(copies)} distinct buried pockets on receptor chain "
-        f"{chain} (geometry below), so it may play more than one role. Emit a SEPARATE "
-        f"ligand entry per pocket, each with its own site_ref and role:\n{body}"
+        f"{comp} is buried in {len(copies)} distinct receptor pockets on chain {chain} "
+        f"(geometry below), so weigh whether it plays more than one role; the computed "
+        f"site_ref names each site:\n{body}"
     )
 
 
@@ -120,20 +139,18 @@ def assemble_detect_block(signals: list[DetectSignal]) -> str | None:
 
 
 def build_tool_for_signals(base_tool: types.Tool, signals: list[DetectSignal]) -> types.Tool:
-    """Return *base_tool* augmented for ligand advisories, else *base_tool* itself.
+    """Return *base_tool* augmented for a disputed-molecule advisory, else itself.
 
-    A disputed advisory adds the optional ``disputed_assessment`` field, and a
-    dual-role advisory adds the optional ``site_ref`` field, to each ligand item.
-    With neither signal the base tool is returned by identity, guaranteeing zero
-    schema perturbation. The base tool is never mutated (deep copy before change).
+    A disputed advisory adds the optional ``disputed_assessment`` field to each
+    ligand item. (``site_ref`` is a permanent base-schema field for every ligand,
+    so it is not injected here; the dual-role advisory only adds prompt evidence.)
+    With no disputed signal the base tool is returned by identity, guaranteeing
+    zero schema perturbation. The base tool is never mutated (deep copy first).
     """
     has_disputed = any(
         s.kind == SIGNAL_DISPUTED_LIGAND and s.severity == SEVERITY_ADVISORY for s in signals
     )
-    has_dual_role = any(
-        s.kind == SIGNAL_DUAL_ROLE_LIGAND and s.severity == SEVERITY_ADVISORY for s in signals
-    )
-    if not (has_disputed or has_dual_role):
+    if not has_disputed:
         return base_tool
     declarations = base_tool.function_declarations or []
     if not declarations:
@@ -155,10 +172,7 @@ def build_tool_for_signals(base_tool: types.Tool, signals: list[DetectSignal]) -
             "Tool.model_copy(deep=True) did not deep-copy nested Schema properties; "
             "refusing to mutate the shared base tool (check the google-genai version)."
         )
-    if has_disputed:
-        items.properties["disputed_assessment"] = DISPUTED_ASSESSMENT_SCHEMA
-    if has_dual_role:
-        items.properties["site_ref"] = SITE_REF_SCHEMA
+    items.properties["disputed_assessment"] = DISPUTED_ASSESSMENT_SCHEMA
     return tool
 
 

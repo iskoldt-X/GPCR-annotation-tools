@@ -19,6 +19,7 @@ from gpcr_tools.detector.geometry import detect_dual_role_ligands
 from gpcr_tools.detector.gprotein import detect_g_protein_identity
 from gpcr_tools.detector.ligands import detect_disputed_ligands, detect_excluded_real_ligands
 from gpcr_tools.detector.signals import DetectSignal
+from gpcr_tools.detector.site_ref import detect_site_refs
 from gpcr_tools.validator.cache import SequenceCache
 
 logger = logging.getLogger(__name__)
@@ -86,6 +87,7 @@ def run_detect(
             cache = SequenceCache(cfg.cache_dir / _SEQUENCE_CACHE_NAME)
         signals.extend(detect_g_protein_identity(pdb_id, entry, cache))
         signals.extend(detect_dual_role_ligands(pdb_id, entry, cfg.cache_dir))
+        signals.extend(detect_site_refs(pdb_id, entry, cfg.cache_dir))
         if owns_cache:
             cache.save()
     # Future detectors (entity reconciliation, ...) append here.
