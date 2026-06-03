@@ -154,7 +154,7 @@ def fetch_polymer_features(pdb_id: str) -> dict[str, Any] | None:
 
     Returns the ``entry`` dict, or ``None`` on error.
 
-    Blood Lesson 1 — None-safety:
+    None-safety:
         Uses ``(data.get("data") or {}).get("entry")`` to handle
         ``{"data": null}`` responses.
     """
@@ -171,7 +171,7 @@ def fetch_polymer_features(pdb_id: str) -> dict[str, Any] | None:
         if data.get("errors"):
             logger.warning("[%s] GraphQL returned errors: %s", pdb_id, data["errors"])
             return None
-        # Blood Lesson 1: (data.get("data") or {}).get("entry")
+        # None-safe: (data.get("data") or {}).get("entry")
         return (data.get("data") or {}).get("entry")
     except (requests.RequestException, OSError, ValueError) as exc:
         logger.warning("[%s] GraphQL fetch error: %s", pdb_id, exc)

@@ -42,8 +42,8 @@ def _first_list_entry(container: Any, key: str) -> dict[str, Any]:
 def extract_ai_g_protein(data: dict[str, Any]) -> str | None:
     """Safely extract the G-protein alpha-subunit UniProt entry name.
 
-    Uses the None-safe ``(x.get(k) or {})`` chain at every level
-    (Blood Lesson 1).
+    Uses the None-safe ``(x.get(k) or {})`` chain at every level so a missing
+    or null intermediate node never raises.
     """
     signaling: dict[str, Any] = data.get("signaling_partners") or {}
     g_protein: dict[str, Any] = signaling.get("g_protein") or {}
@@ -74,7 +74,7 @@ def get_majority_votes(
     Returns ``(majority_data, all_votes_data)`` where *all_votes_data*
     preserves the per-value vote counts for downstream discrepancy reporting.
 
-    Blood Lesson 5 — Truthiness:
+    Truthiness:
         When checking if a majority item should be appended we use
         ``if maj_item is not None`` — an empty dict ``{}`` is a valid vote.
     """
@@ -114,7 +114,7 @@ def get_majority_votes(
                 items = grouped_items[group_key]
                 group_path = f"{path}[{group_key}]"
                 maj_item, counts_item = get_majority_votes(items, group_path)
-                # Blood Lesson 5: empty dict {} is valid
+                # Use `is not None` — an empty dict {} is a valid vote
                 if maj_item is not None:
                     majority_list.append(maj_item)
                     counts_list.append(counts_item)

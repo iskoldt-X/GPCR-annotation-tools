@@ -1,8 +1,7 @@
 """Load enriched PDB metadata from the workspace.
 
 Returns the ``data.entry`` dict from the RCSB enriched JSON, using
-explicit ``isinstance`` checks rather than chained ``.get()`` calls
-(Blood Lesson 1, Review 8 improvement).
+explicit ``isinstance`` checks rather than chained ``.get()`` calls.
 """
 
 from __future__ import annotations
@@ -22,7 +21,7 @@ def load_enriched_data(pdb_id: str) -> dict[str, Any] | None:
     Returns ``None`` when the file is missing, unreadable, or the JSON
     structure is unexpected.
 
-    Blood Lesson 5 — Truthiness:
+    Truthiness:
         Callers MUST check ``if enriched is None:`` — NOT ``if not enriched:``.
         An empty dict ``{}`` is valid enriched data.
     """

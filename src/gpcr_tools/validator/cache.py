@@ -1,7 +1,7 @@
 """Persistent cache layer for API validation results.
 
 Both :class:`ValidationCache` and :class:`SequenceCache` use **atomic writes**
-(tempfile + ``os.replace``) — Blood Lesson 2.
+(tempfile + ``os.replace``).
 
 Caches are saved once per PDB (batch), not after every API hit.
 """
@@ -27,7 +27,7 @@ class ValidationCache:
 
     Keys follow the pattern ``"uniprot:{name}"`` or ``"pubchem:{cid}"``.
     Values are ``bool`` — ``set(key, None)`` is disallowed so that
-    ``get()`` returning ``None`` unambiguously means cache miss (Review 5).
+    ``get()`` returning ``None`` unambiguously means cache miss.
     """
 
     def __init__(self, path: Path) -> None:
@@ -58,7 +58,7 @@ class ValidationCache:
         self._data[key] = value
 
     def save(self) -> None:
-        """Persist cache to disk using atomic write (Blood Lesson 2)."""
+        """Persist cache to disk using atomic write."""
         _atomic_json_write(self._path, self._data)
 
 
@@ -125,8 +125,7 @@ def _atomic_json_write(path: Path, data: Any) -> None:
     """Write *data* as JSON to *path* atomically.
 
     Uses ``tempfile.NamedTemporaryFile`` in the same directory + ``os.replace``.
-    The ``finally`` block guarantees cleanup of the temp file on failure
-    (Blood Lesson 2, Trap B).
+    The ``finally`` block guarantees cleanup of the temp file on failure.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path: str | None = None
