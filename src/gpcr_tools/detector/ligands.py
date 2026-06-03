@@ -17,6 +17,7 @@ from gpcr_tools.config import (
     DISPUTED_MOLECULES,
     EXCLUDED_REAL_LIGAND_INTEREST,
     LIGAND_EXCLUDE_LIST,
+    LOCUS_LIGANDS,
 )
 from gpcr_tools.detector.signals import (
     SEVERITY_ADVISORY,
@@ -25,8 +26,6 @@ from gpcr_tools.detector.signals import (
     SIGNAL_EXCLUDED_REAL_LIGAND,
     DetectSignal,
 )
-
-LIGANDS_LOCUS = "ligands"
 
 
 def _nonpolymer_comp_ids(enriched_entry: dict[str, Any]) -> list[str]:
@@ -67,7 +66,7 @@ def detect_excluded_real_ligands(
     return [
         DetectSignal(
             kind=SIGNAL_EXCLUDED_REAL_LIGAND,
-            target_ref=LIGANDS_LOCUS,
+            target_ref=LOCUS_LIGANDS,
             summary=(
                 f"{code} is present in the structure but on the buffer exclude "
                 f"list, so it is stripped before the model sees it; confirm "
@@ -96,7 +95,7 @@ def detect_disputed_ligands(
     return [
         DetectSignal(
             kind=SIGNAL_DISPUTED_LIGAND,
-            target_ref=LIGANDS_LOCUS,
+            target_ref=LOCUS_LIGANDS,
             summary=(
                 f"{code} is present and is a disputed molecule: it can be a "
                 f"functional ligand or an incidental structural lipid. Judge its "

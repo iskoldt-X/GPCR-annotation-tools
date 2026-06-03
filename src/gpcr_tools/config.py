@@ -25,6 +25,7 @@ from typing import Any
 
 RCSB_GRAPHQL_URL: str = "https://data.rcsb.org/graphql"
 RCSB_SEARCH_URL: str = "https://search.rcsb.org/rcsbsearch/v2/query"
+RCSB_STRUCTURE_DOWNLOAD_URL: str = "https://files.rcsb.org/download"
 
 UNIPROT_REST_URL: str = "https://rest.uniprot.org/uniprotkb"
 
@@ -74,6 +75,7 @@ TIMEOUT_UNPAYWALL: int = 15
 TIMEOUT_NCBI_PMC_OA: int = 20
 TIMEOUT_PDF_DOWNLOAD: int = 60
 TIMEOUT_BATCH_RESULT_DOWNLOAD: int = 60
+TIMEOUT_RCSB_STRUCTURE: int = 60  # coordinate files are larger than metadata responses
 
 # ---------------------------------------------------------------------------
 # Rate-limit sleep durations (seconds)
@@ -473,6 +475,48 @@ CHIMERA_A5_ANCHOR_MIN_SCORE: int = 8
 # Cached UniProt reference sequences expire after this many days, so a reference
 # that drifts upstream is eventually refetched instead of persisting forever.
 SEQUENCE_CACHE_TTL_DAYS: int = 30
+
+# Detect-stage locus anchors (a signal's target_ref). Shared so detectors that
+# anchor to the same top-level annotation block use one string, and the curate
+# validation bucketing routes them consistently.
+LOCUS_LIGANDS: str = "ligands"
+
+# ---------------------------------------------------------------------------
+# Structure geometry (gemmi-based detect-stage analysis of coordinate files)
+# ---------------------------------------------------------------------------
+
+# Coordinate files (mmCIF) are cached under cache_dir/<this subdir>. A released
+# PDB's coordinates are immutable, so they are fetched once and never expire.
+STRUCTURE_CACHE_SUBDIR: str = "structure_files"
+
+# RCSB marks a ligand the depositors studied with this annotation type. Used to
+# separate ligands of interest from incidental crystallization additives.
+RCSB_SUBJECT_OF_INVESTIGATION: str = "SUBJECT_OF_INVESTIGATION"
+
+# Burial ("angular coverage"): the fraction of evenly spread directions around a
+# ligand copy's centroid that have a protein atom within a narrow cone. A copy
+# enclosed in a pocket is covered from most directions; a copy lying on the
+# membrane-facing surface (a scattered structural lipid) is covered from a narrow
+# cone only. This is the load-bearing separator between a functional pocket and a
+# surface lipid (calibrated on a known two-pocket case vs. detergent floods).
+GEOMETRY_BURIAL_SPHERE_DIRS: int = 200
+GEOMETRY_BURIAL_CONE_DEG: float = 25.0
+GEOMETRY_ENV_RADIUS: float = 5.0  # protein atoms within this of any ligand atom shield it
+GEOMETRY_BURIAL_MIN: float = 0.80  # a knob: raise toward 0.85 for higher precision
+
+# Pocket contacts: a receptor residue is in a copy's pocket if any of its atoms is
+# within this distance of any ligand atom. A genuine pocket lines the copy with at
+# least a handful of receptor residues.
+GEOMETRY_CONTACT_RADIUS: float = 4.5
+GEOMETRY_MIN_POCKET_RESIDUES: int = 5
+GEOMETRY_NEIGHBOR_SEARCH_RADIUS: float = 6.0  # >= every query radius above
+
+# Dual-role rule: the same studied ligand modelled in two distinct functional
+# pockets on one receptor chain. The copy cap rejects detergent floods (a lipid
+# appears 5-34x), and the pocket-overlap cap requires the two pockets to be
+# genuinely different (orthosteric vs. allosteric), not the same site re-modelled.
+GEOMETRY_DUAL_ROLE_MAX_COPIES: int = 3
+GEOMETRY_DUAL_ROLE_POCKET_JACCARD_MAX: float = 0.5
 
 # How a subtype call was resolved against the alpha5 window.
 CHIMERA_SUBTYPE_RESOLVED: str = "resolved"
