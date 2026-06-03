@@ -331,6 +331,7 @@ src/gpcr_tools/
 ├── detector/                  # Pre-annotation detect stage (runs before annotate)
 │   ├── signals.py             #   DetectSignal contract + critical-warning formatting
 │   ├── gprotein.py            #   G-protein alpha5 identity detector
+│   ├── ligands.py             #   Excluded-but-real ligand detector (e.g. palmitate)
 │   └── stage.py               #   enriched -> signals -> detect/{pdb_id}.json
 │
 ├── annotator/                 # Stage 3: Gemini AI annotation
