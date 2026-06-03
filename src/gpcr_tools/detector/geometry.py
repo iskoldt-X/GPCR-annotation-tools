@@ -9,9 +9,10 @@ prompt so the model emits a separate entry per site.
 
 It is geometry-only and advisory: it surfaces a genuine two-pocket case as
 evidence (accommodate + guide); it never assigns the per-site pharmacology
-itself. A studied ligand modelled in two distinct, deeply buried pockets on one
-receptor chain -- with the copy count capped so detergent floods do not qualify
--- is the validated discriminator.
+itself. A ligand modelled in two distinct, deeply buried pockets on one receptor
+chain -- with the copy count capped so detergent floods do not qualify -- is the
+validated discriminator (no reliance on the unreliable subject-of-investigation
+flag; the geometry does the work).
 
 This detector reads the coordinate file, so it runs only when API checks are
 enabled (it needs the network to fetch the structure).
@@ -24,12 +25,13 @@ from pathlib import Path
 from typing import Any
 
 from gpcr_tools.config import (
+    DISPUTED_MOLECULES,
     GEOMETRY_BURIAL_MIN,
     GEOMETRY_DUAL_ROLE_MAX_COPIES,
     GEOMETRY_DUAL_ROLE_POCKET_JACCARD_MAX,
     GEOMETRY_MIN_POCKET_RESIDUES,
+    LIGAND_EXCLUDE_LIST,
     LOCUS_LIGANDS,
-    RCSB_SUBJECT_OF_INVESTIGATION,
 )
 from gpcr_tools.detector.signals import (
     SEVERITY_ADVISORY,
@@ -68,31 +70,26 @@ def _gpcr_auth_chains(enriched_entry: dict[str, Any]) -> set[str]:
     return chains
 
 
-def _subject_of_investigation_comp_ids(enriched_entry: dict[str, Any]) -> set[str]:
-    """Component ids RCSB marks as a subject of investigation (None-safe).
+def _candidate_comp_ids(enriched_entry: dict[str, Any]) -> set[str]:
+    """Non-polymer component ids worth checking for a dual-role pocket (None-safe).
 
-    This cleanly drops incidental crystallization additives (detergents, buffer
-    lipids), which are never annotated as a subject of investigation.
+    Every present non-polymer minus the stripped buffers (disputed molecules are
+    kept). Identity is NOT filtered by RCSB's subject-of-investigation flag --
+    that flag is unreliable (it misses many real ligands), so the geometry gates
+    (deep burial + a small copy count + distinct pockets) do the discrimination
+    instead: a structural lipid scattered across shallow surface grooves fails the
+    burial gate, and a detergent flood fails the copy-count cap.
     """
     comp_ids: set[str] = set()
     for entity in enriched_entry.get("nonpolymer_entities") or []:
         if not isinstance(entity, dict):
-            continue
-        annotations = entity.get("rcsb_nonpolymer_entity_annotation")
-        if not isinstance(annotations, list):
-            continue
-        is_soi = any(
-            isinstance(a, dict) and a.get("type") == RCSB_SUBJECT_OF_INVESTIGATION
-            for a in annotations
-        )
-        if not is_soi:
             continue
         comp_id = (entity.get("rcsb_nonpolymer_entity_container_identifiers") or {}).get(
             "nonpolymer_comp_id"
         )
         if comp_id:
             comp_ids.add(comp_id)
-    return comp_ids
+    return comp_ids - (LIGAND_EXCLUDE_LIST - DISPUTED_MOLECULES)
 
 
 def _cluster_pockets(
@@ -193,15 +190,16 @@ def detect_dual_role_ligands(
     enriched_entry: dict[str, Any],
     cache_dir: Path,
 ) -> list[DetectSignal]:
-    """One advisory signal per studied ligand bound at two distinct receptor pockets.
+    """One advisory signal per ligand bound at two distinct receptor pockets.
 
-    Only studied ligands (subjects of investigation) with a small number of copies
-    are considered, so detergent floods and buffer additives never qualify. The
-    coordinate file is fetched (cached) on first use; a missing structure or no
-    GPCR / studied ligand yields no signal.
+    A ligand qualifies on geometry alone -- a small number of copies, each deeply
+    buried in a distinct pocket -- so detergent floods (too many copies) and
+    surface lipids (too shallow) never qualify, with no reliance on RCSB's
+    subject-of-investigation flag. The coordinate file is fetched (cached) on
+    first use; a missing structure or no GPCR / candidate ligand yields no signal.
     """
-    soi_comp_ids = _subject_of_investigation_comp_ids(enriched_entry)
-    if not soi_comp_ids:
+    comp_ids = _candidate_comp_ids(enriched_entry)
+    if not comp_ids:
         return []
     gpcr_chains = _gpcr_auth_chains(enriched_entry)
     if not gpcr_chains:
@@ -211,7 +209,7 @@ def detect_dual_role_ligands(
         return []
 
     signals: list[DetectSignal] = []
-    for comp_id in sorted(soi_comp_ids):
+    for comp_id in sorted(comp_ids):
         copies = analyze_ligand_copies(structure, comp_id, gpcr_chains)
         # 2-3 copies: a dual-role drug appears 2-3x; a structural lipid appears 5-34x.
         if not 2 <= len(copies) <= GEOMETRY_DUAL_ROLE_MAX_COPIES:
