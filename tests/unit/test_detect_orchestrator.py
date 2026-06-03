@@ -18,8 +18,8 @@ from gpcr_tools.detector.signals import (
     SEVERITY_ADVISORY,
     SEVERITY_REVIEW,
     SIGNAL_CHIMERIC_GPROTEIN,
-    SIGNAL_DISPUTED_LIGAND,
     SIGNAL_DUAL_ROLE_LIGAND,
+    SIGNAL_INCIDENTAL_CANDIDATE,
     SIGNAL_SITE_REF,
     DetectSignal,
 )
@@ -45,11 +45,11 @@ def _chimeric_advisory() -> DetectSignal:
     )
 
 
-def _disputed(comp: str = "PLM") -> DetectSignal:
+def _incidental_candidate(comp: str = "PLM") -> DetectSignal:
     return DetectSignal(
-        kind=SIGNAL_DISPUTED_LIGAND,
+        kind=SIGNAL_INCIDENTAL_CANDIDATE,
         target_ref="ligands",
-        summary=f"{comp} disputed",
+        summary=f"{comp} incidental_candidate",
         payload={"comp_id": comp},
         severity=SEVERITY_ADVISORY,
     )
@@ -108,14 +108,14 @@ class TestAssembleDetectBlock:
         assert block is not None
         assert "IKENLKDCGLF" in block and "Gi/o" in block
 
-    def test_disputed_renders_comp_and_guidance(self) -> None:
-        block = assemble_detect_block([_disputed("PLM")])
+    def test_incidental_candidate_renders_comp_and_guidance(self) -> None:
+        block = assemble_detect_block([_incidental_candidate("PLM")])
         assert block is not None
-        assert "PLM" in block and "disputed_assessment" in block
+        assert "PLM" in block and "pharmacological_role_check" in block
 
     def test_deterministic_order(self) -> None:
-        a = assemble_detect_block([_disputed("PLM"), _chimeric_advisory()])
-        b = assemble_detect_block([_chimeric_advisory(), _disputed("PLM")])
+        a = assemble_detect_block([_incidental_candidate("PLM"), _chimeric_advisory()])
+        b = assemble_detect_block([_chimeric_advisory(), _incidental_candidate("PLM")])
         assert a == b
 
     def test_site_ref_single_site_evidence(self) -> None:
@@ -155,18 +155,18 @@ class TestAssembleDetectBlock:
 
 
 class TestBuildToolForSignals:
-    def test_no_disputed_returns_base_identity(self) -> None:
+    def test_no_incidental_candidate_returns_base_identity(self) -> None:
         assert build_tool_for_signals(ANNOTATION_TOOL, []) is ANNOTATION_TOOL
         assert build_tool_for_signals(ANNOTATION_TOOL, [_chimeric_advisory()]) is ANNOTATION_TOOL
 
-    def test_disputed_adds_field_without_mutating_base(self) -> None:
-        tool = build_tool_for_signals(ANNOTATION_TOOL, [_disputed()])
+    def test_incidental_candidate_adds_field_without_mutating_base(self) -> None:
+        tool = build_tool_for_signals(ANNOTATION_TOOL, [_incidental_candidate()])
         assert tool is not ANNOTATION_TOOL
         items = tool.function_declarations[0].parameters.properties["ligands"].items
-        assert "disputed_assessment" in items.properties
+        assert "pharmacological_role_check" in items.properties
         # The base tool must be untouched (no schema leak).
         base_items = ANNOTATION_TOOL.function_declarations[0].parameters.properties["ligands"].items
-        assert "disputed_assessment" not in base_items.properties
+        assert "pharmacological_role_check" not in base_items.properties
 
     def test_site_ref_is_in_base_schema(self) -> None:
         # site_ref is a permanent field on every ligand, not injected per-signal.
@@ -178,15 +178,15 @@ class TestBuildToolForSignals:
         # the base schema, so the tool is returned by identity.
         assert build_tool_for_signals(ANNOTATION_TOOL, [_dual_role()]) is ANNOTATION_TOOL
 
-    def test_disputed_adds_assessment_with_site_ref_already_present(self) -> None:
-        tool = build_tool_for_signals(ANNOTATION_TOOL, [_disputed(), _dual_role()])
+    def test_incidental_candidate_adds_assessment_with_site_ref_already_present(self) -> None:
+        tool = build_tool_for_signals(ANNOTATION_TOOL, [_incidental_candidate(), _dual_role()])
         items = tool.function_declarations[0].parameters.properties["ligands"].items
-        assert "disputed_assessment" in items.properties
+        assert "pharmacological_role_check" in items.properties
         assert "site_ref" in items.properties  # inherited from the base schema
 
 
 class TestBuildToolConfig:
-    def test_no_disputed_returns_base_config_identity(self) -> None:
+    def test_no_incidental_candidate_returns_base_config_identity(self) -> None:
         assert build_tool_config([]) is TOOL_CONFIG
         assert build_tool_config([_chimeric_advisory()]) is TOOL_CONFIG
 
@@ -194,8 +194,8 @@ class TestBuildToolConfig:
         # Dual-role no longer mutates the schema, so the config is unchanged.
         assert build_tool_config([_dual_role()]) is TOOL_CONFIG
 
-    def test_disputed_returns_new_config_leaving_base_unchanged(self) -> None:
-        cfg = build_tool_config([_disputed()])
+    def test_incidental_candidate_returns_new_config_leaving_base_unchanged(self) -> None:
+        cfg = build_tool_config([_incidental_candidate()])
         assert cfg is not TOOL_CONFIG
         assert cfg.tools[0] is not ANNOTATION_TOOL
         assert TOOL_CONFIG.tools[0] is ANNOTATION_TOOL  # base config untouched

@@ -20,6 +20,7 @@ from gpcr_tools.annotator.pdf_compressor import compress_pdf_if_needed
 from gpcr_tools.annotator.post_processor import post_process_annotation
 from gpcr_tools.annotator.prompt_builder import build_prompt_parts
 from gpcr_tools.annotator.schema import ANNOTATION_TOOL
+from gpcr_tools.code_version import get_code_version
 from gpcr_tools.config import (
     ANNOTATOR_FUNCTION_NAME,
     GEMINI_BASE_BACKOFF,
@@ -156,6 +157,7 @@ def run_single_pdb(
                             "model_requested": model_name,
                             "model_served": getattr(response, "model_version", None),
                             "prompt": prompt_id,
+                            "code_version": get_code_version(),
                             "detect_advisory": advisory_kinds,
                             "run": run_num,
                             "mode": "single",
@@ -301,7 +303,7 @@ def build_and_submit_batch(
             )
 
             # The tool schema must be provided as a dict (per-PDB: augmented when
-            # a disputed signal is present, identical to base otherwise).
+            # an incidental-candidate signal is present, identical to base otherwise).
             assert tool_for_pdb.function_declarations is not None
             fn_decl = tool_for_pdb.function_declarations[0]
             tool_dict = {
@@ -381,6 +383,7 @@ def build_and_submit_batch(
                 {
                     "model_requested": model_name,
                     "prompt": prompt_id,
+                    "code_version": get_code_version(),
                     "detect_advisory": detect_advisory_by_pdb,
                 },
                 f,
@@ -535,6 +538,9 @@ def recover_batch() -> None:
                                 "model_requested": batch_meta.get("model_requested"),
                                 "model_served": response_obj.get("modelVersion"),
                                 "prompt": batch_meta.get("prompt"),
+                                # From the submission sidecar: the code that built
+                                # and submitted the batch, not the recovery run.
+                                "code_version": batch_meta.get("code_version"),
                                 "detect_advisory": (batch_meta.get("detect_advisory") or {}).get(
                                     pdb_id, []
                                 ),

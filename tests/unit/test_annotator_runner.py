@@ -10,7 +10,7 @@ from gpcr_tools.config import (
     model_run_subdir,
     reset_config,
 )
-from gpcr_tools.detector.signals import SEVERITY_ADVISORY, SIGNAL_DISPUTED_LIGAND, DetectSignal
+from gpcr_tools.detector.signals import SEVERITY_ADVISORY, SIGNAL_INCIDENTAL_CANDIDATE, DetectSignal
 
 
 def test_run_single_pdb_skips_if_done(tmp_path, monkeypatch):
@@ -143,6 +143,7 @@ def test_recover_batch(tmp_path, monkeypatch):
 def test_run_single_pdb_writes_provenance(tmp_path, monkeypatch):
     """Each single-mode result records which model/prompt/run produced it."""
     monkeypatch.setenv("GPCR_AI_RESULTS_PATH", str(tmp_path / "ai_results"))
+    monkeypatch.setenv("GPCR_CODE_VERSION", "abc1234")
     reset_config()
     config = get_config()
 
@@ -168,9 +169,9 @@ def test_run_single_pdb_writes_provenance(tmp_path, monkeypatch):
         "gpcr_tools.annotator.runner.load_detect_signals",
         lambda pdb_id: [
             DetectSignal(
-                kind=SIGNAL_DISPUTED_LIGAND,
+                kind=SIGNAL_INCIDENTAL_CANDIDATE,
                 target_ref="ligands",
-                summary="PLM disputed",
+                summary="PLM incidental_candidate",
                 payload={"comp_id": "PLM"},
                 severity=SEVERITY_ADVISORY,
             )
@@ -199,7 +200,8 @@ def test_run_single_pdb_writes_provenance(tmp_path, monkeypatch):
     assert prov["model_requested"] == "gemini-2.5-pro"
     assert prov["model_served"] == "gemini-2.5-pro-002"
     assert prov["prompt"] == "v5"
-    assert prov["detect_advisory"] == [SIGNAL_DISPUTED_LIGAND]
+    assert prov["code_version"] == "abc1234"
+    assert prov["detect_advisory"] == [SIGNAL_INCIDENTAL_CANDIDATE]
     assert prov["run"] == 1
     assert prov["mode"] == "single"
 
@@ -213,7 +215,9 @@ def test_recover_batch_writes_provenance(tmp_path, monkeypatch):
     config.pipeline_runs_dir.mkdir(parents=True)
 
     (config.pipeline_runs_dir / "_batch_provenance.json").write_text(
-        json.dumps({"model_requested": "gemini-2.5-pro", "prompt": "v5"})
+        json.dumps(
+            {"model_requested": "gemini-2.5-pro", "prompt": "v5", "code_version": "abc1234"}
+        )
     )
 
     raw_output = config.pipeline_runs_dir / "raw_output_testjob.jsonl"
@@ -253,6 +257,7 @@ def test_recover_batch_writes_provenance(tmp_path, monkeypatch):
     assert prov["mode"] == "batch"
     assert prov["model_requested"] == "gemini-2.5-pro"
     assert prov["prompt"] == "v5"
+    assert prov["code_version"] == "abc1234"
     assert prov["model_served"] == "gemini-2.5-pro-002"
     assert prov["run"] == 1
 

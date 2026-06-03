@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from gpcr_tools.config import (
-    DISPUTED_MOLECULES,
+    INCIDENTAL_CANDIDATES,
     SITE_REF_ALLOSTERIC_7TM,
     SITE_REF_EXTRACELLULAR_DOMAIN,
     SITE_REF_EXTRACELLULAR_VESTIBULE,
@@ -113,9 +113,9 @@ class TestEnrichedParsing:
         # the multi-site split is gated later by burial, not by ligand identity.
         assert sr._annotated_ligands(_entry("LIG")) == {"LIG"}
 
-    def test_disputed_molecule_annotated(self) -> None:
-        disputed = sorted(DISPUTED_MOLECULES)[0]
-        assert disputed in sr._annotated_ligands(_entry(disputed))
+    def test_incidental_candidate_molecule_annotated(self) -> None:
+        incidental_candidate = sorted(INCIDENTAL_CANDIDATES)[0]
+        assert incidental_candidate in sr._annotated_ligands(_entry(incidental_candidate))
 
     def test_prefers_table_accession_over_fusion_partner(self) -> None:
         # Both UniProts pass the permissive slug denylist; the real receptor

@@ -112,7 +112,7 @@ def _build_validation_report(
     report: dict[str, Any] = {
         "critical_warnings": list(all_warnings),
         "algo_conflicts": [],
-        "algo_notes": [],
+        "detector_notes": [],
         "chimera_score": chimera_result.get("score") or 0,
         "chimera_status": chimera_result.get("status") or CHIMERA_STATUS_SKIPPED,
         "timestamp": datetime.now(tz=UTC).isoformat(),
@@ -128,7 +128,7 @@ def _build_validation_report(
 
     # Receptor-side crystallization fusions (BRIL / T4 lysozyme) -- advisory,
     # non-blocking: recorded for the curator, does not gate accept-all.
-    report["algo_notes"].extend(detect_crystallization_fusions(enriched_entry))
+    report["detector_notes"].extend(detect_crystallization_fusions(enriched_entry))
 
     # A chimeric G-protein's alpha-subunit identity cannot be resolved reliably
     # from sequence alone (the tail is degenerate across subtypes), so force a
@@ -162,12 +162,12 @@ def _build_validation_report(
                     f"model chose '{ai_uniprot}'. Confirm the identity."
                 )
             else:
-                report["algo_notes"].append(
+                report["detector_notes"].append(
                     f"{ALERT_PREFIX_TIE_BREAKER_ALIGNED} at 'chimera_analysis': "
                     f"alpha5 '{a5_tail}' resolves G-alpha to '{subtype}'."
                 )
         elif resolution == CHIMERA_SUBTYPE_LOW_CONFIDENCE:
-            report["algo_notes"].append(
+            report["detector_notes"].append(
                 f"{ALERT_PREFIX_ALGO_WARNING} at 'chimera_analysis': "
                 f"alpha5 match is weak (best window score "
                 f"{chimera_result.get('score') or 0}); G-alpha identity unverified."
@@ -210,7 +210,7 @@ def _build_validation_report(
             g_block = (best_run_data.get("signaling_partners") or {}).get("g_protein")
             if isinstance(g_block, dict):
                 g_block["chimera_backbone"] = f"{backbone_slug} ({backbone_family} scaffold)"
-            report["algo_notes"].append(
+            report["detector_notes"].append(
                 f"{ALERT_PREFIX_ALPHA5_GRAFT} at "
                 f"'signaling_partners.g_protein.alpha_subunit': alpha5-graft chimera "
                 f"-- backbone {backbone_slug} ({backbone_family}), functional alpha5 "

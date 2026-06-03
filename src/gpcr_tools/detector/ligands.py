@@ -14,16 +14,16 @@ from __future__ import annotations
 from typing import Any
 
 from gpcr_tools.config import (
-    DISPUTED_MOLECULES,
     EXCLUDED_REAL_LIGAND_INTEREST,
+    INCIDENTAL_CANDIDATES,
     LIGAND_EXCLUDE_LIST,
     LOCUS_LIGANDS,
 )
 from gpcr_tools.detector.signals import (
     SEVERITY_ADVISORY,
     SEVERITY_REVIEW,
-    SIGNAL_DISPUTED_LIGAND,
     SIGNAL_EXCLUDED_REAL_LIGAND,
+    SIGNAL_INCIDENTAL_CANDIDATE,
     DetectSignal,
 )
 
@@ -54,14 +54,14 @@ def detect_excluded_real_ligands(
     reaches the model) is never mis-reported here. One signal per component
     keeps each anchored to a single id and avoids plural-grammar pitfalls.
 
-    Disputed molecules are subtracted: the disputed fork un-strips them and
+    Incidental-candidate molecules are subtracted: the incidental-candidate fork un-strips them and
     guides the model directly (accommodate + guide), so they must NOT also fire a
     "stripped before the model sees it" review -- that claim would be false and
     the two pathways would contradict.
     """
     present = set(_nonpolymer_comp_ids(enriched_entry))
     hidden = sorted(
-        present & EXCLUDED_REAL_LIGAND_INTEREST & LIGAND_EXCLUDE_LIST - DISPUTED_MOLECULES
+        present & EXCLUDED_REAL_LIGAND_INTEREST & LIGAND_EXCLUDE_LIST - INCIDENTAL_CANDIDATES
     )
     return [
         DetectSignal(
@@ -79,27 +79,27 @@ def detect_excluded_real_ligands(
     ]
 
 
-def detect_disputed_ligands(
+def detect_incidental_candidates(
     pdb_id: str,
     enriched_entry: dict[str, Any],
 ) -> list[DetectSignal]:
-    """One advisory signal per disputed molecule (cholesterol / palmitate) present.
+    """One advisory signal per incidental-candidate molecule (cholesterol / palmitate) present.
 
-    A disputed molecule can be EITHER a functional ligand OR an incidental
+    An incidental-candidate molecule can be EITHER a functional ligand OR an incidental
     structural lipid. The signal is advisory: it routes evidence into the prompt
-    so the model judges the role itself (and any disputed member stripped by the
+    so the model judges the role itself (and any incidental-candidate member stripped by the
     exclude list is un-stripped so the model can see it) -- it does not silently
     send the case to human review.
     """
-    present = sorted(set(_nonpolymer_comp_ids(enriched_entry)) & DISPUTED_MOLECULES)
+    present = sorted(set(_nonpolymer_comp_ids(enriched_entry)) & INCIDENTAL_CANDIDATES)
     return [
         DetectSignal(
-            kind=SIGNAL_DISPUTED_LIGAND,
+            kind=SIGNAL_INCIDENTAL_CANDIDATE,
             target_ref=LOCUS_LIGANDS,
             summary=(
                 f"{code} is present and is a disputed molecule: it can be a "
                 f"functional ligand or an incidental structural lipid. Judge its "
-                f"role from the paper and record a disputed_assessment."
+                f"role from the paper and record a pharmacological_role_check."
             ),
             payload={"comp_id": code},
             severity=SEVERITY_ADVISORY,

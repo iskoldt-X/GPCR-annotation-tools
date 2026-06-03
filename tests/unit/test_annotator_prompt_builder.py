@@ -1,7 +1,7 @@
 from gpcr_tools.annotator import prompt_builder
 from gpcr_tools.detector.signals import (
     SEVERITY_ADVISORY,
-    SIGNAL_DISPUTED_LIGAND,
+    SIGNAL_INCIDENTAL_CANDIDATE,
     DetectSignal,
 )
 
@@ -101,8 +101,8 @@ def test_build_prompt_parts():
     assert "--- FULL PAPER ---" in joined_parts
 
 
-def test_disputed_molecule_not_stripped():
-    # Accommodate, not conceal: PLM (exclude-list AND disputed) stays visible to
+def test_incidental_candidate_molecule_not_stripped():
+    # Accommodate, not conceal: PLM (exclude-list AND incidental_candidate) stays visible to
     # the model; an ordinary buffer (HOH) is still stripped.
     enriched_data = {
         "data": {
@@ -132,9 +132,9 @@ def test_build_prompt_parts_zero_perturbation():
 def test_build_prompt_parts_injects_advisory_block_between_metadata_and_paper():
     enriched = {"data": {"entry": {}}}
     sig = DetectSignal(
-        kind=SIGNAL_DISPUTED_LIGAND,
+        kind=SIGNAL_INCIDENTAL_CANDIDATE,
         target_ref="ligands",
-        summary="PLM disputed",
+        summary="PLM incidental_candidate",
         payload={"comp_id": "PLM"},
         severity=SEVERITY_ADVISORY,
     )

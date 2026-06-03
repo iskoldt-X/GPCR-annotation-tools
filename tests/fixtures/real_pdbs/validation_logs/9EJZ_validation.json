@@ -4,7 +4,7 @@
         "UNIPROT_CLASH at 'receptor_info': 'chrm5_human' on Chain R vs API reality []."
     ],
     "algo_conflicts": [],
-    "algo_notes": [],
+    "detector_notes": [],
     "chimera_score": 4,
     "chimera_status": "success"
 }

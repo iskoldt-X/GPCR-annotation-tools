@@ -89,7 +89,7 @@ class TestChimeraAlpha5Routing:
         )
         report = _chimera_report(chim, "gnas2_human", monkeypatch)
         assert report["algo_conflicts"] == []
-        assert any("gnas2_human" in n for n in report["algo_notes"])
+        assert any("gnas2_human" in n for n in report["detector_notes"])
 
     def test_alpha5_graft_records_backbone_and_notes(self, monkeypatch):
         monkeypatch.setattr("gpcr_tools.aggregator.runner.validate_all", lambda *a, **k: [])
@@ -111,7 +111,7 @@ class TestChimeraAlpha5Routing:
         )
         report = _build_validation_report("X", best, {}, [], chim, None)
         # Informational note recorded, never a blocking critical warning.
-        assert any("ALPHA5 GRAFT" in n for n in report["algo_notes"])
+        assert any("ALPHA5 GRAFT" in n for n in report["detector_notes"])
         assert not any("ALPHA5 GRAFT" in w for w in report["critical_warnings"])
         # Backbone recorded on the annotation for provenance.
         g_protein = best["signaling_partners"]["g_protein"]
@@ -134,7 +134,7 @@ class TestChimeraAlpha5Routing:
             is_alpha5_graft=False,
         )
         report = _build_validation_report("X", best, {}, [], chim, None)
-        assert not any("ALPHA5 GRAFT" in n for n in report["algo_notes"])
+        assert not any("ALPHA5 GRAFT" in n for n in report["detector_notes"])
         assert "chimera_backbone" not in best["signaling_partners"]["g_protein"]
 
     def test_resolved_subtype_mismatch_is_conflict(self, monkeypatch):
@@ -179,7 +179,7 @@ class TestChimeraAlpha5Routing:
     def test_low_confidence_is_noted_not_crashed(self, monkeypatch):
         chim = _success(subtype_resolution=CHIMERA_SUBTYPE_LOW_CONFIDENCE, score=3)
         report = _chimera_report(chim, None, monkeypatch)
-        assert any("weak" in n.lower() or "unverified" in n.lower() for n in report["algo_notes"])
+        assert any("weak" in n.lower() or "unverified" in n.lower() for n in report["detector_notes"])
 
     def test_cross_family_tie_is_not_silent(self, monkeypatch):
         # Winners span more than one family -> family is None. This must NOT be
@@ -191,5 +191,5 @@ class TestChimeraAlpha5Routing:
             a5_tail="ABCDEFGHIJK",
         )
         report = _chimera_report(chim, None, monkeypatch)
-        signals = report["algo_conflicts"] + report["critical_warnings"] + report["algo_notes"]
+        signals = report["algo_conflicts"] + report["critical_warnings"] + report["detector_notes"]
         assert any("does not map" in s or "cannot be determined" in s for s in signals)

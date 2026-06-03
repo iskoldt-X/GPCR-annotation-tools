@@ -130,15 +130,15 @@ class TestListOfDictVoting:
         assert majority[0]["chem_comp_id"] == "ATP"
         assert majority[0]["role"] == "agonist"
 
-    def test_disputed_assessment_is_voted(self) -> None:
-        # The disputed-fork field is voted by the generic nested recursion.
+    def test_pharmacological_role_check_is_voted(self) -> None:
+        # The incidental_candidate-fork field is voted by the generic nested recursion.
         runs = [
-            [{"chem_comp_id": "CLR", "disputed_assessment": {"is_functional_ligand": True}}],
-            [{"chem_comp_id": "CLR", "disputed_assessment": {"is_functional_ligand": True}}],
-            [{"chem_comp_id": "CLR", "disputed_assessment": {"is_functional_ligand": False}}],
+            [{"chem_comp_id": "CLR", "pharmacological_role_check": {"is_functional_ligand": True}}],
+            [{"chem_comp_id": "CLR", "pharmacological_role_check": {"is_functional_ligand": True}}],
+            [{"chem_comp_id": "CLR", "pharmacological_role_check": {"is_functional_ligand": False}}],
         ]
         majority, _ = get_majority_votes(runs, path="ligands")
-        assert majority[0]["disputed_assessment"]["is_functional_ligand"] is True
+        assert majority[0]["pharmacological_role_check"]["is_functional_ligand"] is True
 
     def test_group_by_name(self) -> None:
         runs = [

@@ -105,7 +105,7 @@ def display_validation_alert(path: str, validation_data: dict) -> bool:
     return False
 
 
-def display_algo_notes(validation_data: dict) -> None:
+def display_detector_notes(validation_data: dict) -> None:
     """Render advisory algorithm notes once, as a non-gating info panel.
 
     Unlike critical warnings / algo conflicts, these notes do not block review or
@@ -113,7 +113,7 @@ def display_algo_notes(validation_data: dict) -> None:
     note, an alpha5 alignment hint). Surfacing them keeps the curator aware of
     what the detectors observed without gating the workflow.
     """
-    notes = validation_data.get("algo_notes") or []
+    notes = validation_data.get("detector_notes") or []
     if not notes:
         return
     note_text = Text()

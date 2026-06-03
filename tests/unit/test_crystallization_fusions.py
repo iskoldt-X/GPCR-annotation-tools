@@ -86,7 +86,7 @@ class TestRealData:
 
 class TestRoutingInvariant:
     def test_fusion_note_is_advisory_not_blocking(self) -> None:
-        # The fusion note must land in algo_notes (non-blocking), never in
+        # The fusion note must land in detector_notes (non-blocking), never in
         # critical_warnings (which would gate accept-all).
         enriched = _enriched(
             _entity(
@@ -97,5 +97,5 @@ class TestRoutingInvariant:
         report = _build_validation_report(
             "TEST", best, enriched, [], {"status": CHIMERA_STATUS_SKIPPED, "score": 0}, None
         )
-        assert any("CRYSTALLIZATION FUSION" in n for n in report["algo_notes"])
+        assert any("CRYSTALLIZATION FUSION" in n for n in report["detector_notes"])
         assert not any("CRYSTALLIZATION FUSION" in w for w in report["critical_warnings"])
