@@ -12,11 +12,12 @@ import pytest
 
 from gpcr_tools.config import FULL_G_ALPHA_CANDIDATES, reset_config
 from gpcr_tools.detector.gprotein import G_PROTEIN_LOCUS, detect_g_protein_identity
-from gpcr_tools.detector.ligands import detect_excluded_real_ligands
+from gpcr_tools.detector.ligands import detect_disputed_ligands, detect_excluded_real_ligands
 from gpcr_tools.detector.signals import (
     SEVERITY_ADVISORY,
     SEVERITY_REVIEW,
     SIGNAL_CHIMERIC_GPROTEIN,
+    SIGNAL_DISPUTED_LIGAND,
     SIGNAL_EXCLUDED_REAL_LIGAND,
     DetectSignal,
     to_critical_warnings,
@@ -58,13 +59,10 @@ _TRANSDUCIN_TAILS = dict.fromkeys(("gnat1_human", "gnat2_human", "gnat3_human"),
 
 
 class TestExcludedRealLigandDetector:
-    def test_hidden_palmitate_emits_review(self) -> None:
-        entry = _nonpoly_entry(["PLM", "HOH", "SO4"])  # PLM excluded; HOH/SO4 buffers
-        sigs = detect_excluded_real_ligands("X", entry)
-        assert len(sigs) == 1
-        assert sigs[0].kind == SIGNAL_EXCLUDED_REAL_LIGAND
-        assert sigs[0].severity == SEVERITY_REVIEW
-        assert sigs[0].payload["comp_id"] == "PLM"
+    def test_disputed_molecule_not_emitted_as_excluded(self) -> None:
+        # PLM is a disputed molecule -> owned by the disputed fork (un-stripped +
+        # guided), so it must NOT also fire a (now-false) "hidden" review here.
+        assert detect_excluded_real_ligands("X", _nonpoly_entry(["PLM", "HOH"])) == []
 
     def test_cholesterol_not_flagged(self) -> None:
         # CLR is NOT on the exclude list (the model already sees it), so it is
@@ -74,15 +72,32 @@ class TestExcludedRealLigandDetector:
     def test_no_nonpolymer_no_signal(self) -> None:
         assert detect_excluded_real_ligands("X", {"polymer_entities": []}) == []
 
-    def test_multiple_hidden_emit_one_signal_each(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # When the interest set grows, each hidden ligand gets its own signal.
+    def test_each_hidden_non_disputed_ligand_emits_one_signal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Non-disputed excluded-real ligands still each fire their own review.
         monkeypatch.setattr(
             "gpcr_tools.detector.ligands.EXCLUDED_REAL_LIGAND_INTEREST",
-            frozenset({"PLM", "NAG"}),  # both also on LIGAND_EXCLUDE_LIST
+            frozenset({"NAG", "GAL"}),  # both on the exclude list, neither disputed
         )
-        sigs = detect_excluded_real_ligands("X", _nonpoly_entry(["PLM", "NAG", "HOH"]))
-        assert len(sigs) == 2
-        assert {s.payload["comp_id"] for s in sigs} == {"PLM", "NAG"}
+        sigs = detect_excluded_real_ligands("X", _nonpoly_entry(["NAG", "GAL", "HOH"]))
+        assert {s.payload["comp_id"] for s in sigs} == {"NAG", "GAL"}
+        assert all(s.kind == SIGNAL_EXCLUDED_REAL_LIGAND for s in sigs)
+        assert all(s.severity == SEVERITY_REVIEW for s in sigs)
+
+
+class TestDisputedLigandDetector:
+    def test_disputed_molecules_emit_advisory(self) -> None:
+        sigs = detect_disputed_ligands("X", _nonpoly_entry(["CLR", "PLM", "HOH"]))
+        assert {s.payload["comp_id"] for s in sigs} == {"CLR", "PLM"}
+        assert all(s.kind == SIGNAL_DISPUTED_LIGAND for s in sigs)
+        assert all(s.severity == SEVERITY_ADVISORY for s in sigs)  # prompt routing, not review
+
+    def test_non_disputed_ligand_not_flagged(self) -> None:
+        assert detect_disputed_ligands("X", _nonpoly_entry(["RET", "HOH"])) == []
+
+    def test_no_nonpolymer_no_signal(self) -> None:
+        assert detect_disputed_ligands("X", {"polymer_entities": []}) == []
 
 
 class TestDetectSignal:
@@ -197,8 +212,8 @@ class TestDetectStage:
         enveloped = {"data": {"entry": _nonpoly_entry(["PLM"])}}
         (ws / "enriched" / "9XYZ.json").write_text(json.dumps(enveloped))
         sigs = run_detect("9XYZ", skip_api_checks=True)
-        assert len(sigs) == 1
-        assert sigs[0].kind == SIGNAL_EXCLUDED_REAL_LIGAND
+        # PLM is a disputed molecule; the unwrap must reach that ligand detector.
+        assert SIGNAL_DISPUTED_LIGAND in {s.kind for s in sigs}
 
     def test_run_detect_missing_enriched(self, ws: Path) -> None:
         assert run_detect("NOPE") == []
@@ -217,5 +232,5 @@ class TestDetectStage:
         # sequence-based detectors are skipped.
         (ws / "enriched" / "9XYZ.json").write_text(json.dumps(_nonpoly_entry(["PLM"])))
         sigs = run_detect("9XYZ", skip_api_checks=True)
-        assert len(sigs) == 1
-        assert sigs[0].kind == SIGNAL_EXCLUDED_REAL_LIGAND
+        # PLM fires the metadata-only disputed detector even under skip_api.
+        assert SIGNAL_DISPUTED_LIGAND in {s.kind for s in sigs}

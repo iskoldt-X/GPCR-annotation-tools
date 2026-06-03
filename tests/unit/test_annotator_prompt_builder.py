@@ -1,4 +1,9 @@
 from gpcr_tools.annotator import prompt_builder
+from gpcr_tools.detector.signals import (
+    SEVERITY_ADVISORY,
+    SIGNAL_DISPUTED_LIGAND,
+    DetectSignal,
+)
 
 
 def test_generate_chain_inventory_reminder():
@@ -94,3 +99,46 @@ def test_build_prompt_parts():
     assert "8ABC" in joined_parts
     assert "--- PDB METADATA FOR 7W55 ---" in joined_parts
     assert "--- FULL PAPER ---" in joined_parts
+
+
+def test_disputed_molecule_not_stripped():
+    # Accommodate, not conceal: PLM (exclude-list AND disputed) stays visible to
+    # the model; an ordinary buffer (HOH) is still stripped.
+    enriched_data = {
+        "data": {
+            "entry": {
+                "nonpolymer_entities": [
+                    {"nonpolymer_comp": {"chem_comp": {"id": "PLM", "name": "Palmitic acid"}}},
+                    {"nonpolymer_comp": {"chem_comp": {"id": "HOH", "name": "Water"}}},
+                ]
+            }
+        }
+    }
+    simplified = prompt_builder.enhanced_simplify_pdb_json(enriched_data)
+    ids = {c["chem_comp_id"] for c in simplified["non_polymer_components"]}
+    assert "PLM" in ids
+    assert "HOH" not in ids
+
+
+def test_build_prompt_parts_zero_perturbation():
+    # No signals (default / None / []) must all yield the identical prompt.
+    enriched = {"data": {"entry": {}}}
+    base = prompt_builder.build_prompt_parts("7W55", enriched, "P")
+    none_sig = prompt_builder.build_prompt_parts("7W55", enriched, "P", detect_signals=None)
+    empty_sig = prompt_builder.build_prompt_parts("7W55", enriched, "P", detect_signals=[])
+    assert base == none_sig == empty_sig
+
+
+def test_build_prompt_parts_injects_advisory_block_between_metadata_and_paper():
+    enriched = {"data": {"entry": {}}}
+    sig = DetectSignal(
+        kind=SIGNAL_DISPUTED_LIGAND,
+        target_ref="ligands",
+        summary="PLM disputed",
+        payload={"comp_id": "PLM"},
+        severity=SEVERITY_ADVISORY,
+    )
+    joined = "".join(prompt_builder.build_prompt_parts("7W55", enriched, "P", detect_signals=[sig]))
+    assert "DETECTOR EVIDENCE" in joined
+    assert joined.index("PDB METADATA") < joined.index("DETECTOR EVIDENCE")
+    assert joined.index("DETECTOR EVIDENCE") < joined.index("--- FULL PAPER ---")

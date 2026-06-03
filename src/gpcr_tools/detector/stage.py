@@ -16,7 +16,7 @@ from typing import Any
 
 from gpcr_tools.config import get_config
 from gpcr_tools.detector.gprotein import detect_g_protein_identity
-from gpcr_tools.detector.ligands import detect_excluded_real_ligands
+from gpcr_tools.detector.ligands import detect_disputed_ligands, detect_excluded_real_ligands
 from gpcr_tools.detector.signals import DetectSignal
 from gpcr_tools.validator.cache import SequenceCache
 
@@ -67,6 +67,7 @@ def run_detect(pdb_id: str, *, skip_api_checks: bool = False) -> list[DetectSign
 
     # Metadata-only detectors (no external fetch) always run.
     signals.extend(detect_excluded_real_ligands(pdb_id, entry))
+    signals.extend(detect_disputed_ligands(pdb_id, entry))
 
     # Sequence-based detectors need UniProt reference fetches.
     if not skip_api_checks:

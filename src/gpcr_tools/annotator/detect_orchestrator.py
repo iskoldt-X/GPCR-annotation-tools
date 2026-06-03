@@ -1,0 +1,127 @@
+"""Pure orchestration that routes detect signals into the annotation prompt/tool.
+
+ADVISORY detect signals become evidence in the prompt (the model weighs them
+against the paper); REVIEW signals are not handled here -- they route silently to
+human review. A disputed-molecule advisory additionally augments the tool schema
+with an optional ``disputed_assessment`` field. No I/O, no AI calls.
+
+When there are no advisory signals the prompt block is ``None`` and the tool /
+config are returned by identity, so an ordinary structure is byte-for-byte
+unchanged.
+
+NOTE: the user-facing wording in the prompt block is a DRAFT pending review.
+"""
+
+from __future__ import annotations
+
+from google.genai import types
+
+from gpcr_tools.annotator.schema import (
+    ANNOTATION_TOOL,
+    DISPUTED_ASSESSMENT_SCHEMA,
+    TOOL_CONFIG,
+)
+from gpcr_tools.detector.signals import (
+    SEVERITY_ADVISORY,
+    SIGNAL_CHIMERIC_GPROTEIN,
+    SIGNAL_DISPUTED_LIGAND,
+    DetectSignal,
+)
+
+# DRAFT wording -- pending Binghan's word-by-word review.
+_DETECT_BLOCK_HEADER = (
+    "=== DETECTOR EVIDENCE (computed before annotation) ===\n"
+    "Treat each item below as evidence to weigh against the paper, not as a "
+    "settled conclusion:"
+)
+
+
+def _format_signal(signal: DetectSignal) -> str:
+    """Render one advisory signal as a prompt evidence line (DRAFT wording)."""
+    payload = signal.payload or {}
+    if signal.kind == SIGNAL_CHIMERIC_GPROTEIN:
+        tail = payload.get("a5_tail") or "?"
+        family = payload.get("family") or "?"
+        subtype = payload.get("subtype") or "an indistinguishable subtype"
+        score = payload.get("score")
+        return (
+            f"G-protein alpha5 analysis: the modelled alpha5 tail '{tail}' matches the "
+            f"{family} family (subtype {subtype}, score {score}). Weigh this against the "
+            f"paper before assigning the G-alpha identity."
+        )
+    if signal.kind == SIGNAL_DISPUTED_LIGAND:
+        comp = payload.get("comp_id") or "?"
+        return (
+            f"{comp} is present and is a disputed molecule (a functional ligand in some "
+            f"structures, an incidental structural lipid in others). Assess its role from "
+            f"the paper and record a disputed_assessment for it."
+        )
+    # Unknown advisory kind: fall back to the signal's own one-line summary.
+    return signal.summary or signal.kind
+
+
+def _advisory_signals(signals: list[DetectSignal]) -> list[DetectSignal]:
+    return [s for s in signals if s.severity == SEVERITY_ADVISORY]
+
+
+def assemble_detect_block(signals: list[DetectSignal]) -> str | None:
+    """Build the prompt evidence block from advisory signals, or ``None`` if none.
+
+    Deterministic order (by kind, target_ref, comp_id) so the prompt is stable.
+    """
+    advisory = _advisory_signals(signals)
+    if not advisory:
+        return None
+    ordered = sorted(
+        advisory,
+        key=lambda s: (s.kind, s.target_ref, str((s.payload or {}).get("comp_id") or "")),
+    )
+    lines = "\n".join(f"- {_format_signal(s)}" for s in ordered)
+    return f"{_DETECT_BLOCK_HEADER}\n{lines}"
+
+
+def build_tool_for_signals(base_tool: types.Tool, signals: list[DetectSignal]) -> types.Tool:
+    """Return *base_tool* augmented for disputed molecules, else *base_tool* itself.
+
+    Only a disputed advisory signal mutates the schema (adds the optional
+    ``disputed_assessment`` field to each ligand item). With no such signal the
+    base tool is returned by identity, guaranteeing zero schema perturbation.
+    The base tool is never mutated (deep copy before any change).
+    """
+    has_disputed = any(
+        s.kind == SIGNAL_DISPUTED_LIGAND and s.severity == SEVERITY_ADVISORY for s in signals
+    )
+    if not has_disputed:
+        return base_tool
+    declarations = base_tool.function_declarations or []
+    if not declarations:
+        return base_tool
+    tool = base_tool.model_copy(deep=True)
+    params = (tool.function_declarations or [])[0].parameters
+    ligands = (params.properties or {}).get("ligands") if params else None
+    items = ligands.items if ligands is not None else None
+    if items is None or items.properties is None:
+        return base_tool
+    # Guard against a future SDK making deep model_copy shallow: mutating a nested
+    # dict still shared with the base would corrupt every subsequent structure.
+    base_decls = base_tool.function_declarations or []
+    base_params = base_decls[0].parameters if base_decls else None
+    base_ligands = (base_params.properties or {}).get("ligands") if base_params else None
+    base_items = base_ligands.items if base_ligands is not None else None
+    if base_items is not None and items.properties is base_items.properties:
+        raise RuntimeError(
+            "Tool.model_copy(deep=True) did not deep-copy nested Schema properties; "
+            "refusing to mutate the shared base tool (check the google-genai version)."
+        )
+    items.properties["disputed_assessment"] = DISPUTED_ASSESSMENT_SCHEMA
+    return tool
+
+
+def build_tool_config(signals: list[DetectSignal]) -> types.GenerateContentConfig:
+    """Return the generation config for *signals* (identity ``TOOL_CONFIG`` if no mutation)."""
+    tool = build_tool_for_signals(ANNOTATION_TOOL, signals)
+    if tool is ANNOTATION_TOOL:
+        return TOOL_CONFIG
+    config = TOOL_CONFIG.model_copy(deep=True)
+    config.tools = [tool]
+    return config

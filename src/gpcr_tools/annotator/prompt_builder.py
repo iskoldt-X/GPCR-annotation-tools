@@ -4,7 +4,9 @@ import json
 from collections import defaultdict
 from typing import Any
 
-from gpcr_tools.config import LIGAND_EXCLUDE_LIST
+from gpcr_tools.annotator.detect_orchestrator import assemble_detect_block
+from gpcr_tools.config import DISPUTED_MOLECULES, LIGAND_EXCLUDE_LIST
+from gpcr_tools.detector.signals import DetectSignal
 
 
 def _get_entry(enriched_data: dict) -> dict:
@@ -126,8 +128,10 @@ def enhanced_simplify_pdb_json(enriched_data: dict) -> dict:
         if not chem_comp_id:
             continue
 
-        # Exclude common buffers and ions
-        if chem_comp_id in LIGAND_EXCLUDE_LIST:
+        # Exclude common buffers and ions -- but never strip a disputed molecule
+        # (e.g. palmitate): the model must see it to judge its role (accommodate
+        # and guide, rather than conceal).
+        if chem_comp_id in LIGAND_EXCLUDE_LIST and chem_comp_id not in DISPUTED_MOLECULES:
             continue
 
         name = chem_comp.get("name") or chem_comp_id
@@ -159,8 +163,13 @@ def build_prompt_parts(
     pdb_id: str,
     enriched_data: dict,
     prompt_template: str,
+    detect_signals: list[DetectSignal] | None = None,
 ) -> list[str]:
-    """Assembles the prompt string parts sent to Gemini."""
+    """Assembles the prompt string parts sent to Gemini.
+
+    *detect_signals* (advisory ones) add an evidence block between the metadata
+    and the paper; with none, the parts are byte-for-byte unchanged.
+    """
     parts = []
 
     # 1. System prompt template
@@ -191,6 +200,13 @@ def build_prompt_parts(
     simplified = enhanced_simplify_pdb_json(enriched_data)
     parts.append(json.dumps(simplified, indent=2))
     parts.append("\n\n")
+
+    # 5b. Detector evidence (advisory detect signals only). No advisory signals
+    # -> nothing appended, so an ordinary structure's prompt is byte-identical.
+    detect_block = assemble_detect_block(detect_signals or [])
+    if detect_block:
+        parts.append(detect_block)
+        parts.append("\n\n")
 
     # 6. Full paper header
     parts.append("--- FULL PAPER ---\n")
