@@ -32,7 +32,8 @@ def validate_receptor_identity(
     Returns a list of warning strings for ``UNIPROT_CLASH`` detections.
 
     Warning format:
-        ``f"UNIPROT_CLASH at 'receptor_info': '{ai_uid}' on Chain {chain} vs API reality [...]"``
+        ``f"UNIPROT_CLASH at 'receptor_info': '{ai_uid}' is not present on any reported
+        chain; API reality: Chain {c} -> [slugs]."``
     """
     warnings: list[str] = []
     receptor_info = best_run_data.get("receptor_info")
@@ -96,21 +97,40 @@ def validate_receptor_identity(
             f"chain(s) {', '.join(no_data_chains)}; receptor identity is not verifiable there."
         )
 
-    clashed_chains = [c for c, s in chains_with_slugs.items() if ai_uniprot not in s]
+    # The AI names ONE receptor, but a Class C dimer -- and any hetero-oligomer --
+    # legitimately carries a DIFFERENT receptor on its partner chain (e.g. GABA-B:
+    # GABBR1 on one chain, GABBR2 on the other). So a clash is the AI naming a
+    # receptor that is present on NONE of the chains it reports (a hallucinated or
+    # fusion-masked identity) -- NOT merely some reported chain carrying a different
+    # gene. When the AI's receptor IS on one of its chains the identity is confirmed.
+    #
+    # A differing partner chain is then treated as a co-protomer. Its identity is
+    # RECORDED in the oligomer analysis (all_gpcr_chains) for the curator, but is not
+    # necessarily alerted: a partner the AI did NOT report raises MISSED_PROTOMER,
+    # while one the AI folded under its own (multi-chain) chain_id does not. So if the
+    # AI over-claims its chain_id across a genuinely wrong partner, that partner is
+    # accepted here unflagged -- a deliberate trade-off, far better than the old
+    # all-or-nothing clash that destructively blocked legitimate heterodimers. (A
+    # low-severity "heteromer carries an unconfirmed second receptor" note is a
+    # follow-up for the AI-gated phase, once real model chain_id behaviour is known.)
+    matched_chains = [c for c, s in chains_with_slugs.items() if ai_uniprot in s]
 
-    if clashed_chains:
-        receptor_info["validation_status"] = VALIDATION_UNIPROT_CLASH
-        receptor_info["api_reality"] = all_slugs
-        clash_detail = ", ".join(f"Chain {c} -> {chains_with_slugs[c]}" for c in clashed_chains)
-        warnings.append(
-            f"UNIPROT_CLASH at 'receptor_info': '{ai_uniprot}' clashes on {clash_detail}."
-        )
-    elif chains_with_slugs:
-        receptor_info["validation_status"] = VALIDATION_RECEPTOR_MATCH
-        receptor_info["api_reality"] = all_slugs
-    else:
+    if not chains_with_slugs:
         # No chain carried any slug at all -> nothing to validate against.
         receptor_info["validation_status"] = VALIDATION_RECEPTOR_NO_API_DATA
         receptor_info["api_reality"] = all_slugs
+    elif matched_chains:
+        receptor_info["validation_status"] = VALIDATION_RECEPTOR_MATCH
+        receptor_info["api_reality"] = all_slugs
+    else:
+        receptor_info["validation_status"] = VALIDATION_UNIPROT_CLASH
+        receptor_info["api_reality"] = all_slugs
+        clash_detail = ", ".join(
+            f"Chain {c} -> {chains_with_slugs[c]}" for c in sorted(chains_with_slugs)
+        )
+        warnings.append(
+            f"UNIPROT_CLASH at 'receptor_info': '{ai_uniprot}' is not present on any "
+            f"reported chain; API reality: {clash_detail}."
+        )
 
     return warnings
