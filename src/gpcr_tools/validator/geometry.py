@@ -292,3 +292,49 @@ def ligand_contact_residues(
                 (burial, [(chain_name, ls, aa) for (chain_name, ls), aa in contacts.items()])
             )
     return copies
+
+
+def receptor_gprotein_contacts(
+    structure: gemmi.Structure,
+    receptor_chains: set[str],
+    galpha_chains: set[str],
+) -> dict[str, int]:
+    """Per receptor chain, the number of its residues that touch a G-alpha chain.
+
+    A residue counts once if any of its atoms is within ``GEOMETRY_CONTACT_RADIUS``
+    of any atom of a G-alpha chain. The G protein engages exactly one protomer of an
+    obligate dimer, so the chain with the contacts is the coupling protomer; the
+    partner protomer has none. Returns a count per requested receptor chain (0 for
+    a chain that never touches the G-alpha).
+    """
+    model = structure[0]
+    neighbor_search = gemmi.NeighborSearch(
+        model, structure.cell, GEOMETRY_NEIGHBOR_SEARCH_RADIUS
+    ).populate()
+    counts: dict[str, int] = {c: 0 for c in receptor_chains}
+    for chain in model:
+        if chain.name not in receptor_chains:
+            continue
+        for residue in chain:
+            if not _is_protein_atom(residue):  # count receptor protein residues only
+                continue
+            touched = False
+            for atom in residue:
+                if touched:
+                    break
+                for mark in neighbor_search.find_atoms(
+                    atom.pos, "\0", radius=GEOMETRY_NEIGHBOR_SEARCH_RADIUS
+                ):
+                    cra = mark.to_cra(model)
+                    # Only a protein atom of a G-alpha chain counts -- not a bound
+                    # nucleotide / ion that happens to sit on the G-alpha chain.
+                    if (
+                        cra.chain.name in galpha_chains
+                        and _is_protein_atom(cra.residue)
+                        and atom.pos.dist(cra.atom.pos) <= GEOMETRY_CONTACT_RADIUS
+                    ):
+                        touched = True
+                        break
+            if touched:
+                counts[chain.name] += 1
+    return counts

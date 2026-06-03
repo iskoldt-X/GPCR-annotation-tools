@@ -17,6 +17,7 @@ SIGNAL_EXCLUDED_REAL_LIGAND: str = "excluded_real_ligand"
 SIGNAL_INCIDENTAL_CANDIDATE: str = "incidental_candidate"
 SIGNAL_DUAL_ROLE_LIGAND: str = "dual_role_ligand"
 SIGNAL_SITE_REF: str = "site_ref"
+SIGNAL_COUPLING_PROTOMER: str = "coupling_protomer"
 
 SEVERITY_ADVISORY: str = "advisory"
 SEVERITY_REVIEW: str = "review"
