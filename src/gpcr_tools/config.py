@@ -786,6 +786,7 @@ CSV_SCHEMA: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
             "Name",
             "PubChemID",
             "Role",
+            "Site",
             "Title",
             "Type",
             "Date",
@@ -872,7 +873,7 @@ VALIDATION_FATAL_KEYWORDS: tuple[str, ...] = (
     "does not exist in uniprotkb",
     "not in pdb source",
     "not found in api entities",
-    # BL8 audit: "invalid uniprot" pruned — no warning text in the new system
+    # "invalid uniprot" was pruned — no warning text in the new system
     # produces this phrase.  The "Fake UniProt" and "does not exist" keywords
     # cover all UniProt validation failures.
     "hallucination alert",

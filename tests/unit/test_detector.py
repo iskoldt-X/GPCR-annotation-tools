@@ -22,7 +22,7 @@ from gpcr_tools.detector.signals import (
     DetectSignal,
     to_critical_warnings,
 )
-from gpcr_tools.detector.stage import load_detect_signals, run_detect
+from gpcr_tools.detector.stage import load_detect_signals, run_detect, run_detect_stage
 from gpcr_tools.validator.cache import SequenceCache
 
 TRANSDUCIN_A5 = "IKENLKDCGLF"
@@ -234,3 +234,35 @@ class TestDetectStage:
         sigs = run_detect("9XYZ", skip_api_checks=True)
         # PLM fires the metadata-only disputed detector even under skip_api.
         assert SIGNAL_DISPUTED_LIGAND in {s.kind for s in sigs}
+
+    def test_provided_cache_is_not_saved_by_run_detect(
+        self, ws: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A caller running many PDBs owns the shared cache; run_detect must not
+        # save a cache it did not create.
+        from gpcr_tools.config import get_config
+        from gpcr_tools.validator.cache import SequenceCache
+
+        (ws / "enriched" / "9IIX.json").write_text(
+            json.dumps(_galpha_entry("MMMMMMMMMM" + TRANSDUCIN_A5))
+        )
+        cache = SequenceCache(get_config().cache_dir / "uniprot_sequence_cache.json")
+        saves: list[int] = []
+        monkeypatch.setattr(cache, "save", lambda: saves.append(1))
+        with patch(
+            "gpcr_tools.validator.chimera.get_sequence_from_uniprot",
+            side_effect=_mock_refs(_TRANSDUCIN_TAILS),
+        ):
+            run_detect("9IIX", cache=cache)
+        assert saves == []
+
+    def test_run_detect_stage_persists_cache(self, ws: Path) -> None:
+        (ws / "enriched" / "9IIX.json").write_text(
+            json.dumps(_galpha_entry("MMMMMMMMMM" + TRANSDUCIN_A5))
+        )
+        with patch(
+            "gpcr_tools.validator.chimera.get_sequence_from_uniprot",
+            side_effect=_mock_refs(_TRANSDUCIN_TAILS),
+        ):
+            run_detect_stage("9IIX")
+        assert (ws / "cache" / "uniprot_sequence_cache.json").is_file()

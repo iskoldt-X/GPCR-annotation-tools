@@ -114,6 +114,30 @@ def create_display_copy(data: Any) -> Any:
         return data
 
 
+def ligand_detector_notes(lig: dict) -> list[str]:
+    """Advisory one-liners for a ligand's detector findings (None-safe).
+
+    The geometry-derived binding site (``site_ref``) and the model's judgment on
+    a disputed molecule (``disputed_assessment``). Returned as plain strings so
+    the formatting logic is testable independently of the Rich panel.
+    """
+    notes: list[str] = []
+    site = lig.get("site_ref")
+    if site:
+        notes.append(f"Site: {site}")
+    assessment = lig.get("disputed_assessment")
+    if isinstance(assessment, dict):
+        verdict = (
+            "functional ligand"
+            if assessment.get("is_functional_ligand")
+            else "incidental / structural"
+        )
+        conf = assessment.get("confidence") or "?"
+        evidence = assessment.get("evidence") or ""
+        notes.append(f"Disputed: {verdict} (confidence {conf}) — {evidence}")
+    return notes
+
+
 def display_ligand_validation_panel(ligands_data: list) -> None:
     """Render a status-aware summary panel for ligands before the main review.
 
@@ -123,7 +147,9 @@ def display_ligand_validation_panel(ligands_data: list) -> None:
         return
 
     has_any_status = any(
-        isinstance(lig, dict) and lig.get("validation_status") for lig in ligands_data
+        isinstance(lig, dict)
+        and (lig.get("validation_status") or lig.get("disputed_assessment") or lig.get("site_ref"))
+        for lig in ligands_data
     )
     if not has_any_status:
         return
@@ -173,6 +199,12 @@ def display_ligand_validation_panel(ligands_data: list) -> None:
         else:
             status_text = Text(status or "N/A", style="dim")
             detail = Text("")
+
+        # Detector advisories (non-gating): the geometry-derived binding site and
+        # the model's judgment on a disputed molecule, so the curator can act on
+        # them. They never block the review -- they only inform it.
+        for note in ligand_detector_notes(lig):
+            detail.append(f"\n{note}", style="magenta")
 
         table.add_row(name, comp_id, status_text, detail)
 
