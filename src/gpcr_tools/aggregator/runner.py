@@ -6,12 +6,10 @@
 
 ``aggregate_all()`` iterates pending PDBs with per-PDB error isolation.
 
-Blood Lesson 2 — Atomic writes:
-    ALL output files are written to temp files first, then ``os.replace``-d
-    together after all writes succeed.  ``try...finally`` guarantees cleanup.
-
-Blood Lesson 5 — Truthiness:
-    ``if enriched is None:`` — NOT ``if not enriched:``.
+Conventions:
+    - Atomic writes: all output files are written to temp files first, then
+      ``os.replace``-d together after every write succeeds (``try...finally`` cleanup).
+    - Truthiness: ``if enriched is None:`` — NOT ``if not enriched:``.
 """
 
 from __future__ import annotations
@@ -62,7 +60,7 @@ from gpcr_tools.validator.cache import SequenceCache, ValidationCache
 from gpcr_tools.validator.chimera import get_chimera_analysis
 from gpcr_tools.validator.integrity_checker import validate_all
 from gpcr_tools.validator.ligand_validator import validate_and_enrich_ligands
-from gpcr_tools.validator.oligomer import analyze_oligomer
+from gpcr_tools.validator.oligomer import analyze_oligomer, reconcile_missed_polymers
 from gpcr_tools.validator.receptor_validator import validate_receptor_identity
 
 logger = logging.getLogger(__name__)
@@ -118,6 +116,10 @@ def _build_validation_report(
     # Integrity checks (ghost chain, fake UniProt/PubChem, ghost ligand, method)
     integrity_warnings = validate_all(pdb_id, best_run_data, enriched_entry, cache=validation_cache)
     report["critical_warnings"].extend(integrity_warnings)
+
+    # Non-GPCR polymer chains present in the structure but never annotated by the
+    # model (the oligomer missed-protomer check covers GPCR chains only).
+    report["critical_warnings"].extend(reconcile_missed_polymers(enriched_entry, best_run_data))
 
     # A chimeric G-protein's alpha-subunit identity cannot be resolved reliably
     # from sequence alone (the tail is degenerate across subtypes), so force a
