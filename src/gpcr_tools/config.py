@@ -648,6 +648,21 @@ GPCR_SLUG_NEGATIVE_PREFIXES: tuple[str, ...] = (
 )
 
 # ---------------------------------------------------------------------------
+# Crystallization fusion partners (BRIL / T4-lysozyme) — engineering aids fused
+# into a receptor to aid crystallization, not part of the biological receptor.
+# A receptor entity carrying one is surfaced as an advisory note.
+# ---------------------------------------------------------------------------
+
+CRYSTALLIZATION_FUSION_SLUGS: tuple[str, ...] = ("c562", "enlys")
+CRYSTALLIZATION_FUSION_KEYWORDS: tuple[str, ...] = (
+    "bril",
+    "b562",
+    "cytochrome b562",
+    "lysozyme",
+    "endolysin",
+)
+
+# ---------------------------------------------------------------------------
 # Download log status values (produced by papers/downloader, consumed by papers/watcher)
 # ---------------------------------------------------------------------------
 
@@ -679,6 +694,7 @@ ALERT_PREFIX_ALGO_WARNING: str = "[ALGO WARNING]"
 ALERT_PREFIX_API_UNAVAILABLE: str = "[API_UNAVAILABLE]"
 ALERT_PREFIX_CHIMERIC_REVIEW: str = "[CHIMERIC G-PROTEIN]"
 ALERT_PREFIX_MISSED_POLYMER: str = "[UNANNOTATED CHAIN]"
+ALERT_PREFIX_FUSION_NOTE: str = "[CRYSTALLIZATION FUSION]"
 
 # ---------------------------------------------------------------------------
 # Annotator function call name

@@ -60,7 +60,11 @@ from gpcr_tools.validator.cache import SequenceCache, ValidationCache
 from gpcr_tools.validator.chimera import get_chimera_analysis
 from gpcr_tools.validator.integrity_checker import validate_all
 from gpcr_tools.validator.ligand_validator import validate_and_enrich_ligands
-from gpcr_tools.validator.oligomer import analyze_oligomer, reconcile_missed_polymers
+from gpcr_tools.validator.oligomer import (
+    analyze_oligomer,
+    detect_crystallization_fusions,
+    reconcile_missed_polymers,
+)
 from gpcr_tools.validator.receptor_validator import validate_receptor_identity
 
 logger = logging.getLogger(__name__)
@@ -120,6 +124,10 @@ def _build_validation_report(
     # Non-GPCR polymer chains present in the structure but never annotated by the
     # model (the oligomer missed-protomer check covers GPCR chains only).
     report["critical_warnings"].extend(reconcile_missed_polymers(enriched_entry, best_run_data))
+
+    # Receptor-side crystallization fusions (BRIL / T4 lysozyme) -- advisory,
+    # non-blocking: recorded for the curator, does not gate accept-all.
+    report["algo_notes"].extend(detect_crystallization_fusions(enriched_entry))
 
     # A chimeric G-protein's alpha-subunit identity cannot be resolved reliably
     # from sequence alone (the tail is degenerate across subtypes), so force a
