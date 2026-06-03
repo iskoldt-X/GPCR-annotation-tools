@@ -14,11 +14,12 @@ from typing import Any
 
 from google.genai.errors import APIError
 
+from gpcr_tools.annotator.detect_orchestrator import build_tool_config, build_tool_for_signals
 from gpcr_tools.annotator.gemini_client import get_client
 from gpcr_tools.annotator.pdf_compressor import compress_pdf_if_needed
 from gpcr_tools.annotator.post_processor import post_process_annotation
 from gpcr_tools.annotator.prompt_builder import build_prompt_parts
-from gpcr_tools.annotator.schema import ANNOTATION_TOOL, TOOL_CONFIG
+from gpcr_tools.annotator.schema import ANNOTATION_TOOL
 from gpcr_tools.config import (
     ANNOTATOR_FUNCTION_NAME,
     GEMINI_BASE_BACKOFF,
@@ -31,6 +32,8 @@ from gpcr_tools.config import (
     get_gemini_model_name,
     model_run_subdir,
 )
+from gpcr_tools.detector.signals import SEVERITY_ADVISORY
+from gpcr_tools.detector.stage import load_detect_signals
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +110,16 @@ def run_single_pdb(
             return
 
         try:
-            parts = build_prompt_parts(pdb_id, enriched_data, prompt_text)
+            # Detect signals route advisory evidence into the prompt + tool; with
+            # none (or only review signals) the prompt and config are unchanged.
+            detect_signals = load_detect_signals(pdb_id)
+            advisory_kinds = sorted(
+                {s.kind for s in detect_signals if s.severity == SEVERITY_ADVISORY}
+            )
+            parts = build_prompt_parts(
+                pdb_id, enriched_data, prompt_text, detect_signals=detect_signals
+            )
+            run_config = build_tool_config(detect_signals)
             contents: list[Any] = [*parts, uploaded_file]
 
             def do_run(run_num: int) -> None:
@@ -123,7 +135,7 @@ def run_single_pdb(
                         response = run_client.models.generate_content(
                             model=model_name,
                             contents=contents,
-                            config=TOOL_CONFIG,
+                            config=run_config,
                         )
 
                         if not response.function_calls:
@@ -144,6 +156,7 @@ def run_single_pdb(
                             "model_requested": model_name,
                             "model_served": getattr(response, "model_version", None),
                             "prompt": prompt_id,
+                            "detect_advisory": advisory_kinds,
                             "run": run_num,
                             "mode": "single",
                             "timestamp": datetime.now(UTC).isoformat(),
@@ -261,7 +274,11 @@ def build_and_submit_batch(
                     logger.error("[%s] Failed to upload PDF: %s", pdb_id, e)
                     continue
 
-        parts = build_prompt_parts(pdb_id, enriched_data, prompt_text)
+        detect_signals = load_detect_signals(pdb_id)
+        parts = build_prompt_parts(
+            pdb_id, enriched_data, prompt_text, detect_signals=detect_signals
+        )
+        tool_for_pdb = build_tool_for_signals(ANNOTATION_TOOL, detect_signals)
 
         # We need to construct the request dict for the batch API
         # The schema for the batch API contents is identical to generate_content
@@ -277,9 +294,10 @@ def build_and_submit_batch(
                 {"parts": [{"fileData": {"fileUri": pdf_uri, "mimeType": "application/pdf"}}]}
             )
 
-            # The tool schema must be provided as a dict
-            assert ANNOTATION_TOOL.function_declarations is not None
-            fn_decl = ANNOTATION_TOOL.function_declarations[0]
+            # The tool schema must be provided as a dict (per-PDB: augmented when
+            # a disputed signal is present, identical to base otherwise).
+            assert tool_for_pdb.function_declarations is not None
+            fn_decl = tool_for_pdb.function_declarations[0]
             tool_dict = {
                 "functionDeclarations": [
                     {

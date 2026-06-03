@@ -10,6 +10,7 @@ from gpcr_tools.config import (
     model_run_subdir,
     reset_config,
 )
+from gpcr_tools.detector.signals import SEVERITY_ADVISORY, SIGNAL_DISPUTED_LIGAND, DetectSignal
 
 
 def test_run_single_pdb_skips_if_done(tmp_path, monkeypatch):
@@ -157,10 +158,23 @@ def test_run_single_pdb_writes_provenance(tmp_path, monkeypatch):
 
     monkeypatch.setattr("gpcr_tools.annotator.runner.get_client", lambda: mock_client)
     monkeypatch.setattr("gpcr_tools.annotator.runner.compress_pdf_if_needed", lambda a, b: a)
-    monkeypatch.setattr("gpcr_tools.annotator.runner.build_prompt_parts", lambda *a: ["ctx"])
+    monkeypatch.setattr("gpcr_tools.annotator.runner.build_prompt_parts", lambda *a, **k: ["ctx"])
     monkeypatch.setattr(
         "gpcr_tools.annotator.runner.post_process_annotation",
         lambda args: {"receptor_info": args.get("receptor_info")},
+    )
+    # An advisory signal must be recorded in provenance.
+    monkeypatch.setattr(
+        "gpcr_tools.annotator.runner.load_detect_signals",
+        lambda pdb_id: [
+            DetectSignal(
+                kind=SIGNAL_DISPUTED_LIGAND,
+                target_ref="ligands",
+                summary="PLM disputed",
+                payload={"comp_id": "PLM"},
+                severity=SEVERITY_ADVISORY,
+            )
+        ],
     )
 
     runner.run_single_pdb(
@@ -185,6 +199,7 @@ def test_run_single_pdb_writes_provenance(tmp_path, monkeypatch):
     assert prov["model_requested"] == "gemini-2.5-pro"
     assert prov["model_served"] == "gemini-2.5-pro-002"
     assert prov["prompt"] == "v5"
+    assert prov["detect_advisory"] == [SIGNAL_DISPUTED_LIGAND]
     assert prov["run"] == 1
     assert prov["mode"] == "single"
 
@@ -405,7 +420,7 @@ def test_run_outputs_namespaced_by_model(tmp_path, monkeypatch):
     mock_client.models.generate_content.return_value = mock_response
     monkeypatch.setattr("gpcr_tools.annotator.runner.get_client", lambda: mock_client)
     monkeypatch.setattr("gpcr_tools.annotator.runner.compress_pdf_if_needed", lambda a, b: a)
-    monkeypatch.setattr("gpcr_tools.annotator.runner.build_prompt_parts", lambda *a: ["ctx"])
+    monkeypatch.setattr("gpcr_tools.annotator.runner.build_prompt_parts", lambda *a, **k: ["ctx"])
     monkeypatch.setattr(
         "gpcr_tools.annotator.runner.post_process_annotation", lambda args: {"ok": True}
     )

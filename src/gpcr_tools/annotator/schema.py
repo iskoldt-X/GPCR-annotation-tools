@@ -383,6 +383,29 @@ ANNOTATION_TOOL = types.Tool(
     ]
 )
 
+# Optional per-ligand field injected by detect_orchestrator.build_tool_for_signals
+# ONLY when a disputed-molecule signal is present (e.g. cholesterol, palmitate).
+# It is never part of the base tool, so an ordinary structure's schema is unchanged.
+DISPUTED_ASSESSMENT_SCHEMA = types.Schema(
+    type=types.Type.OBJECT,
+    description=(
+        "Only for a disputed molecule flagged by the detector (e.g. cholesterol, "
+        "palmitate): your judgment of whether it is a functional ligand or an "
+        "incidental / structural component, with the evidence behind it."
+    ),
+    properties={
+        "is_functional_ligand": types.Schema(
+            type=types.Type.BOOLEAN,
+            description="True if it acts as a functional ligand; False if incidental / structural.",
+        ),
+        "confidence": types.Schema(type=types.Type.STRING, enum=["High", "Medium", "Low"]),
+        "evidence": types.Schema(
+            type=types.Type.STRING,
+            description="A direct paper quote or brief reasoning supporting the judgment.",
+        ),
+    },
+)
+
 TOOL_CONFIG = types.GenerateContentConfig(
     tools=[ANNOTATION_TOOL],
     temperature=0.0,

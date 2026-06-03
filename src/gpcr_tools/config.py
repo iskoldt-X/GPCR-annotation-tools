@@ -433,7 +433,19 @@ LIGAND_EXCLUDE_LIST: frozenset[str] = frozenset(
 # NOT here — it is not on the exclude list (the model already sees it), and its
 # agonist-vs-structural-lipid role is handled by the disputed-molecule prompt
 # fork, not this detector.
+# NOTE: PLM is ALSO in DISPUTED_MOLECULES (below), which now OWNS it: the
+# disputed fork un-strips PLM and guides the model, so detect_excluded_real_ligands
+# subtracts DISPUTED_MOLECULES and PLM no longer fires a (now-false) "hidden"
+# review. This set is the framework for any future excluded-but-NOT-disputed
+# real ligand; with only PLM today it is effectively dormant.
 EXCLUDED_REAL_LIGAND_INTEREST: frozenset[str] = frozenset({"PLM"})
+
+# Disputed molecules: present in many structures as EITHER a functional ligand OR
+# an incidental / structural lipid. The disputed-molecule prompt fork presents
+# them to the model (any member on LIGAND_EXCLUDE_LIST, e.g. PLM, is un-stripped
+# from the simplified metadata so the model can see it) and guides it to judge
+# the role, recording a dedicated disputed_assessment. ~CLR 22% / PLM 5% of corpus.
+DISPUTED_MOLECULES: frozenset[str] = frozenset({"CLR", "PLM"})
 
 # ---------------------------------------------------------------------------
 # Chimera statuses
