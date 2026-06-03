@@ -524,6 +524,16 @@ GEOMETRY_NEIGHBOR_SEARCH_RADIUS: float = 6.0  # >= every query radius above
 GEOMETRY_DUAL_ROLE_MAX_COPIES: int = 3
 GEOMETRY_DUAL_ROLE_POCKET_JACCARD_MAX: float = 0.5
 
+# G-protein coupling protomer (detect stage, geometry). A Class C receptor is an
+# obligate dimer and only ONE protomer engages the G protein; in a heterodimer
+# that protomer is often NOT the agonist-binding one (GABA-B: GABBR1 binds, GABBR2
+# couples). The G-alpha contacts exactly one receptor chain, so the chain with the
+# most G-alpha interface residues is the coupling (active/primary) protomer.
+# Measured across the corpus: the coupling protomer carries ~11-29 interface
+# residues, the partner 0 -- a decisive, upstream-computable separation.
+GEOMETRY_COUPLING_MIN_CONTACTS: int = 4  # a real receptor<->G-alpha interface
+GEOMETRY_COUPLING_DECISIVE_RATIO: float = 0.25  # runner-up must be <= this * top, else ambiguous
+
 # ---------------------------------------------------------------------------
 # Ligand binding-site classification (site_ref)
 # ---------------------------------------------------------------------------

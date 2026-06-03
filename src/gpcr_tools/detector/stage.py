@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from gpcr_tools.config import get_config
+from gpcr_tools.detector.coupling import detect_coupling_protomer
 from gpcr_tools.detector.geometry import detect_dual_role_ligands
 from gpcr_tools.detector.gprotein import detect_g_protein_identity
 from gpcr_tools.detector.ligands import detect_excluded_real_ligands, detect_incidental_candidates
@@ -88,6 +89,7 @@ def run_detect(
         signals.extend(detect_g_protein_identity(pdb_id, entry, cache))
         signals.extend(detect_dual_role_ligands(pdb_id, entry, cfg.cache_dir))
         signals.extend(detect_site_refs(pdb_id, entry, cfg.cache_dir))
+        signals.extend(detect_coupling_protomer(pdb_id, entry, cfg.cache_dir))
         if owns_cache:
             cache.save()
     # Future detectors (entity reconciliation, ...) append here.
