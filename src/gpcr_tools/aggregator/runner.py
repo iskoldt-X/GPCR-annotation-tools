@@ -44,6 +44,7 @@ from gpcr_tools.config import (
     AGG_STATUS_COMPLETED,
     AGG_STATUS_FAILED,
     ALERT_PREFIX_ALGO_WARNING,
+    ALERT_PREFIX_ALPHA5_GRAFT,
     ALERT_PREFIX_CHIMERIC_REVIEW,
     ALERT_PREFIX_HALLUCINATION,
     ALERT_PREFIX_TIE_BREAKER_ALIGNED,
@@ -197,6 +198,23 @@ def _build_validation_report(
                 f"{ALERT_PREFIX_ALGO_WARNING} at 'chimera_analysis': "
                 f"alpha5 '{a5_tail}' does not map to a single coupling family "
                 f"({members}); G-alpha identity cannot be determined automatically."
+            )
+
+        # alpha5-graft: the engineered scaffold differs from the functional
+        # alpha5 (~6% of G-alpha structures). Record the backbone for provenance
+        # (export still collapses to the functional identity) and note it --
+        # informational, not a conflict (the alpha5 IS the identity, per Gaspar).
+        if chimera_result.get("is_alpha5_graft"):
+            backbone_slug = chimera_result.get("backbone_slug")
+            backbone_family = chimera_result.get("backbone_family")
+            g_block = (best_run_data.get("signaling_partners") or {}).get("g_protein")
+            if isinstance(g_block, dict):
+                g_block["chimera_backbone"] = f"{backbone_slug} ({backbone_family} scaffold)"
+            report["algo_notes"].append(
+                f"{ALERT_PREFIX_ALPHA5_GRAFT} at "
+                f"'signaling_partners.g_protein.alpha_subunit': alpha5-graft chimera "
+                f"-- backbone {backbone_slug} ({backbone_family}), functional alpha5 "
+                f"= {family}; identity follows the alpha5 per convention."
             )
     elif status == CHIMERA_STATUS_NO_G_PROTEIN:
         if ai_uniprot and str(ai_uniprot).lower() not in EMPTY_VALUES:

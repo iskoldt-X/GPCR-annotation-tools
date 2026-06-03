@@ -458,6 +458,10 @@ CHIMERA_STATUS_SKIPPED: str = "skipped"
 CHIMERA_A5_WINDOW: int = 11
 CHIMERA_A5_ANCHOR_MIN_SCORE: int = 8
 
+# Cached UniProt reference sequences expire after this many days, so a reference
+# that drifts upstream is eventually refetched instead of persisting forever.
+SEQUENCE_CACHE_TTL_DAYS: int = 30
+
 # How a subtype call was resolved against the alpha5 window.
 CHIMERA_SUBTYPE_RESOLVED: str = "resolved"
 CHIMERA_SUBTYPE_INSEPARABLE_SET: str = "inseparable_set"
@@ -695,6 +699,7 @@ ALERT_PREFIX_API_UNAVAILABLE: str = "[API_UNAVAILABLE]"
 ALERT_PREFIX_CHIMERIC_REVIEW: str = "[CHIMERIC G-PROTEIN]"
 ALERT_PREFIX_MISSED_POLYMER: str = "[UNANNOTATED CHAIN]"
 ALERT_PREFIX_FUSION_NOTE: str = "[CRYSTALLIZATION FUSION]"
+ALERT_PREFIX_ALPHA5_GRAFT: str = "[ALPHA5 GRAFT]"
 
 # ---------------------------------------------------------------------------
 # Annotator function call name

@@ -198,6 +198,9 @@ def _base_result() -> dict[str, Any]:
         "a5_window": CHIMERA_A5_WINDOW,
         "a5_tail": None,
         "candidates_checked": [],
+        "backbone_family": None,
+        "backbone_slug": None,
+        "is_alpha5_graft": False,
         "error": None,
     }
 
@@ -217,7 +220,8 @@ def get_chimera_analysis(
     Returns a result dict with keys: ``status``, ``family``,
     ``family_confident``, ``subtype``, ``subtype_resolution``,
     ``candidate_set``, ``score``, ``a5_window``, ``a5_tail``,
-    ``candidates_checked``, ``error``.
+    ``candidates_checked``, ``backbone_family``, ``backbone_slug``,
+    ``is_alpha5_graft``, ``error``.
     """
     result = _base_result()
     w = CHIMERA_A5_WINDOW
@@ -290,6 +294,28 @@ def get_chimera_analysis(
     family = next(iter(families)) if len(families) == 1 else None
     subtype, resolution = _resolve_subtype(winners, best_score)
 
+    # Backbone (scaffold) family from the entity's attached G-alpha slug. When it
+    # differs from the alpha5-derived family this is an alpha5-graft chimera
+    # (e.g. a mini-Gs scaffold carrying a grafted Gq alpha5). The alpha5
+    # (functional) identity wins by convention; the backbone is informational, so
+    # it can never corrupt `family` (computed above, independent of this block).
+    # Detection is family-granular: an intra-family graft (e.g. a gnas2 scaffold
+    # with a gnal alpha5, both Gs) is intentionally not flagged here -- that needs
+    # the deferred full-length subtype refinement. The first attached G-alpha slug
+    # wins; real entities carry one G-alpha annotation (a second uniprot, when
+    # present, is the receptor of a fusion and is skipped by the family lookup).
+    backbone_slug: str | None = None
+    backbone_family: str | None = None
+    for u in g_alpha_entity.get("uniprots") or []:
+        if not isinstance(u, dict):
+            continue
+        slug = u.get("gpcrdb_entry_name_slug")
+        if slug and slug in A5_SUBTYPE_FAMILY:
+            backbone_slug = slug
+            backbone_family = A5_SUBTYPE_FAMILY[slug]
+            break
+    is_graft = bool(backbone_family and family and backbone_family != family)
+
     result.update(
         status=CHIMERA_STATUS_SUCCESS,
         family=family,
@@ -300,5 +326,8 @@ def get_chimera_analysis(
         score=best_score,
         a5_tail=a5_tail,
         candidates_checked=list(scored.keys()),
+        backbone_family=backbone_family,
+        backbone_slug=backbone_slug,
+        is_alpha5_graft=is_graft,
     )
     return result

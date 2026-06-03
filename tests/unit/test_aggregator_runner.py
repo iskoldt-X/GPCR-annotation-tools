@@ -91,6 +91,52 @@ class TestChimeraAlpha5Routing:
         assert report["algo_conflicts"] == []
         assert any("gnas2_human" in n for n in report["algo_notes"])
 
+    def test_alpha5_graft_records_backbone_and_notes(self, monkeypatch):
+        monkeypatch.setattr("gpcr_tools.aggregator.runner.validate_all", lambda *a, **k: [])
+        best = {
+            "signaling_partners": {
+                "g_protein": {"alpha_subunit": {"uniprot_entry_name": "gna11_human"}}
+            }
+        }
+        chim = _success(
+            family="Gq/11",
+            subtype="gna11_human",
+            subtype_resolution=CHIMERA_SUBTYPE_RESOLVED,
+            candidate_set=["gna11_human"],
+            score=11,
+            a5_tail="LQMNLREYNLV",
+            is_alpha5_graft=True,
+            backbone_slug="gnas2_human",
+            backbone_family="Gs",
+        )
+        report = _build_validation_report("X", best, {}, [], chim, None)
+        # Informational note recorded, never a blocking critical warning.
+        assert any("ALPHA5 GRAFT" in n for n in report["algo_notes"])
+        assert not any("ALPHA5 GRAFT" in w for w in report["critical_warnings"])
+        # Backbone recorded on the annotation for provenance.
+        g_protein = best["signaling_partners"]["g_protein"]
+        assert g_protein["chimera_backbone"] == "gnas2_human (Gs scaffold)"
+
+    def test_no_graft_leaves_no_backbone_field(self, monkeypatch):
+        monkeypatch.setattr("gpcr_tools.aggregator.runner.validate_all", lambda *a, **k: [])
+        best = {
+            "signaling_partners": {
+                "g_protein": {"alpha_subunit": {"uniprot_entry_name": "gnas2_human"}}
+            }
+        }
+        chim = _success(
+            family="Gs",
+            subtype="gnas2_human",
+            subtype_resolution=CHIMERA_SUBTYPE_RESOLVED,
+            candidate_set=["gnas2_human"],
+            score=11,
+            a5_tail="QRMHLRQYELL",
+            is_alpha5_graft=False,
+        )
+        report = _build_validation_report("X", best, {}, [], chim, None)
+        assert not any("ALPHA5 GRAFT" in n for n in report["algo_notes"])
+        assert "chimera_backbone" not in best["signaling_partners"]["g_protein"]
+
     def test_resolved_subtype_mismatch_is_conflict(self, monkeypatch):
         chim = _success(
             family="Gs",

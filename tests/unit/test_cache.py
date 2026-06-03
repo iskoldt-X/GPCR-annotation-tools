@@ -84,6 +84,31 @@ class TestSequenceCache:
         cache.set("P999", "ABC")
         assert "P999" in cache
 
+    def test_expired_entry_is_a_miss(self, tmp_path: Path) -> None:
+        cache = SequenceCache(tmp_path / "seq.json", ttl_days=30)
+        cache.set("P12345", "MDEFGH", now=1000.0)
+        # Fresh up to and including exactly the TTL (strict > boundary); expired after.
+        assert cache.get("P12345", now=1000.0 + 29 * 86400) == "MDEFGH"
+        assert cache.get("P12345", now=1000.0 + 30 * 86400) == "MDEFGH"
+        assert cache.get("P12345", now=1000.0 + 31 * 86400) is None
+
+    def test_legacy_plain_string_entry_treated_as_expired(self, tmp_path: Path) -> None:
+        # A pre-TTL cache stored bare strings; unknown age -> refetch (miss).
+        path = tmp_path / "seq.json"
+        path.write_text(json.dumps({"P12345": "MDEFGH"}))
+        cache = SequenceCache(path)
+        assert "P12345" in cache  # the key is present
+        assert cache.get("P12345") is None  # but treated as expired
+
+    def test_reload_preserves_freshness(self, tmp_path: Path) -> None:
+        path = tmp_path / "seq.json"
+        cache1 = SequenceCache(path)
+        cache1.set("P12345", "ACDEF", now=2000.0)
+        cache1.save()
+        cache2 = SequenceCache(path)
+        assert cache2.get("P12345", now=2000.0 + 1 * 86400) == "ACDEF"
+        assert cache2.get("P12345", now=2000.0 + 31 * 86400) is None
+
 
 class TestAtomicWrite:
     def test_file_written(self, tmp_path: Path) -> None:
