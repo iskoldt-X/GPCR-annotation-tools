@@ -38,13 +38,18 @@ from gpcr_tools.config import (
     SITE_REF_EXTRACELLULAR_VESTIBULE,
     SITE_REF_INTRACELLULAR,
     SITE_REF_MIN_MAPPED_CONTACTS,
+    SITE_REF_MIN_ORTHOSTERIC_CORE,
     SITE_REF_ORTHOSTERIC,
     SITE_REF_UNKNOWN,
     VESTIBULE_SEGMENTS,
 )
 from gpcr_tools.detector.signals import SEVERITY_ADVISORY, SIGNAL_SITE_REF, DetectSignal
 from gpcr_tools.validator.api_clients import fetch_polymer_alignment
-from gpcr_tools.validator.generic_numbering import map_contacts, receptor_class
+from gpcr_tools.validator.generic_numbering import (
+    load_numbering_table,
+    map_contacts,
+    receptor_class,
+)
 from gpcr_tools.validator.geometry import ligand_contact_residues, load_structure
 from gpcr_tools.validator.oligomer import build_nonpolymer_instance_index, is_gpcr_slug
 
@@ -65,7 +70,10 @@ def classify_site(
     orthosteric_core = (
         ORTHOSTERIC_CORE_GENERIC_T2 if gpcr_class == GPCR_CLASS_T2 else ORTHOSTERIC_CORE_GENERIC
     )
-    hits_core = bool(generic_numbers & orthosteric_core)
+    # Require several core contacts: a lone grazing core residue (a vestibule
+    # ligand brushing the top of TM3, or a lipid on the bundle's outer face) is
+    # not an orthosteric signature.
+    hits_core = len(generic_numbers & orthosteric_core) >= SITE_REF_MIN_ORTHOSTERIC_CORE
 
     # Class C: the orthosteric site is the extracellular Venus flytrap; the 7TM
     # bundle hosts only allosteric modulators. ECD is checked before the 7TM core
@@ -100,18 +108,28 @@ def classify_site(
 
 
 def _gpcr_chain_accessions(enriched_entry: dict[str, Any]) -> dict[str, str]:
-    """Map each GPCR receptor author chain to its UniProt accession (None-safe)."""
+    """Map each GPCR receptor author chain to its UniProt accession (None-safe).
+
+    ``is_gpcr_slug`` is a permissive denylist, so a crystallization fusion partner
+    (rubredoxin, flavodoxin, ...) on the same entity can also pass it. Among the
+    candidates, prefer the accession that is actually in the numbering table (the
+    real receptor) over a fusion partner that merely survives the denylist.
+    """
+    table = load_numbering_table()
     chains: dict[str, str] = {}
     for entity in enriched_entry.get("polymer_entities") or []:
         if not isinstance(entity, dict):
             continue
-        accession: str | None = None
-        for u in entity.get("uniprots") or []:
-            if isinstance(u, dict) and is_gpcr_slug(u.get("gpcrdb_entry_name_slug") or ""):
-                accession = u.get("rcsb_id")
-                break
-        if not accession:
+        candidates: list[str] = [
+            u["rcsb_id"]
+            for u in entity.get("uniprots") or []
+            if isinstance(u, dict)
+            and is_gpcr_slug(u.get("gpcrdb_entry_name_slug") or "")
+            and u.get("rcsb_id")
+        ]
+        if not candidates:
             continue
+        accession = next((acc for acc in candidates if acc in table), candidates[0])
         for inst in entity.get("polymer_entity_instances") or []:
             if not isinstance(inst, dict):
                 continue
@@ -132,11 +150,14 @@ def _annotated_ligands(enriched_entry: dict[str, Any]) -> set[str]:
 
 
 def _studied_ligands(enriched_entry: dict[str, Any]) -> set[str]:
-    """Studied ligands (RCSB subject of investigation) plus disputed molecules.
+    """Ligands flagged by RCSB as a subject of investigation.
 
-    Only these earn a multi-site "emit one entry per site" nudge: an incidental
-    additive scattered across grooves would otherwise be told to split into
-    several entries, which would mislead the model.
+    Only these earn a multi-site "emit one entry per site" nudge. Disputed
+    molecules (cholesterol, palmitate) are deliberately NOT included here: they
+    are usually scattered structural lipid with many copies in different grooves,
+    and telling the model to emit one entry per copy would mislead it. A disputed
+    molecule that is genuinely a studied dual-site ligand is also marked subject
+    of investigation, so it still qualifies through the check below.
     """
     studied: set[str] = set()
     for entity in enriched_entry.get("nonpolymer_entities") or []:
@@ -146,9 +167,6 @@ def _studied_ligands(enriched_entry: dict[str, Any]) -> set[str]:
             "nonpolymer_comp_id"
         )
         if not comp_id:
-            continue
-        if comp_id in DISPUTED_MOLECULES:
-            studied.add(comp_id)
             continue
         annotations = entity.get("rcsb_nonpolymer_entity_annotation")
         if isinstance(annotations, list) and any(

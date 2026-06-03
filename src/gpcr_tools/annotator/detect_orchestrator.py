@@ -88,8 +88,9 @@ def _format_dual_role(payload: dict[str, Any]) -> str:
     This provides geometric evidence that the ligand sits in more than one pocket
     (so it may play more than one role); it deliberately does NOT command a split
     into one entry per site -- the site_ref signal owns that instruction, since it
-    names each site. Both detectors gate on subject-of-investigation, so a
-    dual-role ligand always also carries the site_ref split nudge.
+    names each site. When site_ref resolves the pockets to distinct site classes
+    it carries the split nudge; if both pockets are the same class it does not, and
+    this burial evidence still flags the possible multiple roles for the model.
     """
     comp = payload.get("comp_id") or "?"
     chain = payload.get("gpcr_chain") or "?"
