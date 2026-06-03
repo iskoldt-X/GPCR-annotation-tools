@@ -33,7 +33,6 @@ _ENTRY_9IIX = {
     ],
     "nonpolymer_entities": [
         {
-            "rcsb_nonpolymer_entity_annotation": [{"type": "SUBJECT_OF_INVESTIGATION"}],
             "rcsb_nonpolymer_entity_container_identifiers": {"nonpolymer_comp_id": "A1AEI"},
         }
     ],

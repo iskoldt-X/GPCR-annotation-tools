@@ -423,9 +423,6 @@ query structure($id: String!) {
         asym_ids
         nonpolymer_comp_id
       }
-      rcsb_nonpolymer_entity_annotation {
-        type
-      }
       nonpolymer_entity_instances {
         rcsb_nonpolymer_entity_instance_container_identifiers {
           auth_seq_id
@@ -438,8 +435,6 @@ query structure($id: String!) {
           ranking_model_fit
           ranking_model_geometry
           average_occupancy
-          is_subject_of_investigation
-          is_subject_of_investigation_provenance
         }
       }
       rcsb_nonpolymer_entity {

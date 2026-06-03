@@ -11,10 +11,11 @@ from pathlib import Path
 
 import pytest
 
+from gpcr_tools.config import DISPUTED_MOLECULES, LIGAND_EXCLUDE_LIST
 from gpcr_tools.detector import geometry as detector_geometry
 from gpcr_tools.detector.geometry import (
+    _candidate_comp_ids,
     _gpcr_auth_chains,
-    _subject_of_investigation_comp_ids,
     detect_dual_role_ligands,
 )
 from gpcr_tools.detector.signals import SIGNAL_DUAL_ROLE_LIGAND
@@ -38,7 +39,7 @@ def _copy(
     )
 
 
-def _entry(soi_comps: tuple[str, ...] = ("A1AEI",), *, gpcr_slug: str = "t2r14_human") -> dict:
+def _entry(comps: tuple[str, ...] = ("A1AEI",), *, gpcr_slug: str = "t2r14_human") -> dict:
     return {
         "polymer_entities": [
             {
@@ -49,11 +50,8 @@ def _entry(soi_comps: tuple[str, ...] = ("A1AEI",), *, gpcr_slug: str = "t2r14_h
             }
         ],
         "nonpolymer_entities": [
-            {
-                "rcsb_nonpolymer_entity_annotation": [{"type": "SUBJECT_OF_INVESTIGATION"}],
-                "rcsb_nonpolymer_entity_container_identifiers": {"nonpolymer_comp_id": comp},
-            }
-            for comp in soi_comps
+            {"rcsb_nonpolymer_entity_container_identifiers": {"nonpolymer_comp_id": comp}}
+            for comp in comps
         ],
     }
 
@@ -79,13 +77,15 @@ class TestEnrichedParsing:
     def test_non_gpcr_slug_yields_no_chains(self) -> None:
         assert _gpcr_auth_chains(_entry(gpcr_slug="gnas2_human")) == set()
 
-    def test_subject_of_investigation_comp_ids(self) -> None:
-        assert _subject_of_investigation_comp_ids(_entry(("A1AEI", "CLR"))) == {"A1AEI", "CLR"}
+    def test_candidate_comp_ids_keeps_real_and_disputed(self) -> None:
+        # Use a disputed molecule that is ALSO on the exclude list (PLM), so the
+        # "- DISPUTED_MOLECULES" override is genuinely exercised (it must survive).
+        disputed = sorted(DISPUTED_MOLECULES & LIGAND_EXCLUDE_LIST)[0]
+        assert _candidate_comp_ids(_entry(("A1AEI", disputed))) == {"A1AEI", disputed}
 
-    def test_no_annotation_is_not_soi(self) -> None:
-        entry = _entry()
-        entry["nonpolymer_entities"][0]["rcsb_nonpolymer_entity_annotation"] = []
-        assert _subject_of_investigation_comp_ids(entry) == set()
+    def test_candidate_comp_ids_drops_buffers(self) -> None:
+        buffer = sorted(LIGAND_EXCLUDE_LIST - DISPUTED_MOLECULES)[0]
+        assert _candidate_comp_ids(_entry(("A1AEI", buffer))) == {"A1AEI"}
 
 
 class TestDualRoleRule:
@@ -168,7 +168,7 @@ class TestDualRoleRule:
 
 
 class TestShortCircuits:
-    def test_no_soi_skips(self, stub_geometry, tmp_path: Path) -> None:
+    def test_no_candidate_ligand_skips(self, stub_geometry, tmp_path: Path) -> None:
         entry = _entry()
         entry["nonpolymer_entities"] = []
         assert detect_dual_role_ligands("X", entry, tmp_path) == []

@@ -499,10 +499,6 @@ LOCUS_LIGANDS: str = "ligands"
 # PDB's coordinates are immutable, so they are fetched once and never expire.
 STRUCTURE_CACHE_SUBDIR: str = "structure_files"
 
-# RCSB marks a ligand the depositors studied with this annotation type. Used to
-# separate ligands of interest from incidental crystallization additives.
-RCSB_SUBJECT_OF_INVESTIGATION: str = "SUBJECT_OF_INVESTIGATION"
-
 # Burial ("angular coverage"): the fraction of evenly spread directions around a
 # ligand copy's centroid that have a protein atom within a narrow cone. A copy
 # enclosed in a pocket is covered from most directions; a copy lying on the
@@ -521,10 +517,10 @@ GEOMETRY_CONTACT_RADIUS: float = 4.5
 GEOMETRY_MIN_POCKET_RESIDUES: int = 5
 GEOMETRY_NEIGHBOR_SEARCH_RADIUS: float = 6.0  # >= every query radius above
 
-# Dual-role rule: the same studied ligand modelled in two distinct functional
-# pockets on one receptor chain. The copy cap rejects detergent floods (a lipid
-# appears 5-34x), and the pocket-overlap cap requires the two pockets to be
-# genuinely different (orthosteric vs. allosteric), not the same site re-modelled.
+# Dual-role rule: the same ligand modelled in two distinct functional pockets on
+# one receptor chain. The copy cap rejects detergent floods (a lipid appears
+# 5-34x), and the pocket-overlap cap requires the two pockets to be genuinely
+# different (orthosteric vs. allosteric), not the same site re-modelled.
 GEOMETRY_DUAL_ROLE_MAX_COPIES: int = 3
 GEOMETRY_DUAL_ROLE_POCKET_JACCARD_MAX: float = 0.5
 
