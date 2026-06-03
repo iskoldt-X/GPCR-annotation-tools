@@ -433,7 +433,26 @@ CHIMERA_STATUS_SKIPPED: str = "skipped"
 # Chimera domain data
 # ---------------------------------------------------------------------------
 
-CHIMERA_TAIL_LENGTH: int = 4
+# G-alpha alpha5 helix comparison window. The alpha5 C-terminal hook is the
+# receptor-coupling determinant: 11 residues resolve the coupling family and
+# separate the transducin subgroup from Gi, while longer windows reach into
+# engineered mini-G scaffolds and degrade family accuracy. When the best window
+# score falls below the anchor threshold the C-terminus is unlikely to be the
+# alpha5 helix (fusion / tag / truncation), so a sliding scan locates it.
+CHIMERA_A5_WINDOW: int = 11
+CHIMERA_A5_ANCHOR_MIN_SCORE: int = 8
+
+# How a subtype call was resolved against the alpha5 window.
+CHIMERA_SUBTYPE_RESOLVED: str = "resolved"
+CHIMERA_SUBTYPE_INSEPARABLE_SET: str = "inseparable_set"
+CHIMERA_SUBTYPE_FAMILY_ONLY: str = "family_only"
+CHIMERA_SUBTYPE_LOW_CONFIDENCE: str = "low_confidence"
+
+# Coupling-family labels.
+G_FAMILY_GS: str = "Gs"
+G_FAMILY_GIO: str = "Gi/o"
+G_FAMILY_GQ11: str = "Gq/11"
+G_FAMILY_G1213: str = "G12/13"
 
 FULL_G_ALPHA_CANDIDATES: MappingProxyType[str, str] = MappingProxyType(
     {
@@ -460,11 +479,35 @@ FULL_G_ALPHA_CANDIDATES: MappingProxyType[str, str] = MappingProxyType(
     }
 )
 
-FAMILY_LEADERS: tuple[str, ...] = (
-    "gnas2_human",
-    "gnai1_human",
-    "gnaq_human",
-    "gna13_human",
+# Coupling family of each G-alpha subtype slug.
+A5_SUBTYPE_FAMILY: MappingProxyType[str, str] = MappingProxyType(
+    {
+        "gnas2_human": G_FAMILY_GS,
+        "gnal_human": G_FAMILY_GS,
+        "gnai1_human": G_FAMILY_GIO,
+        "gnai2_human": G_FAMILY_GIO,
+        "gnai3_human": G_FAMILY_GIO,
+        "gnao_human": G_FAMILY_GIO,
+        "gnaz_human": G_FAMILY_GIO,
+        "gnat1_human": G_FAMILY_GIO,
+        "gnat2_human": G_FAMILY_GIO,
+        "gnat3_human": G_FAMILY_GIO,
+        "gnaq_human": G_FAMILY_GQ11,
+        "gna11_human": G_FAMILY_GQ11,
+        "gna14_human": G_FAMILY_GQ11,
+        "gna15_human": G_FAMILY_GQ11,
+        "gna12_human": G_FAMILY_G1213,
+        "gna13_human": G_FAMILY_G1213,
+    }
+)
+
+# Subtype sets whose alpha5 helices are identical and cannot be told apart by
+# the alpha5 window alone. The call stops at the family and is routed to review
+# rather than forced to one member.
+A5_INSEPARABLE_SUBTYPE_SETS: tuple[frozenset[str], ...] = (
+    frozenset({"gnat1_human", "gnat2_human", "gnat3_human"}),
+    frozenset({"gnai1_human", "gnai2_human"}),
+    frozenset({"gnaq_human", "gna11_human"}),
 )
 
 G_ALPHA_EXCLUDE_KEYWORDS: tuple[str, ...] = (
