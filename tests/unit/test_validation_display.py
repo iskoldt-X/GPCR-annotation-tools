@@ -3,10 +3,50 @@
 from gpcr_tools.csv_generator.validation_display import (
     analyze_validation_impact,
     canonicalize_path,
+    display_algo_notes,
     extract_validation_entries,
     get_relevant_validation_warnings,
     warning_matches_block,
 )
+
+
+class TestDisplayAlgoNotes:
+    def test_renders_notes(self, capsys):
+        display_algo_notes({"algo_notes": ["BRIL fusion at the N-terminus"]})
+        out = capsys.readouterr().out
+        assert "BRIL fusion" in out
+        assert "DETECTOR NOTES" in out
+
+    def test_silent_when_empty(self, capsys):
+        display_algo_notes({"algo_notes": []})
+        display_algo_notes({})
+        assert capsys.readouterr().out == ""
+
+
+class TestLigandDetectorNotes:
+    """site_ref surfacing and the disputed verdict ternary are logic, not aesthetics."""
+
+    def test_site_ref_note(self):
+        from gpcr_tools.csv_generator.ui import ligand_detector_notes
+
+        assert ligand_detector_notes({"site_ref": "allosteric"}) == ["Site: allosteric"]
+
+    def test_disputed_functional_verdict(self):
+        from gpcr_tools.csv_generator.ui import ligand_detector_notes
+
+        notes = ligand_detector_notes({"disputed_assessment": {"is_functional_ligand": True}})
+        assert any("functional ligand" in n for n in notes)
+
+    def test_disputed_incidental_verdict(self):
+        from gpcr_tools.csv_generator.ui import ligand_detector_notes
+
+        notes = ligand_detector_notes({"disputed_assessment": {"is_functional_ligand": False}})
+        assert any("incidental / structural" in n for n in notes)
+
+    def test_no_notes_for_plain_ligand(self):
+        from gpcr_tools.csv_generator.ui import ligand_detector_notes
+
+        assert ligand_detector_notes({"name": "Adenosine"}) == []
 
 
 class TestDisplayPdbFooter:

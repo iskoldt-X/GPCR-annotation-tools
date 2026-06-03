@@ -44,12 +44,21 @@ def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
             os.remove(tmp)
 
 
-def run_detect(pdb_id: str, *, skip_api_checks: bool = False) -> list[DetectSignal]:
+def run_detect(
+    pdb_id: str,
+    *,
+    skip_api_checks: bool = False,
+    cache: SequenceCache | None = None,
+) -> list[DetectSignal]:
     """Run the detectors on one PDB, persist ``detect/{pdb}.json``, return signals.
 
     Sequence-based detectors are skipped when *skip_api_checks* is set (they need
     UniProt reference sequences). The detect file is written regardless, so the
     stage's output is always present and inspectable.
+
+    A *cache* may be supplied by a caller running many PDBs so fetched sequences
+    persist across them; the caller then owns saving it. When none is given (a
+    single-PDB run) one is created and saved here.
     """
     cfg = get_config()
     enriched_path = cfg.enriched_dir / f"{pdb_id}.json"
@@ -72,9 +81,13 @@ def run_detect(pdb_id: str, *, skip_api_checks: bool = False) -> list[DetectSign
 
     # Detectors needing a network fetch (UniProt references, coordinate files).
     if not skip_api_checks:
-        cache = SequenceCache(cfg.cache_dir / _SEQUENCE_CACHE_NAME)
+        owns_cache = cache is None
+        if cache is None:
+            cache = SequenceCache(cfg.cache_dir / _SEQUENCE_CACHE_NAME)
         signals.extend(detect_g_protein_identity(pdb_id, entry, cache))
         signals.extend(detect_dual_role_ligands(pdb_id, entry, cfg.cache_dir))
+        if owns_cache:
+            cache.save()
     # Future detectors (entity reconciliation, ...) append here.
 
     out_path = cfg.detect_dir / f"{pdb_id}.json"
@@ -96,7 +109,14 @@ def run_detect_stage(pdb_id: str | None = None, *, skip_api_checks: bool = False
     else:
         targets = []
 
-    summary = {pid: len(run_detect(pid, skip_api_checks=skip_api_checks)) for pid in targets}
+    # One shared cache across all PDBs so UniProt references fetched for an early
+    # PDB are reused (and persisted) rather than refetched for each one.
+    cache = None if skip_api_checks else SequenceCache(cfg.cache_dir / _SEQUENCE_CACHE_NAME)
+    summary = {
+        pid: len(run_detect(pid, skip_api_checks=skip_api_checks, cache=cache)) for pid in targets
+    }
+    if cache is not None:
+        cache.save()
     logger.info("[detect] processed %d PDB(s).", len(targets))
     return summary
 

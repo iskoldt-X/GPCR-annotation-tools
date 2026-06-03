@@ -233,6 +233,9 @@ def build_and_submit_batch(
         except json.JSONDecodeError:
             pass
 
+    # Per-PDB advisory signal kinds, recorded into the job provenance so
+    # recover_batch can stamp each result with the advisories active at submit.
+    detect_advisory_by_pdb: dict[str, list[str]] = {}
     for pdb_id in targets:
         enriched_file = config.enriched_dir / f"{pdb_id}.json"
         pdf_file = config.papers_dir / f"{pdb_id}.pdf"
@@ -275,6 +278,9 @@ def build_and_submit_batch(
                     continue
 
         detect_signals = load_detect_signals(pdb_id)
+        detect_advisory_by_pdb[pdb_id] = sorted(
+            {s.kind for s in detect_signals if s.severity == SEVERITY_ADVISORY}
+        )
         parts = build_prompt_parts(
             pdb_id, enriched_data, prompt_text, detect_signals=detect_signals
         )
@@ -371,7 +377,15 @@ def build_and_submit_batch(
         batch_prov_file = config.pipeline_runs_dir / f"_batch_provenance_{safe_name}.json"
         tmp_prov = batch_prov_file.with_suffix(".tmp")
         with open(tmp_prov, "w") as f:
-            json.dump({"model_requested": model_name, "prompt": prompt_id}, f, indent=2)
+            json.dump(
+                {
+                    "model_requested": model_name,
+                    "prompt": prompt_id,
+                    "detect_advisory": detect_advisory_by_pdb,
+                },
+                f,
+                indent=2,
+            )
         os.replace(tmp_prov, batch_prov_file)
 
     finally:
@@ -521,6 +535,9 @@ def recover_batch() -> None:
                                 "model_requested": batch_meta.get("model_requested"),
                                 "model_served": response_obj.get("modelVersion"),
                                 "prompt": batch_meta.get("prompt"),
+                                "detect_advisory": (batch_meta.get("detect_advisory") or {}).get(
+                                    pdb_id, []
+                                ),
                                 "run": run_num,
                                 "mode": "batch",
                                 "timestamp": datetime.now(UTC).isoformat(),

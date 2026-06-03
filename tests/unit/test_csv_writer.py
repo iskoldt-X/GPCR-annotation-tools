@@ -3,6 +3,7 @@
 These tests cover the pure data transformation layer — no UI, no user interaction.
 """
 
+import copy
 import csv
 from dataclasses import replace
 from unittest.mock import patch
@@ -39,19 +40,20 @@ class TestGpcrdbColumnContract:
         assert "label_asym_id" in CSV_SCHEMA["structures.csv"][8:]
 
     def test_ligands_core_columns(self):
-        assert CSV_SCHEMA["ligands.csv"][:9] == (
+        assert CSV_SCHEMA["ligands.csv"][:10] == (
             "PDB",
             "ChainID",
             "Name",
             "PubChemID",
             "Role",
+            "Site",
             "Title",
             "Type",
             "Date",
             "In structure",
         )
         assert {"label_asym_id", "SMILES", "InChIKey", "Sequence"} <= set(
-            CSV_SCHEMA["ligands.csv"][9:]
+            CSV_SCHEMA["ligands.csv"][10:]
         )
 
     def test_g_proteins_core_columns(self):
@@ -122,6 +124,14 @@ class TestTransformForCSV:
         assert row["Role"] == "Agonist"
         assert row["ChainID"] == "A"
         assert row["InChIKey"] == "OIRDTQYFTABQOQ-KQYNXXCUSA-N"
+        # An ordinary ligand has no dual-role site_ref, so the Site column is blank.
+        assert row["Site"] == ""
+
+    def test_site_ref_populates_site_column(self, sample_pdb_data):
+        data = copy.deepcopy(sample_pdb_data)
+        data["ligands"][0]["site_ref"] = "allosteric"
+        row = transform_for_csv("TEST1", data)["ligands.csv"][0]
+        assert row["Site"] == "allosteric"
 
     def test_smiles_stereo_priority(self, sample_pdb_data):
         """SMILES_stereo should take priority over SMILES."""

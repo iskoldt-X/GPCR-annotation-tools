@@ -33,6 +33,7 @@ from gpcr_tools.csv_generator.ui import (
 )
 from gpcr_tools.csv_generator.validation_display import (
     analyze_validation_impact,
+    display_algo_notes,
     display_validation_alert,
     get_relevant_validation_warnings,
 )
@@ -587,6 +588,9 @@ def review_toplevel_blocks(
     """Review each top-level block with appropriate context and UI."""
     verified_paths = get_verified_paths(main_data)
     final_data: dict = {}
+
+    # Advisory detector notes, shown once up front (non-gating).
+    display_algo_notes(validation_data)
 
     for key in TOPLEVEL_BLOCK_KEYS:
         if key not in main_data:

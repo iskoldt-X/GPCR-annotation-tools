@@ -122,6 +122,10 @@ def transform_for_csv(pdb_id: str, data: dict) -> dict[str, list[dict[str, str]]
                 if is_empty_key(lig.get("pubchem_id"))
                 else sanitize_value(lig.get("pubchem_id")),
                 "Role": sanitize_value((lig.get("role") or {}).get("value")),
+                # A dual-role ligand the model split per site carries a site_ref
+                # (e.g. orthosteric / allosteric); blank for an ordinary ligand.
+                # This keeps the per-site rows distinct rather than duplicate.
+                "Site": sanitize_value(lig.get("site_ref")),
                 "Title": sanitize_value(lig.get("name")),
                 "Type": sanitize_value(lig.get("type")),
                 "Date": sanitize_value(s_info.get("release_date")),

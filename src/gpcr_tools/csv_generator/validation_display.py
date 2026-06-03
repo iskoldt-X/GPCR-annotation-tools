@@ -105,6 +105,30 @@ def display_validation_alert(path: str, validation_data: dict) -> bool:
     return False
 
 
+def display_algo_notes(validation_data: dict) -> None:
+    """Render advisory algorithm notes once, as a non-gating info panel.
+
+    Unlike critical warnings / algo conflicts, these notes do not block review or
+    disable accept-all -- they are informational (e.g. a crystallization-fusion
+    note, an alpha5 alignment hint). Surfacing them keeps the curator aware of
+    what the detectors observed without gating the workflow.
+    """
+    notes = validation_data.get("algo_notes") or []
+    if not notes:
+        return
+    note_text = Text()
+    for note in notes:
+        note_text.append(f"• {note}\n", style="cyan")
+    console.print(
+        Panel(
+            note_text,
+            title="[bold cyan]DETECTOR NOTES (informational)[/]",
+            border_style="cyan",
+            box=box.ROUNDED,
+        )
+    )
+
+
 # ── Validation Entry Extraction ─────────────────────────────────────────
 
 

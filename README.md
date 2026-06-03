@@ -287,7 +287,7 @@ Tab-separated, normalized files ready for database ingestion:
 | File | Contents |
 |------|----------|
 | `structures.csv` | PDB ID, receptor UniProt, method, resolution, state, chain, date |
-| `ligands.csv` | Ligand names, PubChem IDs, roles, types, SMILES, InChIKey, sequences |
+| `ligands.csv` | Ligand names, PubChem IDs, roles, binding site, types, SMILES, InChIKey, sequences |
 | `g_proteins.csv` | G-protein subunit UniProt IDs and chain assignments |
 | `arrestins.csv` | Arrestin UniProt IDs and chains |
 | `fusion_proteins.csv` | Fusion protein names |
