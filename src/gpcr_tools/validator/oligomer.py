@@ -22,9 +22,12 @@ from gpcr_tools.config import (
     ALERT_HALLUCINATION,
     ALERT_MISSED_PROTOMER,
     ALERT_MULTI_COPY_LIGAND,
+    ALERT_PREFIX_FUSION_NOTE,
     ALERT_PREFIX_MISSED_POLYMER,
     ALERT_SUSPICIOUS_7TM,
     APO_SENTINEL,
+    CRYSTALLIZATION_FUSION_KEYWORDS,
+    CRYSTALLIZATION_FUSION_SLUGS,
     EMPTY_VALUES,
     GPCR_MIN_ANNOTATED_TM,
     GPCR_SLUG_NEGATIVE_PREFIXES,
@@ -489,6 +492,52 @@ def reconcile_missed_polymers(
             f"annotated; confirm it."
         )
     return warnings
+
+
+def detect_crystallization_fusions(enriched_entry: dict[str, Any]) -> list[str]:
+    """Note any receptor entity carrying a BRIL / T4-lysozyme crystallization fusion.
+
+    BRIL (cytochrome b562RIL) and T4 lysozyme are engineering aids fused into a
+    receptor to aid crystallization, not part of the biological receptor. They
+    are detected by a fusion-partner slug or a description keyword, but only on
+    an entity that is itself a GPCR (so a standalone lysozyme is not flagged).
+    A fusion modelled as its own separate entity (no GPCR slug) is intentionally
+    left to :func:`reconcile_missed_polymers`, which flags it as an unannotated
+    chain. Advisory only -- returns non-blocking notes anchored to receptor_info.
+    """
+    notes: list[str] = []
+    for entity in enriched_entry.get("polymer_entities") or []:
+        if not isinstance(entity, dict):
+            continue
+        slugs = [
+            (u.get("gpcrdb_entry_name_slug") or "")
+            for u in (entity.get("uniprots") or [])
+            if isinstance(u, dict)
+        ]
+        if not any(is_gpcr_slug(s) for s in slugs):
+            continue  # only receptor entities can carry a receptor-side fusion
+        description = ((entity.get("rcsb_polymer_entity") or {}).get("pdbx_description")) or ""
+        has_fusion_slug = any(s.lower().startswith(CRYSTALLIZATION_FUSION_SLUGS) for s in slugs)
+        desc_lower = description.lower()
+        has_fusion_keyword = any(kw in desc_lower for kw in CRYSTALLIZATION_FUSION_KEYWORDS)
+        if not (has_fusion_slug or has_fusion_keyword):
+            continue
+        chain_set: set[str] = set()
+        for inst in entity.get("polymer_entity_instances") or []:
+            if not isinstance(inst, dict):
+                continue
+            auth = (inst.get("rcsb_polymer_entity_instance_container_identifiers") or {}).get(
+                "auth_asym_id"
+            )
+            if auth:
+                chain_set.add(auth)
+        chain_str = ", ".join(sorted(chain_set)) or "?"
+        notes.append(
+            f"{ALERT_PREFIX_FUSION_NOTE} at 'receptor_info': chain(s) {chain_str} "
+            f"carry a crystallization fusion ('{description}'); confirm the receptor "
+            f"annotation excludes the fusion partner."
+        )
+    return notes
 
 
 def build_nonpolymer_instance_index(
