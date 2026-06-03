@@ -4,12 +4,10 @@ Classifies GPCR oligomeric state (monomer/homomer/heteromer), scans chains
 for 7TM completeness, suggests a primary protomer, generates alerts for
 AI hallucinations and missed protomers, and applies smart chain_id overrides.
 
-Blood Lesson 1 — None-safety:
-    ``(inst.get("rcsb_polymer_entity_instance_container_identifiers") or {}).get("auth_asym_id")``
-Blood Lesson 3 — Warning format:
-    Alert messages follow ``f"[{ALERT_TYPE}] at 'oligomer_analysis': description"``.
-Blood Lesson 4 — Magic strings:
-    All alert types, classifications, and TM statuses are constants from ``config.py``.
+Conventions:
+    - None-safe: ``(... or {}).get("auth_asym_id")`` at every nested access.
+    - Alert messages follow ``f"[{ALERT_TYPE}] at 'oligomer_analysis': description"``.
+    - All alert types, classifications, and TM statuses are constants from ``config.py``.
 """
 
 from __future__ import annotations
@@ -24,7 +22,9 @@ from gpcr_tools.config import (
     ALERT_HALLUCINATION,
     ALERT_MISSED_PROTOMER,
     ALERT_MULTI_COPY_LIGAND,
+    ALERT_PREFIX_MISSED_POLYMER,
     ALERT_SUSPICIOUS_7TM,
+    APO_SENTINEL,
     EMPTY_VALUES,
     GPCR_MIN_ANNOTATED_TM,
     GPCR_SLUG_NEGATIVE_PREFIXES,
@@ -359,6 +359,136 @@ def _build_label_asym_id_map(
             if auth and asym:
                 mapping[auth] = asym
     return mapping
+
+
+# ---------------------------------------------------------------------------
+# Missed non-GPCR polymer reconciliation
+# ---------------------------------------------------------------------------
+
+
+# Slug prefixes that mark a chain as a signaling partner (G-protein alpha via
+# "gna", beta "gbb", gamma "gbg", arrestin "arr"); an unannotated chain with one
+# of these is routed to the signaling_partners review block, everything else to
+# auxiliary_proteins. Used only to anchor the alert to the right block.
+_SIGNALING_SLUG_PREFIXES: tuple[str, ...] = ("gna", "gbb", "gbg", "arr")
+
+
+def _split_chain_ids(value: Any) -> set[str]:
+    """Parse a chain_id field (single, comma- or semicolon-separated) to a set."""
+    if not value or not isinstance(value, str):
+        return set()
+    out: set[str] = set()
+    for part in value.replace(";", ",").split(","):
+        token = part.strip()
+        if token and token.lower() not in EMPTY_VALUES and token.lower() != APO_SENTINEL:
+            out.add(token)
+    return out
+
+
+def _build_all_polymer_chains(enriched_entry: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Build ``{auth_asym_id: {"description": str, "slug": str | None}}`` per chain.
+
+    Covers all polymer entities (GPCR and non-GPCR alike). Branched
+    oligosaccharides and non-polymer ligands live in other buckets and are not
+    included here. The slug (when present) only anchors the alert to a review
+    block; it never decides whether a chain is flagged.
+    """
+    chains: dict[str, dict[str, Any]] = {}
+    for entity in enriched_entry.get("polymer_entities") or []:
+        if not isinstance(entity, dict):
+            continue
+        desc = (
+            (entity.get("rcsb_polymer_entity") or {}).get("pdbx_description")
+        ) or "unknown polymer"
+        slug: str | None = None
+        for u in entity.get("uniprots") or []:
+            if isinstance(u, dict) and u.get("gpcrdb_entry_name_slug"):
+                slug = u["gpcrdb_entry_name_slug"]
+                break
+        for inst in entity.get("polymer_entity_instances") or []:
+            if not isinstance(inst, dict):
+                continue
+            auth = (inst.get("rcsb_polymer_entity_instance_container_identifiers") or {}).get(
+                "auth_asym_id"
+            )
+            if auth:
+                chains[auth] = {"description": desc, "slug": slug}
+    return chains
+
+
+def _missed_chain_block(slug: str | None) -> str:
+    """Pick the review block an unannotated chain should surface under.
+
+    The curate UI buckets a warning to a block when the block key appears in the
+    warning text, so the alert must name a real block. Signaling partners go to
+    ``signaling_partners``; everything else (nanobody / scFv / RAMP / fusion /
+    peptide) goes to ``auxiliary_proteins`` where a curator adds missed partners.
+    """
+    if slug and slug.lower().startswith(_SIGNALING_SLUG_PREFIXES):
+        return "signaling_partners"
+    return "auxiliary_proteins"
+
+
+def collect_ai_claimed_chains(best_run_data: dict[str, Any]) -> set[str]:
+    """Union every polymer chain id the annotation claims, across all slots.
+
+    The model can name a chain under the receptor, the G-protein subunits, the
+    arrestin, the auxiliary proteins (nanobody / scFv / RAMP / ...), or a
+    polymeric ligand. A chain claimed in any slot counts as annotated.
+    """
+    claimed: set[str] = set()
+    claimed |= _split_chain_ids((best_run_data.get("receptor_info") or {}).get("chain_id"))
+
+    partners = best_run_data.get("signaling_partners") or {}
+    g_protein = partners.get("g_protein") or {}
+    for subunit in ("alpha_subunit", "beta_subunit", "gamma_subunit"):
+        claimed |= _split_chain_ids((g_protein.get(subunit) or {}).get("chain_id"))
+    claimed |= _split_chain_ids((partners.get("arrestin") or {}).get("chain_id"))
+
+    for aux in best_run_data.get("auxiliary_proteins") or []:
+        if isinstance(aux, dict):
+            claimed |= _split_chain_ids(aux.get("chain_id"))
+    for ligand in best_run_data.get("ligands") or []:
+        if isinstance(ligand, dict):
+            claimed |= _split_chain_ids(ligand.get("chain_id"))
+    return claimed
+
+
+def reconcile_missed_polymers(
+    enriched_entry: dict[str, Any],
+    best_run_data: dict[str, Any],
+) -> list[str]:
+    """Flag non-GPCR polymer chains present in the structure but unannotated.
+
+    GPCR chains are the missed-protomer check's responsibility and are excluded
+    here. Returns one warning string per unannotated non-GPCR polymer chain,
+    anchored to the review block a curator would add it under.
+    """
+    all_chains = _build_all_polymer_chains(enriched_entry)
+    if not all_chains:
+        return []
+    # Exclude every chain a GPCR slug identifies (via the full roster, not the
+    # 7TM-gated classify_roster): those belong to the missed-protomer check.
+    gpcr_chains = set(_build_gpcr_roster(enriched_entry))
+    claimed = collect_ai_claimed_chains(best_run_data)
+
+    # A chain the model named as the receptor but that a chain-id override later
+    # corrected already carries a HALLUCINATION alert; do not re-flag it here.
+    override = (best_run_data.get("oligomer_analysis") or {}).get("chain_id_override") or {}
+    if override.get("applied"):
+        claimed |= _split_chain_ids(override.get("original_chain_id"))
+
+    warnings: list[str] = []
+    for auth, info in sorted(all_chains.items()):
+        if auth in gpcr_chains or auth in claimed:
+            continue
+        block = _missed_chain_block(info["slug"])
+        warnings.append(
+            f"{ALERT_PREFIX_MISSED_POLYMER} at '{block}': chain '{auth}' "
+            f"('{info['description']}') is present in the structure but not "
+            f"annotated; confirm it."
+        )
+    return warnings
 
 
 def build_nonpolymer_instance_index(
