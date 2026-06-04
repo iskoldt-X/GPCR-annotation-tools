@@ -139,6 +139,7 @@ def transform_for_csv(pdb_id: str, data: dict) -> dict[str, list[dict[str, str]]
                 "SMILES": sanitize_value(smiles),
                 "InChIKey": sanitize_value(lig.get("InChIKey")),
                 "Sequence": sanitize_value(lig.get("Sequence")),
+                "is_endogenous": sanitize_value(lig.get("is_endogenous")),
             }
         )
 

@@ -55,7 +55,7 @@ class TestGpcrdbColumnContract:
             "Date",
             "In structure",
         )
-        assert {"label_asym_id", "SMILES", "InChIKey", "Sequence"} <= set(
+        assert {"label_asym_id", "SMILES", "InChIKey", "Sequence", "is_endogenous"} <= set(
             CSV_SCHEMA["ligands.csv"][10:]
         )
 
