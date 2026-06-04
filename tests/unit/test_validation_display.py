@@ -34,13 +34,17 @@ class TestLigandDetectorNotes:
     def test_incidental_candidate_functional_verdict(self):
         from gpcr_tools.csv_generator.ui import ligand_detector_notes
 
-        notes = ligand_detector_notes({"pharmacological_role_check": {"is_functional_ligand": True}})
+        notes = ligand_detector_notes(
+            {"pharmacological_role_check": {"is_functional_ligand": True}}
+        )
         assert any("functional ligand" in n for n in notes)
 
     def test_incidental_candidate_incidental_verdict(self):
         from gpcr_tools.csv_generator.ui import ligand_detector_notes
 
-        notes = ligand_detector_notes({"pharmacological_role_check": {"is_functional_ligand": False}})
+        notes = ligand_detector_notes(
+            {"pharmacological_role_check": {"is_functional_ligand": False}}
+        )
         assert any("incidental / structural" in n for n in notes)
 
     def test_no_notes_for_plain_ligand(self):

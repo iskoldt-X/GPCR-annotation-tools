@@ -40,9 +40,7 @@ def stub_geometry(monkeypatch: pytest.MonkeyPatch):
     """Stub load_structure (non-None) and let a test set the contact counts."""
     monkeypatch.setattr(coupling_mod, "load_structure", lambda *a, **k: object())
     counts: dict[str, int] = {}
-    monkeypatch.setattr(
-        coupling_mod, "receptor_gprotein_contacts", lambda *a, **k: dict(counts)
-    )
+    monkeypatch.setattr(coupling_mod, "receptor_gprotein_contacts", lambda *a, **k: dict(counts))
     return counts
 
 
@@ -106,8 +104,6 @@ class TestShortCircuits:
         stub_geometry.update({"A": 25})
         assert detect_coupling_protomer("X", _entry(chains), tmp_path) == []
 
-    def test_missing_structure_skips(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_missing_structure_skips(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.setattr(coupling_mod, "load_structure", lambda *a, **k: None)
         assert detect_coupling_protomer("X", _entry(_GABAB), tmp_path) == []

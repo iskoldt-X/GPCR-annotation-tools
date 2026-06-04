@@ -215,9 +215,7 @@ def test_recover_batch_writes_provenance(tmp_path, monkeypatch):
     config.pipeline_runs_dir.mkdir(parents=True)
 
     (config.pipeline_runs_dir / "_batch_provenance.json").write_text(
-        json.dumps(
-            {"model_requested": "gemini-2.5-pro", "prompt": "v5", "code_version": "abc1234"}
-        )
+        json.dumps({"model_requested": "gemini-2.5-pro", "prompt": "v5", "code_version": "abc1234"})
     )
 
     raw_output = config.pipeline_runs_dir / "raw_output_testjob.jsonl"

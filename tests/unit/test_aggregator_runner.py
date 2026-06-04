@@ -26,8 +26,13 @@ from gpcr_tools.detector.signals import (
 
 
 def _sig(kind, payload):
-    return DetectSignal(kind=kind, target_ref="receptor_info", summary="", payload=payload,
-                        severity=SEVERITY_ADVISORY)
+    return DetectSignal(
+        kind=kind,
+        target_ref="receptor_info",
+        summary="",
+        payload=payload,
+        severity=SEVERITY_ADVISORY,
+    )
 
 
 class TestCouplingProtomer:
@@ -123,8 +128,7 @@ class TestChimericForcesReview:
         )
         report = _build_validation_report("X", best, {}, [], chim, None)
         assert not any(
-            "confirm the alpha-subunit identity manually" in w
-            for w in report["critical_warnings"]
+            "confirm the alpha-subunit identity manually" in w for w in report["critical_warnings"]
         )
 
     @pytest.mark.parametrize(
@@ -144,8 +148,7 @@ class TestChimericForcesReview:
         chim = {"status": inconclusive_status, "score": 0, "error": "n/a"}
         report = _build_validation_report("X", best, {}, [], chim, None)
         assert any(
-            "confirm the alpha-subunit identity manually" in w
-            for w in report["critical_warnings"]
+            "confirm the alpha-subunit identity manually" in w for w in report["critical_warnings"]
         )
 
     def test_ai_chimeric_flag_suppressed_when_no_g_protein(self, monkeypatch):
@@ -166,11 +169,12 @@ class TestChimericForcesReview:
         chim = {"status": CHIMERA_STATUS_NO_G_PROTEIN, "score": 0}
         report = _build_validation_report("X", best, {}, [], chim, None)
         assert not any(
-            "confirm the alpha-subunit identity manually" in w
-            for w in report["critical_warnings"]
+            "confirm the alpha-subunit identity manually" in w for w in report["critical_warnings"]
         )
         # ...but the hallucination IS surfaced (AI named a G-protein, algo found none).
-        assert any("NO G-protein" in c or "no g-protein" in c.lower() for c in report["algo_conflicts"])
+        assert any(
+            "NO G-protein" in c or "no g-protein" in c.lower() for c in report["algo_conflicts"]
+        )
 
 
 def _chimera_report(chimera_result, ai_uniprot, monkeypatch):
@@ -308,7 +312,9 @@ class TestChimeraAlpha5Routing:
     def test_low_confidence_is_noted_not_crashed(self, monkeypatch):
         chim = _success(subtype_resolution=CHIMERA_SUBTYPE_LOW_CONFIDENCE, score=3)
         report = _chimera_report(chim, None, monkeypatch)
-        assert any("weak" in n.lower() or "unverified" in n.lower() for n in report["detector_notes"])
+        assert any(
+            "weak" in n.lower() or "unverified" in n.lower() for n in report["detector_notes"]
+        )
 
     def test_cross_family_tie_is_not_silent(self, monkeypatch):
         # Winners span more than one family -> family is None. This must NOT be
@@ -332,9 +338,7 @@ class TestDetectReviewSignalsRouted:
 
     def _report_with_signals(self, signals, monkeypatch):
         monkeypatch.setattr("gpcr_tools.aggregator.runner.validate_all", lambda *a, **k: [])
-        monkeypatch.setattr(
-            "gpcr_tools.aggregator.runner.load_detect_signals", lambda pdb: signals
-        )
+        monkeypatch.setattr("gpcr_tools.aggregator.runner.load_detect_signals", lambda pdb: signals)
         return _build_validation_report("X", {}, {}, [], {}, None)
 
     def test_review_signal_reaches_critical_warnings(self, monkeypatch):
@@ -365,6 +369,4 @@ class TestDetectReviewSignalsRouted:
             severity=SEVERITY_REVIEW,
         )
         report = self._report_with_signals([sig], monkeypatch)
-        assert not any(
-            "cannot distinguish the subtype" in w for w in report["critical_warnings"]
-        )
+        assert not any("cannot distinguish the subtype" in w for w in report["critical_warnings"])

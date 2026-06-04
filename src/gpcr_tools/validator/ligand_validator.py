@@ -143,9 +143,7 @@ def validate_and_enrich_ligands(
                 lig["api_pubchem_cid"] = np_match.get("pubchem_cid")
                 lig["SMILES_stereo"] = np_match.get("SMILES_stereo")
                 lig["SMILES"] = np_match.get("SMILES")
-                lig["is_endogenous"] = classify_endogenous(
-                    lig["InChIKey"], lig["api_pubchem_cid"]
-                )
+                lig["is_endogenous"] = classify_endogenous(lig["InChIKey"], lig["api_pubchem_cid"])
                 continue
 
             if comp_id in LIGAND_EXCLUDE_LIST:

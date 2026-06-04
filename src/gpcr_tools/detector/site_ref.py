@@ -11,8 +11,8 @@ prompt as evidence. The value is objective and upstream: ligand contact residues
 depth-from-number: TM2/TM4/TM6 are numbered in reverse). ``detect_site_refs`` is
 the detector that wires geometry + alignment + table + rule into advisory signals.
 It needs the coordinate file and the RCSB alignment, so it runs only when API
-checks are enabled. Sparse or unmatched contacts yield no signal -- missing beats
-confidently wrong.
+checks are enabled. Sparse or unmatched contacts yield no signal -- a missing
+site is better than a wrong one.
 """
 
 from __future__ import annotations

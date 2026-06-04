@@ -148,7 +148,11 @@ def display_ligand_validation_panel(ligands_data: list) -> None:
 
     has_any_status = any(
         isinstance(lig, dict)
-        and (lig.get("validation_status") or lig.get("pharmacological_role_check") or lig.get("site_ref"))
+        and (
+            lig.get("validation_status")
+            or lig.get("pharmacological_role_check")
+            or lig.get("site_ref")
+        )
         for lig in ligands_data
     )
     if not has_any_status:

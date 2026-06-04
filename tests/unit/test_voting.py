@@ -135,7 +135,12 @@ class TestListOfDictVoting:
         runs = [
             [{"chem_comp_id": "CLR", "pharmacological_role_check": {"is_functional_ligand": True}}],
             [{"chem_comp_id": "CLR", "pharmacological_role_check": {"is_functional_ligand": True}}],
-            [{"chem_comp_id": "CLR", "pharmacological_role_check": {"is_functional_ligand": False}}],
+            [
+                {
+                    "chem_comp_id": "CLR",
+                    "pharmacological_role_check": {"is_functional_ligand": False},
+                }
+            ],
         ]
         majority, _ = get_majority_votes(runs, path="ligands")
         assert majority[0]["pharmacological_role_check"]["is_functional_ligand"] is True

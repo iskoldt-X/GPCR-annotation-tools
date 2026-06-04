@@ -92,9 +92,7 @@ def _candidate_comp_ids(enriched_entry: dict[str, Any]) -> set[str]:
     return comp_ids - (LIGAND_EXCLUDE_LIST - INCIDENTAL_CANDIDATES)
 
 
-def _cluster_pockets(
-    group: list[LigandCopyGeometry], chain: str
-) -> list[list[LigandCopyGeometry]]:
+def _cluster_pockets(group: list[LigandCopyGeometry], chain: str) -> list[list[LigandCopyGeometry]]:
     """Cluster buried copies on *chain* into distinct pockets by residue overlap.
 
     Two copies belong to the same pocket when their pocket-residue sets overlap

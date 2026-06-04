@@ -237,7 +237,9 @@ def analyze_ligand_copies(
     for chain in model:
         for residue in chain:
             if residue.name == comp_id:
-                copies.append(_analyze_copy(model, neighbor_search, chain.name, residue, gpcr_chains))
+                copies.append(
+                    _analyze_copy(model, neighbor_search, chain.name, residue, gpcr_chains)
+                )
     return copies
 
 

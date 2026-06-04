@@ -49,17 +49,12 @@ class TestClassifySite:
 
     def test_multiple_core_beats_vestibule(self) -> None:
         # A ligand reaching several core residues but also touching ECL2 is orthosteric.
-        assert (
-            classify_site("001", {"3x32", "6x48"}, {"TM3", "ECL2"}) == SITE_REF_ORTHOSTERIC
-        )
+        assert classify_site("001", {"3x32", "6x48"}, {"TM3", "ECL2"}) == SITE_REF_ORTHOSTERIC
 
     def test_single_core_with_vestibule_is_vestibule(self) -> None:
         # One grazing core residue + a vestibule signature -> vestibule, not
         # orthosteric (the M2 PAM LY2119620 case that brushes the top of TM3).
-        assert (
-            classify_site("001", {"3x32"}, {"TM3", "ECL2"})
-            == SITE_REF_EXTRACELLULAR_VESTIBULE
-        )
+        assert classify_site("001", {"3x32"}, {"TM3", "ECL2"}) == SITE_REF_EXTRACELLULAR_VESTIBULE
 
     def test_taste_t2_deep_pocket_is_orthosteric(self) -> None:
         assert classify_site("009", {"3x47", "6x38"}, {"TM3", "TM6"}) == SITE_REF_ORTHOSTERIC
@@ -67,9 +62,7 @@ class TestClassifySite:
     def test_taste_t2_does_not_use_mid_core(self) -> None:
         # 3x32 is the shared mid-core, not the T2 deep core, so with only an
         # upper-TM/ECL signature a T2 ligand is the vestibule, not orthosteric.
-        assert (
-            classify_site("009", {"3x32"}, {"TM3", "ECL2"}) == SITE_REF_EXTRACELLULAR_VESTIBULE
-        )
+        assert classify_site("009", {"3x32"}, {"TM3", "ECL2"}) == SITE_REF_EXTRACELLULAR_VESTIBULE
 
     def test_allosteric_7tm(self) -> None:
         assert classify_site("001", {"3x40", "4x50"}, {"TM3", "TM4"}) == SITE_REF_ALLOSTERIC_7TM
@@ -89,9 +82,7 @@ class TestClassifySite:
     def test_class_c_ecd_precedence_over_tm(self) -> None:
         # A class C ligand touching both the VFT (N-term) and the 7TM is the VFT
         # orthosteric agonist -> extracellular_domain (ECD is checked before 7TM).
-        assert (
-            classify_site("004", {"6x48"}, {"N-term", "TM6"}) == SITE_REF_EXTRACELLULAR_DOMAIN
-        )
+        assert classify_site("004", {"6x48"}, {"N-term", "TM6"}) == SITE_REF_EXTRACELLULAR_DOMAIN
 
     def test_large_ecd_class_b(self) -> None:
         assert classify_site("002", set(), {"N-term"}) == SITE_REF_EXTRACELLULAR_DOMAIN
@@ -128,7 +119,11 @@ class TestEnrichedParsing:
                         {"gpcrdb_entry_name_slug": "adrb2_human", "rcsb_id": "P07550"},
                     ],
                     "polymer_entity_instances": [
-                        {"rcsb_polymer_entity_instance_container_identifiers": {"auth_asym_id": "A"}}
+                        {
+                            "rcsb_polymer_entity_instance_container_identifiers": {
+                                "auth_asym_id": "A"
+                            }
+                        }
                     ],
                 }
             ]
@@ -146,7 +141,9 @@ def stub_pipeline(monkeypatch: pytest.MonkeyPatch):
     """
     copies: list[tuple[float, str, int]] = []
     monkeypatch.setattr(sr, "load_structure", lambda *a, **k: object())
-    monkeypatch.setattr(sr, "fetch_polymer_alignment", lambda *a, **k: {"R": {"Q9NYV8": [(1, 1, 400)]}})
+    monkeypatch.setattr(
+        sr, "fetch_polymer_alignment", lambda *a, **k: {"R": {"Q9NYV8": [(1, 1, 400)]}}
+    )
     monkeypatch.setattr(
         sr, "ligand_contact_residues", lambda *a, **k: [(b, (s, m)) for b, s, m in copies]
     )

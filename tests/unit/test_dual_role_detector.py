@@ -81,7 +81,10 @@ class TestEnrichedParsing:
         # Use an incidental_candidate molecule that is ALSO on the exclude list (PLM), so the
         # "- INCIDENTAL_CANDIDATES" override is genuinely exercised (it must survive).
         incidental_candidate = sorted(INCIDENTAL_CANDIDATES & LIGAND_EXCLUDE_LIST)[0]
-        assert _candidate_comp_ids(_entry(("A1AEI", incidental_candidate))) == {"A1AEI", incidental_candidate}
+        assert _candidate_comp_ids(_entry(("A1AEI", incidental_candidate))) == {
+            "A1AEI",
+            incidental_candidate,
+        }
 
     def test_candidate_comp_ids_drops_buffers(self) -> None:
         buffer = sorted(LIGAND_EXCLUDE_LIST - INCIDENTAL_CANDIDATES)[0]
@@ -112,9 +115,7 @@ class TestDualRoleRule:
         assert len(signals) == 1
         assert len(signals[0].payload["copies"]) == 2
 
-    def test_three_copies_three_pockets_reports_three(
-        self, stub_geometry, tmp_path: Path
-    ) -> None:
+    def test_three_copies_three_pockets_reports_three(self, stub_geometry, tmp_path: Path) -> None:
         stub_geometry["A1AEI"] = [
             _copy(601, residues=(1, 2, 3, 4, 5, 6)),
             _copy(602, residues=(10, 11, 12, 13, 14, 15)),
@@ -125,7 +126,9 @@ class TestDualRoleRule:
         assert len(signals[0].payload["copies"]) == 3
 
     def test_three_copies_one_pocket_rejected(self, stub_geometry, tmp_path: Path) -> None:
-        stub_geometry["A1AEI"] = [_copy(seq, residues=(1, 2, 3, 4, 5, 6)) for seq in (601, 602, 603)]
+        stub_geometry["A1AEI"] = [
+            _copy(seq, residues=(1, 2, 3, 4, 5, 6)) for seq in (601, 602, 603)
+        ]
         assert detect_dual_role_ligands("X", _entry(), tmp_path) == []
 
     def test_copy_flood_rejected(self, stub_geometry, tmp_path: Path) -> None:
@@ -176,8 +179,6 @@ class TestShortCircuits:
     def test_no_gpcr_chain_skips(self, stub_geometry, tmp_path: Path) -> None:
         assert detect_dual_role_ligands("X", _entry(gpcr_slug="gnas2_human"), tmp_path) == []
 
-    def test_missing_structure_skips(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_missing_structure_skips(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.setattr(detector_geometry, "load_structure", lambda *a, **k: None)
         assert detect_dual_role_ligands("X", _entry(), tmp_path) == []

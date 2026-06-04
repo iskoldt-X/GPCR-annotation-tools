@@ -286,8 +286,8 @@ Tab-separated, normalized files ready for database ingestion:
 
 | File | Contents |
 |------|----------|
-| `structures.csv` | PDB ID, receptor UniProt, method, resolution, state, chain, date |
-| `ligands.csv` | Ligand names, PubChem IDs, roles, binding site, types, SMILES, InChIKey, sequences |
+| `structures.csv` | PDB ID, receptor UniProt, method, resolution, state, chain, date, and (for a heterodimer) the partner protomer's UniProt + chain |
+| `ligands.csv` | Ligand names, PubChem IDs, roles, binding site, types, SMILES, InChIKey, sequences, and whether the bound compound is an endogenous ligand |
 | `g_proteins.csv` | G-protein subunit UniProt IDs and chain assignments |
 | `arrestins.csv` | Arrestin UniProt IDs and chains |
 | `fusion_proteins.csv` | Fusion protein names |
@@ -329,9 +329,12 @@ src/gpcr_tools/
 │   └── watcher.py             #   Filesystem watcher for manual PDF drops
 │
 ├── detector/                  # Pre-annotation detect stage (runs before annotate)
-│   ├── signals.py             #   DetectSignal contract + critical-warning formatting
+│   ├── signals.py             #   DetectSignal contract (advisory→prompt, review→curator)
 │   ├── gprotein.py            #   G-protein alpha5 identity detector
-│   ├── ligands.py             #   Excluded-but-real ligand detector (e.g. palmitate)
+│   ├── coupling.py            #   G-protein-coupling protomer of a dimer (geometry)
+│   ├── site_ref.py            #   Ligand binding-site detector (geometry → generic numbers)
+│   ├── geometry.py            #   Dual-role ligand detector (multi-pocket burial)
+│   ├── ligands.py             #   Incidental-candidate ligand detector (cholesterol, palmitate)
 │   └── stage.py               #   enriched -> signals -> detect/{pdb_id}.json
 │
 ├── annotator/                 # Stage 3: Gemini AI annotation
@@ -347,11 +350,14 @@ src/gpcr_tools/
 │   ├── ground_truth.py        #   PDB/UniProt ground truth injection
 │   └── runner.py              #   12-step orchestration with error isolation
 │
-├── validator/                 # 7-validator cross-check chain
+├── validator/                 # Cross-validation + enrichment modules
 │   ├── chimera.py             #   G-protein alpha5 identity (sequence matching)
 │   ├── receptor_validator.py  #   UniProt identity verification
-│   ├── ligand_validator.py    #   PDB-CCD existence check
+│   ├── ligand_validator.py    #   PDB-CCD existence check + endogenous tagging
+│   ├── endogenous.py          #   Endogenous-ligand classifier (GtoPdb table)
 │   ├── oligomer.py            #   Complex classification + 7TM completeness
+│   ├── geometry.py            #   Contact / burial geometry (gemmi)
+│   ├── generic_numbering.py   #   UniProt position → GPCRdb generic number
 │   ├── integrity_checker.py   #   Structural consistency validation
 │   └── api_clients.py         #   Shared API wrappers with retry + caching
 │
@@ -401,7 +407,7 @@ pytest tests/ -v
 
 ### Test Suite
 
-The test suite includes 770+ tests:
+The test suite includes 1,100+ tests:
 
 - **Unit tests** for every module across all five pipeline stages
 - **Integration tests** for the full aggregation pipeline, error isolation, and atomic write safety
@@ -422,4 +428,9 @@ GitHub Actions workflows run on every push and pull request:
 
 ## License
 
-This project is licensed under the [Apache License 2.0](LICENSE).
+This project's source code is licensed under the [Apache License 2.0](LICENSE).
+
+It bundles third-party reference data under `src/gpcr_tools/data/`, each retaining its
+own license: the GPCRdb generic-numbering table (CC BY 4.0) and the IUPHAR/BPS Guide to
+PHARMACOLOGY endogenous-ligand set (ODbL + CC BY-SA 4.0). See [`NOTICE`](NOTICE) for
+attribution and terms.

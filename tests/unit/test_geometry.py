@@ -44,9 +44,7 @@ class TestBurial:
         # Atoms only on one hemisphere (a surface-exposed copy) cover well under half.
         origin = gemmi.Position(0.0, 0.0, 0.0)
         env = [
-            gemmi.Position(d.x * 3.0, d.y * 3.0, d.z * 3.0)
-            for d in _SPHERE_DIRECTIONS
-            if d.x > 0.5
+            gemmi.Position(d.x * 3.0, d.y * 3.0, d.z * 3.0) for d in _SPHERE_DIRECTIONS if d.x > 0.5
         ]
         assert _burial(origin, env) < 0.8
 
@@ -106,9 +104,7 @@ class TestFetchStructure:
         monkeypatch.setattr(requests, "get", boom)
         assert fetch_structure("9IIX", tmp_path) == cached
 
-    def test_downloads_and_caches(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_downloads_and_caches(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResp(b"coords"))
         path = fetch_structure("9IIX", tmp_path)
         assert path is not None and path.read_bytes() == b"coords"

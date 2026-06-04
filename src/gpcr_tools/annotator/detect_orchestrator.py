@@ -10,7 +10,7 @@ When there are no advisory signals the prompt block is ``None`` and the tool /
 config are returned by identity, so an ordinary structure is byte-for-byte
 unchanged.
 
-NOTE: the user-facing wording in the prompt block is a DRAFT pending review.
+The model-facing wording of the evidence block is locked by a snapshot test.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ _MODEL_FACING_KINDS = frozenset(
     }
 )
 
-# DRAFT wording -- pending Binghan's word-by-word review.
+# Header for the model-facing detector-evidence block (wording locked by a snapshot test).
 _DETECT_BLOCK_HEADER = (
     "=== DETECTOR EVIDENCE (computed before annotation) ===\n"
     "Treat each item below as evidence to weigh against the paper, not as a "
@@ -61,7 +61,7 @@ _DETECT_BLOCK_HEADER = (
 
 
 def _format_signal(signal: DetectSignal) -> str | None:
-    """Render one advisory signal as a prompt evidence line (DRAFT wording).
+    """Render one advisory signal as a prompt evidence line.
 
     Returns ``None`` for any kind without a reviewed model-facing formatter, so
     an unreviewed summary (e.g. a future detector kind's note) is never leaked

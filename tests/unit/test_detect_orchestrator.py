@@ -229,7 +229,12 @@ def test_detect_block_golden_snapshot() -> None:
         severity=SEVERITY_ADVISORY,
     )
     block = assemble_detect_block(
-        [chimeric, _coupling_advisory(), _incidental_candidate("CLR"), _site_ref("ADN", ["orthosteric"])]
+        [
+            chimeric,
+            _coupling_advisory(),
+            _incidental_candidate("CLR"),
+            _site_ref("ADN", ["orthosteric"]),
+        ]
     )
     expected = (
         "=== DETECTOR EVIDENCE (computed before annotation) ===\n"
