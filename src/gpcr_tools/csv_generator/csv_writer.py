@@ -40,6 +40,7 @@ def transform_for_csv(pdb_id: str, data: dict) -> dict[str, list[dict[str, str]]
         build_structure_note,
         collect_ligand_chains,
         map_label_asym_id,
+        resolve_partner_protomer,
     )
 
     rows_map: dict[str, list[dict[str, str]]] = {fname: [] for fname in CSV_SCHEMA}
@@ -65,6 +66,9 @@ def transform_for_csv(pdb_id: str, data: dict) -> dict[str, list[dict[str, str]]
     # ── Structure note enrichment ──────────────────────────────────
     s_note = build_structure_note(s_info, oligo, truncation_note)
 
+    # ── Dimer partner protomer (recorded, not dropped) ─────────────
+    partner_uniprot, partner_chain = resolve_partner_protomer(oligo, receptor_chain)
+
     # ── structures.csv ─────────────────────────────────────────────
     rows_map["structures.csv"].append(
         {
@@ -75,6 +79,8 @@ def transform_for_csv(pdb_id: str, data: dict) -> dict[str, list[dict[str, str]]
             "State": sanitize_value((s_info.get("state") or {}).get("value") or "").capitalize(),
             "ChainID": receptor_chain,
             "label_asym_id": map_label_asym_id(receptor_chain, label_map),
+            "Partner_UniProt": partner_uniprot,
+            "Partner_ChainID": partner_chain,
             "Note": s_note,
             "Date": sanitize_value(s_info.get("release_date")),
         }

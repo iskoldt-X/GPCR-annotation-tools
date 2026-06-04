@@ -37,7 +37,10 @@ class TestGpcrdbColumnContract:
             "Note",
             "Date",
         )
-        assert "label_asym_id" in CSV_SCHEMA["structures.csv"][8:]
+        # Our extra columns are appended after the positional contract, never inserted.
+        assert {"label_asym_id", "Partner_UniProt", "Partner_ChainID"} <= set(
+            CSV_SCHEMA["structures.csv"][8:]
+        )
 
     def test_ligands_core_columns(self):
         assert CSV_SCHEMA["ligands.csv"][:10] == (
@@ -112,6 +115,26 @@ class TestTransformForCSV:
         assert row["State"] == "Active"
         assert row["ChainID"] == "R"
         assert row["Date"] == "2025-01-15"
+        # A monomer has no partner protomer.
+        assert row["Partner_UniProt"] == ""
+        assert row["Partner_ChainID"] == ""
+
+    def test_heterodimer_partner_columns(self, sample_pdb_data):
+        # GABA-B: primary GABBR2 (B); the partner GABBR1 (A) is recorded, not dropped.
+        data = copy.deepcopy(sample_pdb_data)
+        data["receptor_info"] = {"uniprot_entry_name": "gabr2_human", "chain_id": "B"}
+        data["oligomer_analysis"] = {
+            "all_gpcr_chains": [
+                {"chain_id": "A", "slug": "gabr1_human"},
+                {"chain_id": "B", "slug": "gabr2_human"},
+            ],
+            "primary_protomer_suggestion": {"chain_id": "B", "reason": "coupling"},
+        }
+        row = transform_for_csv("TEST1", data)["structures.csv"][0]
+        assert row["Receptor_UniProt"] == "gabr2_human"
+        assert row["ChainID"] == "B"
+        assert row["Partner_UniProt"] == "gabr1_human"
+        assert row["Partner_ChainID"] == "A"
 
     def test_ligands_csv_row(self, sample_pdb_data):
         result = transform_for_csv("TEST1", sample_pdb_data)
