@@ -439,19 +439,6 @@ LIGAND_EXCLUDE_LIST: frozenset[str] = frozenset(
     }
 )
 
-# Exclude-list members that can nonetheless be a real functional ligand: a
-# detector surfaces them for review when present, since they are stripped from
-# the metadata before the model sees them. Cholesterol (CLR) is intentionally
-# NOT here — it is not on the exclude list (the model already sees it), and its
-# agonist-vs-structural-lipid role is handled by the incidental-candidate prompt
-# fork, not this detector.
-# NOTE: PLM is ALSO in INCIDENTAL_CANDIDATES (below), which now OWNS it: the
-# incidental-candidate fork un-strips PLM and guides the model, so detect_excluded_real_ligands
-# subtracts INCIDENTAL_CANDIDATES and PLM no longer fires a (now-false) "hidden"
-# review. This set is the framework for any future excluded-but-NOT-incidental
-# real ligand; with only PLM today it is effectively dormant.
-EXCLUDED_REAL_LIGAND_INTEREST: frozenset[str] = frozenset({"PLM"})
-
 # Incidental-candidate molecules: present in many structures as EITHER a functional ligand OR
 # an incidental / structural lipid. The incidental-candidate prompt fork presents
 # them to the model (any member on LIGAND_EXCLUDE_LIST, e.g. PLM, is un-stripped

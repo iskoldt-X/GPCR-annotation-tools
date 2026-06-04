@@ -1,10 +1,9 @@
-"""Pre-annotation detector for real ligands hidden by the buffer exclude list.
+"""Pre-annotation detector for incidental-candidate molecules.
 
-Some components on ``LIGAND_EXCLUDE_LIST`` are stripped from the metadata before
-the model sees it (so common buffers/ions/sugars do not pollute the annotation).
-A few of those can nonetheless be a genuine functional ligand (palmitate, for
-example). When one is present, the model is blind to it, so this detector
-surfaces it for human review.
+A molecule on the curated ``INCIDENTAL_CANDIDATES`` set (cholesterol, palmitate)
+can be EITHER a functional ligand OR an incidental structural additive. When one
+is present this surfaces it as advisory evidence so the model judges the role
+itself -- and the exclude-list strip is bypassed so the model can see it.
 
 This is metadata-only (no sequence/UniProt fetch), so it always runs.
 """
@@ -14,15 +13,11 @@ from __future__ import annotations
 from typing import Any
 
 from gpcr_tools.config import (
-    EXCLUDED_REAL_LIGAND_INTEREST,
     INCIDENTAL_CANDIDATES,
-    LIGAND_EXCLUDE_LIST,
     LOCUS_LIGANDS,
 )
 from gpcr_tools.detector.signals import (
     SEVERITY_ADVISORY,
-    SEVERITY_REVIEW,
-    SIGNAL_EXCLUDED_REAL_LIGAND,
     SIGNAL_INCIDENTAL_CANDIDATE,
     DetectSignal,
 )
@@ -41,42 +36,6 @@ def _nonpolymer_comp_ids(enriched_entry: dict[str, Any]) -> list[str]:
         if comp_id:
             ids.append(comp_id)
     return ids
-
-
-def detect_excluded_real_ligands(
-    pdb_id: str,
-    enriched_entry: dict[str, Any],
-) -> list[DetectSignal]:
-    """One review signal per high-interest ligand that is present but excluded.
-
-    Only components that are BOTH high-interest AND actually on the exclude list
-    are flagged — so a high-interest code that is not excluded (it already
-    reaches the model) is never mis-reported here. One signal per component
-    keeps each anchored to a single id and avoids plural-grammar pitfalls.
-
-    Incidental-candidate molecules are subtracted: the incidental-candidate fork un-strips them and
-    guides the model directly (accommodate + guide), so they must NOT also fire a
-    "stripped before the model sees it" review -- that claim would be false and
-    the two pathways would contradict.
-    """
-    present = set(_nonpolymer_comp_ids(enriched_entry))
-    hidden = sorted(
-        present & EXCLUDED_REAL_LIGAND_INTEREST & LIGAND_EXCLUDE_LIST - INCIDENTAL_CANDIDATES
-    )
-    return [
-        DetectSignal(
-            kind=SIGNAL_EXCLUDED_REAL_LIGAND,
-            target_ref=LOCUS_LIGANDS,
-            summary=(
-                f"{code} is present in the structure but on the buffer exclude "
-                f"list, so it is stripped before the model sees it; confirm "
-                f"whether it is a functional ligand."
-            ),
-            payload={"comp_id": code},
-            severity=SEVERITY_REVIEW,
-        )
-        for code in hidden
-    ]
 
 
 def detect_incidental_candidates(

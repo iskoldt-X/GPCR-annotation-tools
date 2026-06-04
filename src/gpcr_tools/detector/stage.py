@@ -18,7 +18,7 @@ from gpcr_tools.config import get_config
 from gpcr_tools.detector.coupling import detect_coupling_protomer
 from gpcr_tools.detector.geometry import detect_dual_role_ligands
 from gpcr_tools.detector.gprotein import detect_g_protein_identity
-from gpcr_tools.detector.ligands import detect_excluded_real_ligands, detect_incidental_candidates
+from gpcr_tools.detector.ligands import detect_incidental_candidates
 from gpcr_tools.detector.signals import DetectSignal
 from gpcr_tools.detector.site_ref import detect_site_refs
 from gpcr_tools.validator.cache import SequenceCache
@@ -78,7 +78,6 @@ def run_detect(
     signals: list[DetectSignal] = []
 
     # Metadata-only detectors (no external fetch) always run.
-    signals.extend(detect_excluded_real_ligands(pdb_id, entry))
     signals.extend(detect_incidental_candidates(pdb_id, entry))
 
     # Detectors needing a network fetch (UniProt references, coordinate files).
