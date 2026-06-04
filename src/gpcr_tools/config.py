@@ -557,7 +557,20 @@ SITE_REF_VALUES: tuple[str, ...] = (
 # numbers). Most classes share the 7TM mid-bundle core; the taste-type-2 pocket
 # (class 009) sits deeper, so it has its own signature.
 ORTHOSTERIC_CORE_GENERIC: frozenset[str] = frozenset(
-    {"3x32", "3x33", "3x36", "5x43", "5x461", "6x48", "6x51", "6x55", "7x38", "7x39", "7x42", "7x43"}
+    {
+        "3x32",
+        "3x33",
+        "3x36",
+        "5x43",
+        "5x461",
+        "6x48",
+        "6x51",
+        "6x55",
+        "7x38",
+        "7x39",
+        "7x42",
+        "7x43",
+    }
 )
 ORTHOSTERIC_CORE_GENERIC_T2: frozenset[str] = frozenset(
     {"3x47", "3x50", "3x51", "5x54", "5x58", "6x37", "6x38", "7x49", "7x53", "7x56"}

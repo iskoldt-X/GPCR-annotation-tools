@@ -14,7 +14,9 @@ class TestListItemIdentity:
         assert list_item_identity({"chem_comp_id": "CLR"}, "chem_comp_id", 0) == "CLR"
 
     def test_distinct_sites_do_not_collapse(self) -> None:
-        a = list_item_identity({"chem_comp_id": "A1AEI", "site_ref": "orthosteric"}, "chem_comp_id", 0)
+        a = list_item_identity(
+            {"chem_comp_id": "A1AEI", "site_ref": "orthosteric"}, "chem_comp_id", 0
+        )
         b = list_item_identity(
             {"chem_comp_id": "A1AEI", "site_ref": "extracellular_vestibule"}, "chem_comp_id", 1
         )

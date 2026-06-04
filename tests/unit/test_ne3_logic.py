@@ -39,8 +39,9 @@ class TestResolvePartnerProtomer:
         assert resolve_partner_protomer(oligo, "A") == ("gabr2_human", "B")
 
     def test_higher_order_joins_extra_chains(self) -> None:
-        oligo = _oligo(("A", "gp156_human"), ("B", "gp156_human"),
-                       ("C", "gp156_human"), ("D", "gp156_human"))
+        oligo = _oligo(
+            ("A", "gp156_human"), ("B", "gp156_human"), ("C", "gp156_human"), ("D", "gp156_human")
+        )
         partner_uniprot, partner_chains = resolve_partner_protomer(oligo, "A")
         assert partner_uniprot == "gp156_human"
         assert partner_chains == "B, C, D"
@@ -53,6 +54,7 @@ class TestResolvePartnerProtomer:
         # rather than treating every chain as a partner.
         oligo = _oligo(("A", "gabr1_human"), ("B", "gabr2_human"))
         assert resolve_partner_protomer(oligo, "") == ("", "")
+
 
 # ── map_label_asym_id ────────────────────────────────────────────────
 

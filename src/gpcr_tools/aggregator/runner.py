@@ -160,9 +160,7 @@ def _build_validation_report(
     # signal -- and any signal whose severity failed safe to review -- never
     # reaches a human. Kinds the aggregator re-derives itself are excluded above.
     detect_reviews = [
-        s
-        for s in load_detect_signals(pdb_id)
-        if s.kind not in _AGGREGATOR_OWNED_REVIEW_KINDS
+        s for s in load_detect_signals(pdb_id) if s.kind not in _AGGREGATOR_OWNED_REVIEW_KINDS
     ]
     report["critical_warnings"].extend(to_critical_warnings(detect_reviews))
 
@@ -252,7 +250,8 @@ def _build_validation_report(
         # alpha5-graft: the engineered scaffold differs from the functional
         # alpha5 (~6% of G-alpha structures). Record the backbone for provenance
         # (export still collapses to the functional identity) and note it --
-        # informational, not a conflict (the alpha5 IS the identity, per Gaspar).
+        # informational, not a conflict: the alpha5 helix is the principal
+        # receptor-coupling determinant, so it defines the G-alpha identity.
         if chimera_result.get("is_alpha5_graft"):
             backbone_slug = chimera_result.get("backbone_slug")
             backbone_family = chimera_result.get("backbone_family")
@@ -486,9 +485,7 @@ def aggregate_pdb(
         # 8. Oligomer analysis (mutates best_run_data — may override chain_id). The
         # detect stage's geometric coupling-protomer signal, when present, selects the
         # primary protomer (the G-protein coupler) over the AI's chain guess.
-        analyze_oligomer(
-            pdb_id, best_run_data, enriched, coupling_chain=_coupling_protomer(pdb_id)
-        )
+        analyze_oligomer(pdb_id, best_run_data, enriched, coupling_chain=_coupling_protomer(pdb_id))
 
         # 9. Compute discrepancies
         discrepancies = find_discrepancies(best_run_data, majority_votes, all_votes)

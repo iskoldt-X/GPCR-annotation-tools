@@ -59,7 +59,7 @@ def classify_endogenous(inchikey: str | None, pubchem_cid: str | None) -> str:
     if not inchikeys and not cids:
         return ENDOGENOUS_UNKNOWN
     ik = (inchikey or "").strip()
-    cid = (str(pubchem_cid).strip() if pubchem_cid is not None else "")
+    cid = str(pubchem_cid).strip() if pubchem_cid is not None else ""
     if cid == "0":  # PubChem CID "0"/0 conventionally means "no CID" -> not an identifier
         cid = ""
     if not ik and not cid:
