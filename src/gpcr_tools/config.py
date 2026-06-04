@@ -852,6 +852,12 @@ CSV_SCHEMA: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
             "Note",
             "Date",
             "label_asym_id",
+            # APPENDED, never inserted: the downstream build reads the leading columns
+            # positionally, so new columns go at the end. The other protomer(s) of a
+            # dimer -- the partner gene a heterodimer would otherwise drop (GABA-B:
+            # GABBR1 alongside the GABBR2 primary).
+            "Partner_UniProt",
+            "Partner_ChainID",
         ),
         "ligands.csv": (
             "PDB",
