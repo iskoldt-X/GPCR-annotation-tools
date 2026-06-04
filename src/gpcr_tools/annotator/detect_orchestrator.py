@@ -27,6 +27,7 @@ from gpcr_tools.annotator.schema import (
 from gpcr_tools.detector.signals import (
     SEVERITY_ADVISORY,
     SIGNAL_CHIMERIC_GPROTEIN,
+    SIGNAL_COUPLING_PROTOMER,
     SIGNAL_DUAL_ROLE_LIGAND,
     SIGNAL_INCIDENTAL_CANDIDATE,
     SIGNAL_SITE_REF,
@@ -37,13 +38,14 @@ from gpcr_tools.detector.signals import (
 _MAX_POCKET_RESIDUES_SHOWN = 12
 
 # The advisory kinds that have a reviewed, model-facing formatter below. ONLY
-# these reach the prompt. Any other advisory kind -- e.g. a coupling-protomer
-# signal, whose summary is written for the curator, or a future detector kind --
-# is dropped here rather than leaked verbatim into the model prompt. Add a kind
-# to this set only together with a reviewed formatter branch in _format_signal.
+# these reach the prompt. Any other advisory kind -- e.g. a future detector kind
+# with no reviewed formatter yet -- is dropped here rather than leaked verbatim
+# into the model prompt. Add a kind to this set only together with a reviewed
+# formatter branch in _format_signal.
 _MODEL_FACING_KINDS = frozenset(
     {
         SIGNAL_CHIMERIC_GPROTEIN,
+        SIGNAL_COUPLING_PROTOMER,
         SIGNAL_INCIDENTAL_CANDIDATE,
         SIGNAL_DUAL_ROLE_LIGAND,
         SIGNAL_SITE_REF,
@@ -62,8 +64,8 @@ def _format_signal(signal: DetectSignal) -> str | None:
     """Render one advisory signal as a prompt evidence line (DRAFT wording).
 
     Returns ``None`` for any kind without a reviewed model-facing formatter, so
-    an unreviewed summary (e.g. a coupling-protomer note) is never leaked into
-    the prompt. Only kinds in ``_MODEL_FACING_KINDS`` produce a line.
+    an unreviewed summary (e.g. a future detector kind's note) is never leaked
+    into the prompt. Only kinds in ``_MODEL_FACING_KINDS`` produce a line.
     """
     if signal.kind not in _MODEL_FACING_KINDS:
         return None
@@ -72,18 +74,26 @@ def _format_signal(signal: DetectSignal) -> str | None:
         tail = payload.get("a5_tail") or "?"
         family = payload.get("family") or "?"
         subtype = payload.get("subtype") or "an indistinguishable subtype"
-        score = payload.get("score")
         return (
             f"G-protein alpha5 analysis: the modelled alpha5 tail '{tail}' matches the "
-            f"{family} family (subtype {subtype}, score {score}). Weigh this against the "
-            f"paper before assigning the G-alpha identity."
+            f"{family} family (subtype {subtype}). Weigh this against the paper before "
+            f"assigning the G-alpha identity."
+        )
+    if signal.kind == SIGNAL_COUPLING_PROTOMER:
+        chain = payload.get("coupling_chain") or "?"
+        slug = payload.get("coupling_slug") or "?"
+        return (
+            f"Structure geometry shows the G protein engages receptor chain {chain} "
+            f"({slug}); that protomer is the active, G-protein-coupling one — in a "
+            f"heterodimer not necessarily the agonist-binding protomer. Weigh this "
+            f"against the paper."
         )
     if signal.kind == SIGNAL_INCIDENTAL_CANDIDATE:
         comp = payload.get("comp_id") or "?"
         return (
-            f"{comp} is present and is a disputed molecule (a functional ligand in some "
-            f"structures, an incidental structural lipid in others). Assess its role from "
-            f"the paper and record a pharmacological_role_check for it."
+            f"{comp} is present; it can be a functional ligand in some structures and an "
+            f"incidental structural component in others. Judge its role from the paper "
+            f"and record a pharmacological_role_check."
         )
     if signal.kind == SIGNAL_DUAL_ROLE_LIGAND:
         return _format_dual_role(payload)

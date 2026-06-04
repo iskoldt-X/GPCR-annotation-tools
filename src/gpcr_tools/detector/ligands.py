@@ -56,9 +56,9 @@ def detect_incidental_candidates(
             kind=SIGNAL_INCIDENTAL_CANDIDATE,
             target_ref=LOCUS_LIGANDS,
             summary=(
-                f"{code} is present and is a disputed molecule: it can be a "
-                f"functional ligand or an incidental structural lipid. Judge its "
-                f"role from the paper and record a pharmacological_role_check."
+                f"{code} is present; it can be a functional ligand or an incidental "
+                f"structural component. Judge its role from the paper and record a "
+                f"pharmacological_role_check."
             ),
             payload={"comp_id": code},
             severity=SEVERITY_ADVISORY,

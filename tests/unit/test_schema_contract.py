@@ -26,3 +26,6 @@ def test_site_ref_enum_matches_config() -> None:
     assert schema_enum is not None
     assert len(schema_enum) == len(set(schema_enum))  # no duplicate members
     assert set(schema_enum) == set(SITE_REF_VALUES)
+
+    # The structure-state enum (incl. its 'unknown' escape) is pinned to the
+    # downstream-accepted CSV tokens by test_state_vocab_contract.

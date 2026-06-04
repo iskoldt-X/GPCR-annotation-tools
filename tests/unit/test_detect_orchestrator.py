@@ -156,41 +156,99 @@ class TestAssembleDetectBlock:
 
 
 def _coupling_advisory() -> DetectSignal:
-    # The coupling-protomer signal's summary is written for the curator, not the
-    # model; it has no reviewed prompt formatter (yet).
     return DetectSignal(
         kind=SIGNAL_COUPLING_PROTOMER,
         target_ref="receptor_info",
-        summary="chain B is the G-protein-coupling protomer",
-        payload={"coupling_chain": "B"},
+        summary="curator-facing summary (not what reaches the prompt)",
+        payload={"coupling_chain": "B", "coupling_slug": "gabbr2_human"},
         severity=SEVERITY_ADVISORY,
     )
 
 
 class TestNoUnreviewedLeakIntoPrompt:
-    """Only kinds with a reviewed model-facing formatter reach the prompt; any
-    other advisory kind is dropped, never leaked verbatim as evidence."""
+    """Only kinds with a reviewed model-facing formatter reach the prompt; a kind
+    without one is dropped, never leaked verbatim as evidence."""
 
-    def test_coupling_advisory_alone_yields_no_block(self) -> None:
-        assert assemble_detect_block([_coupling_advisory()]) is None
-
-    def test_unknown_advisory_kind_yields_no_block(self) -> None:
-        sig = DetectSignal(
+    def _unformatted(self) -> DetectSignal:
+        return DetectSignal(
             kind="some_future_kind",
             target_ref="x",
             summary="raw internal summary that must not reach the model",
             payload={},
             severity=SEVERITY_ADVISORY,
         )
-        assert assemble_detect_block([sig]) is None
 
-    def test_coupling_summary_absent_when_mixed_with_real_signal(self) -> None:
-        # A real signal renders a block, but the coupling summary must not appear.
-        block = assemble_detect_block([_coupling_advisory(), _incidental_candidate("PLM")])
+    def test_unformatted_kind_alone_yields_no_block(self) -> None:
+        assert assemble_detect_block([self._unformatted()]) is None
+
+    def test_unformatted_kind_summary_absent_when_mixed_with_real_signal(self) -> None:
+        block = assemble_detect_block([self._unformatted(), _incidental_candidate("PLM")])
         assert block is not None
         assert "PLM" in block
-        assert "coupling" not in block.lower()
-        assert "chain B" not in block
+        assert "raw internal summary" not in block
+
+
+class TestCouplingProtomerEvidence:
+    """The coupling-protomer signal renders via its own reviewed formatter (it is
+    now model-facing); the curator-facing summary is not what reaches the prompt."""
+
+    def test_coupling_renders_chain_and_slug(self) -> None:
+        block = assemble_detect_block([_coupling_advisory()])
+        assert block is not None
+        assert "chain B" in block
+        assert "gabbr2_human" in block
+        assert "G-protein-coupling" in block
+
+    def test_coupling_does_not_leak_raw_summary(self) -> None:
+        block = assemble_detect_block([_coupling_advisory()])
+        assert block is not None
+        assert "curator-facing summary" not in block
+
+
+def test_no_disputed_phrasing_in_any_ai_facing_string() -> None:
+    # The 'disputed molecule' wording is retired; the field is pharmacological_role_check.
+    from gpcr_tools.annotator.schema import PHARMACOLOGICAL_ROLE_CHECK_SCHEMA
+    from gpcr_tools.detector.ligands import detect_incidental_candidates
+
+    block = assemble_detect_block([_incidental_candidate("CLR")])
+    assert block is not None and "disputed" not in block.lower()
+    assert "disputed" not in (PHARMACOLOGICAL_ROLE_CHECK_SCHEMA.description or "").lower()
+    entry = {"nonpolymer_entities": [{"nonpolymer_comp": {"chem_comp": {"id": "CLR"}}}]}
+    sigs = detect_incidental_candidates("X", entry)
+    assert sigs and all("disputed" not in s.summary.lower() for s in sigs)
+
+
+def test_detect_block_golden_snapshot() -> None:
+    # Locks the exact model-facing wording of every formatter + the deterministic
+    # ordering (by kind). Any accidental wording change fails loudly here.
+    chimeric = DetectSignal(
+        kind=SIGNAL_CHIMERIC_GPROTEIN,
+        target_ref="signaling_partners.g_protein.alpha_subunit",
+        summary="x",
+        payload={"family": "Gi/o", "subtype": "gnai1_human", "a5_tail": "IKENLKDCGLF", "score": 11},
+        severity=SEVERITY_ADVISORY,
+    )
+    block = assemble_detect_block(
+        [chimeric, _coupling_advisory(), _incidental_candidate("CLR"), _site_ref("ADN", ["orthosteric"])]
+    )
+    expected = (
+        "=== DETECTOR EVIDENCE (computed before annotation) ===\n"
+        "Treat each item below as evidence to weigh against the paper, not as a "
+        "settled conclusion:\n"
+        "- G-protein alpha5 analysis: the modelled alpha5 tail 'IKENLKDCGLF' matches "
+        "the Gi/o family (subtype gnai1_human). Weigh this against the paper before "
+        "assigning the G-alpha identity.\n"
+        "- Structure geometry shows the G protein engages receptor chain B "
+        "(gabbr2_human); that protomer is the active, G-protein-coupling one — in a "
+        "heterodimer not necessarily the agonist-binding protomer. Weigh this against "
+        "the paper.\n"
+        "- CLR is present; it can be a functional ligand in some structures and an "
+        "incidental structural component in others. Judge its role from the paper and "
+        "record a pharmacological_role_check.\n"
+        "- ADN: structure geometry places it at the orthosteric site — record "
+        "site_ref='orthosteric' unless the paper clearly says otherwise."
+    )
+    assert block == expected
 
 
 class TestBuildToolForSignals:
