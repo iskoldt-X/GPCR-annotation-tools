@@ -42,12 +42,13 @@ ANNOTATION_TOOL = types.Tool(
                                     "properties": {
                                         "value": {
                                             "type": "string",
-                                            "description": "The state value. Must be one of the specified enum values.",
+                                            "description": "The state value. Must be one of the specified enum values. Use 'unknown' if neither the paper nor the metadata establishes the functional state — do not guess.",
                                             "enum": [
                                                 "inactive",
                                                 "active",
                                                 "other",
                                                 "intermediate",
+                                                "unknown",
                                             ],
                                         },
                                         "confidence": {
@@ -284,7 +285,7 @@ ANNOTATION_TOOL = types.Tool(
                                         },
                                         "note": {
                                             "type": "string",
-                                            "description": "Any notes, e.g., 'Engineered G protein', 'Gs/Gi chimera'. If is_chimera is true, briefly explain the chimera's composition here.",
+                                            "description": "Any notes, e.g., 'Engineered G protein', 'Gs/Gi chimera'. If is_chimeric is true, briefly explain the chimera's composition here.",
                                         },
                                     },
                                     "required": ["alpha_subunit"],
@@ -402,9 +403,9 @@ ANNOTATION_TOOL = types.Tool(
 PHARMACOLOGICAL_ROLE_CHECK_SCHEMA = types.Schema(
     type=types.Type.OBJECT,
     description=(
-        "Only for a disputed molecule flagged by the detector (e.g. cholesterol, "
+        "Only for a detector-flagged incidental-candidate molecule (e.g. cholesterol, "
         "palmitate): your judgment of whether it is a functional ligand or an "
-        "incidental / structural component, with the evidence behind it."
+        "incidental / structural component, with the evidence."
     ),
     properties={
         "is_functional_ligand": types.Schema(
