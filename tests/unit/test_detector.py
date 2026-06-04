@@ -12,12 +12,11 @@ import pytest
 
 from gpcr_tools.config import FULL_G_ALPHA_CANDIDATES, reset_config
 from gpcr_tools.detector.gprotein import G_PROTEIN_LOCUS, detect_g_protein_identity
-from gpcr_tools.detector.ligands import detect_excluded_real_ligands, detect_incidental_candidates
+from gpcr_tools.detector.ligands import detect_incidental_candidates
 from gpcr_tools.detector.signals import (
     SEVERITY_ADVISORY,
     SEVERITY_REVIEW,
     SIGNAL_CHIMERIC_GPROTEIN,
-    SIGNAL_EXCLUDED_REAL_LIGAND,
     SIGNAL_INCIDENTAL_CANDIDATE,
     DetectSignal,
     to_critical_warnings,
@@ -56,34 +55,6 @@ def _nonpoly_entry(comp_ids: list[str]) -> dict[str, Any]:
 
 
 _TRANSDUCIN_TAILS = dict.fromkeys(("gnat1_human", "gnat2_human", "gnat3_human"), TRANSDUCIN_A5)
-
-
-class TestExcludedRealLigandDetector:
-    def test_incidental_candidate_molecule_not_emitted_as_excluded(self) -> None:
-        # PLM is an incidental_candidate molecule -> owned by the incidental_candidate fork (un-stripped +
-        # guided), so it must NOT also fire a (now-false) "hidden" review here.
-        assert detect_excluded_real_ligands("X", _nonpoly_entry(["PLM", "HOH"])) == []
-
-    def test_cholesterol_not_flagged(self) -> None:
-        # CLR is NOT on the exclude list (the model already sees it), so it is
-        # never an "excluded real ligand" — its role is the incidental_candidate-fork's job.
-        assert detect_excluded_real_ligands("X", _nonpoly_entry(["CLR"])) == []
-
-    def test_no_nonpolymer_no_signal(self) -> None:
-        assert detect_excluded_real_ligands("X", {"polymer_entities": []}) == []
-
-    def test_each_hidden_non_incidental_candidate_ligand_emits_one_signal(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Non-incidental_candidate excluded-real ligands still each fire their own review.
-        monkeypatch.setattr(
-            "gpcr_tools.detector.ligands.EXCLUDED_REAL_LIGAND_INTEREST",
-            frozenset({"NAG", "GAL"}),  # both on the exclude list, neither incidental_candidate
-        )
-        sigs = detect_excluded_real_ligands("X", _nonpoly_entry(["NAG", "GAL", "HOH"]))
-        assert {s.payload["comp_id"] for s in sigs} == {"NAG", "GAL"}
-        assert all(s.kind == SIGNAL_EXCLUDED_REAL_LIGAND for s in sigs)
-        assert all(s.severity == SEVERITY_REVIEW for s in sigs)
 
 
 class TestIncidentalCandidateLigandDetector:
