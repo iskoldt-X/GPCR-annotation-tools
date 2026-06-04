@@ -57,7 +57,11 @@ from gpcr_tools.config import (
     LOW_CONFIDENCE_LEVELS,
     get_config,
 )
-from gpcr_tools.detector.signals import SIGNAL_COUPLING_PROTOMER
+from gpcr_tools.detector.signals import (
+    SIGNAL_CHIMERIC_GPROTEIN,
+    SIGNAL_COUPLING_PROTOMER,
+    to_critical_warnings,
+)
 from gpcr_tools.detector.stage import load_detect_signals
 from gpcr_tools.validator.cache import SequenceCache, ValidationCache
 from gpcr_tools.validator.chimera import get_chimera_analysis
@@ -71,6 +75,14 @@ from gpcr_tools.validator.oligomer import (
 from gpcr_tools.validator.receptor_validator import validate_receptor_identity
 
 logger = logging.getLogger(__name__)
+
+# Detect REVIEW signals of these kinds are NOT re-surfaced as critical warnings
+# here: the aggregator re-derives the G-protein review from its own alpha5
+# analysis below, with finer severity tuning (low-confidence -> note, not a
+# blocker). Routing the detect copy too would both duplicate the warning and
+# override that tuning. (The deferred chimera-logic consolidation will collapse
+# the two into a single source.)
+_AGGREGATOR_OWNED_REVIEW_KINDS = frozenset({SIGNAL_CHIMERIC_GPROTEIN})
 
 
 def _coupling_protomer(pdb_id: str) -> str | None:
@@ -142,15 +154,38 @@ def _build_validation_report(
     # model (the oligomer missed-protomer check covers GPCR chains only).
     report["critical_warnings"].extend(reconcile_missed_polymers(enriched_entry, best_run_data))
 
+    # Detect-stage REVIEW signals -> curator critical warnings. This is the
+    # production consumer of the detect review route (advisory signals already
+    # went into the annotation prompt upstream); without it, a detector's review
+    # signal -- and any signal whose severity failed safe to review -- never
+    # reaches a human. Kinds the aggregator re-derives itself are excluded above.
+    detect_reviews = [
+        s
+        for s in load_detect_signals(pdb_id)
+        if s.kind not in _AGGREGATOR_OWNED_REVIEW_KINDS
+    ]
+    report["critical_warnings"].extend(to_critical_warnings(detect_reviews))
+
     # Receptor-side crystallization fusions (BRIL / T4 lysozyme) -- advisory,
     # non-blocking: recorded for the curator, does not gate accept-all.
     report["detector_notes"].extend(detect_crystallization_fusions(enriched_entry))
 
-    # A chimeric G-protein's alpha-subunit identity cannot be resolved reliably
-    # from sequence alone (the tail is degenerate across subtypes), so force a
-    # human to confirm it instead of trusting the model or the tie-break.
+    # Chimeric G-protein review is driven by the deterministic alpha5 analysis,
+    # NOT the model's optional is_chimeric flag (which the model can silently
+    # omit -> a false negative that skips review). The model flag is kept only as
+    # a fallback for when the alpha5 was INCONCLUSIVE -- it never ran
+    # (--skip-api-checks), or ran but could not decide (too short / no reference
+    # comparisons / error). In those cases there is no deterministic ruling, so a
+    # self-declared chimera must still reach a human. When the alpha5 reached a
+    # conclusion the fallback is suppressed: SUCCESS -> the alpha5 routing below
+    # owns the review (it forces review only when it genuinely cannot resolve the
+    # subtype, and stays silent once the identity is settled); NO_G_PROTEIN -> the
+    # hallucination branch below owns it (the algorithm positively found none).
+    status = chimera_result.get("status") or CHIMERA_STATUS_SKIPPED
+    ai_uniprot = extract_ai_g_protein(best_run_data)
     g_protein = (best_run_data.get("signaling_partners") or {}).get("g_protein") or {}
-    if g_protein.get("is_chimeric") is True:
+    alpha5_inconclusive = status not in (CHIMERA_STATUS_SUCCESS, CHIMERA_STATUS_NO_G_PROTEIN)
+    if alpha5_inconclusive and g_protein.get("is_chimeric") is True:
         report["critical_warnings"].append(
             f"{ALERT_PREFIX_CHIMERIC_REVIEW} at "
             f"'signaling_partners.g_protein.alpha_subunit': chimeric G-protein — "
@@ -158,8 +193,6 @@ def _build_validation_report(
         )
 
     # Compare the alpha5 sequence finding against the model's G-alpha claim.
-    status = chimera_result.get("status") or CHIMERA_STATUS_SKIPPED
-    ai_uniprot = extract_ai_g_protein(best_run_data)
 
     if status == CHIMERA_STATUS_SUCCESS:
         family = chimera_result.get("family")

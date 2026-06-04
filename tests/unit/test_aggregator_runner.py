@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import pytest
+
 from gpcr_tools.aggregator.runner import _build_validation_report, _coupling_protomer
 from gpcr_tools.config import (
+    CHIMERA_STATUS_NO_G_PROTEIN,
+    CHIMERA_STATUS_NO_VALID_COMPARISONS,
     CHIMERA_STATUS_SUCCESS,
+    CHIMERA_STATUS_TOO_SHORT,
     CHIMERA_SUBTYPE_FAMILY_ONLY,
     CHIMERA_SUBTYPE_INSEPARABLE_SET,
     CHIMERA_SUBTYPE_LOW_CONFIDENCE,
@@ -12,6 +17,8 @@ from gpcr_tools.config import (
 )
 from gpcr_tools.detector.signals import (
     SEVERITY_ADVISORY,
+    SEVERITY_REVIEW,
+    SIGNAL_CHIMERIC_GPROTEIN,
     SIGNAL_COUPLING_PROTOMER,
     SIGNAL_SITE_REF,
     DetectSignal,
@@ -51,9 +58,15 @@ class TestCouplingProtomer:
         assert _coupling_protomer("X") is None
 
 
+def _no_detect_signals(monkeypatch):
+    """Isolate the report from the real detect sidecar (return no signals)."""
+    monkeypatch.setattr("gpcr_tools.aggregator.runner.load_detect_signals", lambda pdb: [])
+
+
 def _report(best, monkeypatch):
     # Isolate from real integrity checks; we only assert chimeric handling.
     monkeypatch.setattr("gpcr_tools.aggregator.runner.validate_all", lambda *a, **k: [])
+    _no_detect_signals(monkeypatch)
     return _build_validation_report("X", best, {}, [], {}, None)
 
 
@@ -85,9 +98,84 @@ class TestChimericForcesReview:
         report = _report({}, monkeypatch)
         assert not any("chimeric" in w.lower() for w in report["critical_warnings"])
 
+    def test_ai_chimeric_flag_ignored_once_alpha5_ran(self, monkeypatch):
+        # When the deterministic alpha5 analysis ran (status SUCCESS), it owns
+        # the chimeric review: a cleanly-resolved, aligned subtype needs no
+        # manual confirmation. The model's is_chimeric flag must NOT add a
+        # redundant generic 'confirm manually' warning on top.
+        monkeypatch.setattr("gpcr_tools.aggregator.runner.validate_all", lambda *a, **k: [])
+        _no_detect_signals(monkeypatch)
+        best = {
+            "signaling_partners": {
+                "g_protein": {
+                    "is_chimeric": True,
+                    "alpha_subunit": {"uniprot_entry_name": "gnas2_human"},
+                }
+            }
+        }
+        chim = _success(
+            family="Gs",
+            subtype="gnas2_human",
+            subtype_resolution=CHIMERA_SUBTYPE_RESOLVED,
+            candidate_set=["gnas2_human"],
+            score=11,
+            a5_tail="QRMHLRQYELL",
+        )
+        report = _build_validation_report("X", best, {}, [], chim, None)
+        assert not any(
+            "confirm the alpha-subunit identity manually" in w
+            for w in report["critical_warnings"]
+        )
+
+    @pytest.mark.parametrize(
+        "inconclusive_status",
+        [CHIMERA_STATUS_TOO_SHORT, CHIMERA_STATUS_NO_VALID_COMPARISONS, "some_error_status"],
+    )
+    def test_ai_chimeric_flag_fires_when_alpha5_inconclusive(
+        self, inconclusive_status, monkeypatch
+    ):
+        # The alpha5 ran but could not conclude (too short / no references /
+        # error). There is no deterministic ruling, so a self-declared chimera
+        # must STILL route to manual review -- not be downgraded to a generic
+        # "verification could not run" note.
+        monkeypatch.setattr("gpcr_tools.aggregator.runner.validate_all", lambda *a, **k: [])
+        _no_detect_signals(monkeypatch)
+        best = {"signaling_partners": {"g_protein": {"is_chimeric": True, "alpha_subunit": {}}}}
+        chim = {"status": inconclusive_status, "score": 0, "error": "n/a"}
+        report = _build_validation_report("X", best, {}, [], chim, None)
+        assert any(
+            "confirm the alpha-subunit identity manually" in w
+            for w in report["critical_warnings"]
+        )
+
+    def test_ai_chimeric_flag_suppressed_when_no_g_protein(self, monkeypatch):
+        # The algorithm positively found no G-protein: the hallucination branch
+        # owns that case, so the generic chimeric "confirm manually" warning is
+        # not also emitted (it would misleadingly ask to confirm an identity that
+        # the structure does not contain).
+        monkeypatch.setattr("gpcr_tools.aggregator.runner.validate_all", lambda *a, **k: [])
+        _no_detect_signals(monkeypatch)
+        best = {
+            "signaling_partners": {
+                "g_protein": {
+                    "is_chimeric": True,
+                    "alpha_subunit": {"uniprot_entry_name": "gnas2_human"},
+                }
+            }
+        }
+        chim = {"status": CHIMERA_STATUS_NO_G_PROTEIN, "score": 0}
+        report = _build_validation_report("X", best, {}, [], chim, None)
+        assert not any(
+            "confirm the alpha-subunit identity manually" in w
+            for w in report["critical_warnings"]
+        )
+        # ...but the hallucination IS surfaced (AI named a G-protein, algo found none).
+        assert any("NO G-protein" in c or "no g-protein" in c.lower() for c in report["algo_conflicts"])
+
 
 def _chimera_report(chimera_result, ai_uniprot, monkeypatch):
     monkeypatch.setattr("gpcr_tools.aggregator.runner.validate_all", lambda *a, **k: [])
+    _no_detect_signals(monkeypatch)
     best: dict = {}
     if ai_uniprot is not None:
         best = {
@@ -132,6 +220,7 @@ class TestChimeraAlpha5Routing:
 
     def test_alpha5_graft_records_backbone_and_notes(self, monkeypatch):
         monkeypatch.setattr("gpcr_tools.aggregator.runner.validate_all", lambda *a, **k: [])
+        _no_detect_signals(monkeypatch)
         best = {
             "signaling_partners": {
                 "g_protein": {"alpha_subunit": {"uniprot_entry_name": "gna11_human"}}
@@ -158,6 +247,7 @@ class TestChimeraAlpha5Routing:
 
     def test_no_graft_leaves_no_backbone_field(self, monkeypatch):
         monkeypatch.setattr("gpcr_tools.aggregator.runner.validate_all", lambda *a, **k: [])
+        _no_detect_signals(monkeypatch)
         best = {
             "signaling_partners": {
                 "g_protein": {"alpha_subunit": {"uniprot_entry_name": "gnas2_human"}}
@@ -232,3 +322,49 @@ class TestChimeraAlpha5Routing:
         report = _chimera_report(chim, None, monkeypatch)
         signals = report["algo_conflicts"] + report["critical_warnings"] + report["detector_notes"]
         assert any("does not map" in s or "cannot be determined" in s for s in signals)
+
+
+class TestDetectReviewSignalsRouted:
+    """Detect REVIEW signals reach the curator as critical warnings -- the
+    production consumer of the detect review route. The chimeric kind is the
+    one exception: the aggregator re-derives it from its own alpha5 analysis,
+    so routing the detect copy too would duplicate / override that."""
+
+    def _report_with_signals(self, signals, monkeypatch):
+        monkeypatch.setattr("gpcr_tools.aggregator.runner.validate_all", lambda *a, **k: [])
+        monkeypatch.setattr(
+            "gpcr_tools.aggregator.runner.load_detect_signals", lambda pdb: signals
+        )
+        return _build_validation_report("X", {}, {}, [], {}, None)
+
+    def test_review_signal_reaches_critical_warnings(self, monkeypatch):
+        sig = DetectSignal(
+            kind="some_review_kind",
+            target_ref="ligands",
+            summary="a human must look at this",
+            severity=SEVERITY_REVIEW,
+        )
+        report = self._report_with_signals([sig], monkeypatch)
+        assert any("a human must look at this" in w for w in report["critical_warnings"])
+
+    def test_advisory_signal_not_surfaced_as_warning(self, monkeypatch):
+        sig = DetectSignal(
+            kind="some_kind",
+            target_ref="ligands",
+            summary="advisory evidence only",
+            severity=SEVERITY_ADVISORY,
+        )
+        report = self._report_with_signals([sig], monkeypatch)
+        assert not any("advisory evidence only" in w for w in report["critical_warnings"])
+
+    def test_chimeric_review_signal_not_double_surfaced(self, monkeypatch):
+        sig = DetectSignal(
+            kind=SIGNAL_CHIMERIC_GPROTEIN,
+            target_ref="signaling_partners.g_protein.alpha_subunit",
+            summary="alpha5 cannot distinguish the subtype",
+            severity=SEVERITY_REVIEW,
+        )
+        report = self._report_with_signals([sig], monkeypatch)
+        assert not any(
+            "cannot distinguish the subtype" in w for w in report["critical_warnings"]
+        )

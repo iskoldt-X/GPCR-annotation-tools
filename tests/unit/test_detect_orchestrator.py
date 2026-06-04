@@ -18,6 +18,7 @@ from gpcr_tools.detector.signals import (
     SEVERITY_ADVISORY,
     SEVERITY_REVIEW,
     SIGNAL_CHIMERIC_GPROTEIN,
+    SIGNAL_COUPLING_PROTOMER,
     SIGNAL_DUAL_ROLE_LIGAND,
     SIGNAL_INCIDENTAL_CANDIDATE,
     SIGNAL_SITE_REF,
@@ -152,6 +153,44 @@ class TestAssembleDetectBlock:
         assert "104" in block  # a pocket residue of the first copy
         # the partner-contacting copy is flagged as the possible active-state pocket
         assert "active-state pocket" in block
+
+
+def _coupling_advisory() -> DetectSignal:
+    # The coupling-protomer signal's summary is written for the curator, not the
+    # model; it has no reviewed prompt formatter (yet).
+    return DetectSignal(
+        kind=SIGNAL_COUPLING_PROTOMER,
+        target_ref="receptor_info",
+        summary="chain B is the G-protein-coupling protomer",
+        payload={"coupling_chain": "B"},
+        severity=SEVERITY_ADVISORY,
+    )
+
+
+class TestNoUnreviewedLeakIntoPrompt:
+    """Only kinds with a reviewed model-facing formatter reach the prompt; any
+    other advisory kind is dropped, never leaked verbatim as evidence."""
+
+    def test_coupling_advisory_alone_yields_no_block(self) -> None:
+        assert assemble_detect_block([_coupling_advisory()]) is None
+
+    def test_unknown_advisory_kind_yields_no_block(self) -> None:
+        sig = DetectSignal(
+            kind="some_future_kind",
+            target_ref="x",
+            summary="raw internal summary that must not reach the model",
+            payload={},
+            severity=SEVERITY_ADVISORY,
+        )
+        assert assemble_detect_block([sig]) is None
+
+    def test_coupling_summary_absent_when_mixed_with_real_signal(self) -> None:
+        # A real signal renders a block, but the coupling summary must not appear.
+        block = assemble_detect_block([_coupling_advisory(), _incidental_candidate("PLM")])
+        assert block is not None
+        assert "PLM" in block
+        assert "coupling" not in block.lower()
+        assert "chain B" not in block
 
 
 class TestBuildToolForSignals:
