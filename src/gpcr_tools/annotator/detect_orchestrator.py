@@ -36,6 +36,20 @@ from gpcr_tools.detector.signals import (
 # A pocket-residue list is truncated to this many numbers in the prompt evidence.
 _MAX_POCKET_RESIDUES_SHOWN = 12
 
+# The advisory kinds that have a reviewed, model-facing formatter below. ONLY
+# these reach the prompt. Any other advisory kind -- e.g. a coupling-protomer
+# signal, whose summary is written for the curator, or a future detector kind --
+# is dropped here rather than leaked verbatim into the model prompt. Add a kind
+# to this set only together with a reviewed formatter branch in _format_signal.
+_MODEL_FACING_KINDS = frozenset(
+    {
+        SIGNAL_CHIMERIC_GPROTEIN,
+        SIGNAL_INCIDENTAL_CANDIDATE,
+        SIGNAL_DUAL_ROLE_LIGAND,
+        SIGNAL_SITE_REF,
+    }
+)
+
 # DRAFT wording -- pending Binghan's word-by-word review.
 _DETECT_BLOCK_HEADER = (
     "=== DETECTOR EVIDENCE (computed before annotation) ===\n"
@@ -44,8 +58,15 @@ _DETECT_BLOCK_HEADER = (
 )
 
 
-def _format_signal(signal: DetectSignal) -> str:
-    """Render one advisory signal as a prompt evidence line (DRAFT wording)."""
+def _format_signal(signal: DetectSignal) -> str | None:
+    """Render one advisory signal as a prompt evidence line (DRAFT wording).
+
+    Returns ``None`` for any kind without a reviewed model-facing formatter, so
+    an unreviewed summary (e.g. a coupling-protomer note) is never leaked into
+    the prompt. Only kinds in ``_MODEL_FACING_KINDS`` produce a line.
+    """
+    if signal.kind not in _MODEL_FACING_KINDS:
+        return None
     payload = signal.payload or {}
     if signal.kind == SIGNAL_CHIMERIC_GPROTEIN:
         tail = payload.get("a5_tail") or "?"
@@ -78,8 +99,9 @@ def _format_signal(signal: DetectSignal) -> str:
             f"{comp}: structure geometry shows it at {len(sites)} distinct sites "
             f"({', '.join(sites)}) — emit one ligand entry per site, each with its site_ref."
         )
-    # Unknown advisory kind: fall back to the signal's own one-line summary.
-    return signal.summary or signal.kind
+    # A whitelisted kind with no branch above (should not happen): never leak a
+    # raw summary -- the _MODEL_FACING_KINDS guard and this fall-through agree.
+    return None
 
 
 def _format_dual_role(payload: dict[str, Any]) -> str:
@@ -135,7 +157,12 @@ def assemble_detect_block(signals: list[DetectSignal]) -> str | None:
         advisory,
         key=lambda s: (s.kind, s.target_ref, str((s.payload or {}).get("comp_id") or "")),
     )
-    lines = "\n".join(f"- {_format_signal(s)}" for s in ordered)
+    # Drop kinds with no reviewed model-facing formatter (None) -- never leak a
+    # raw summary. If nothing renders, there is no block.
+    rendered = [line for s in ordered if (line := _format_signal(s)) is not None]
+    if not rendered:
+        return None
+    lines = "\n".join(f"- {line}" for line in rendered)
     return f"{_DETECT_BLOCK_HEADER}\n{lines}"
 
 

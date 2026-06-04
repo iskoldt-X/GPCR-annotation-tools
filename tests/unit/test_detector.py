@@ -86,6 +86,43 @@ class TestDetectSignal:
         assert to_critical_warnings(sigs) == ["k2 at 'loc2': review two"]
 
 
+class TestSeverityFailSafe:
+    """Anything that is not an explicit, recognised advisory becomes review, so
+    an unclassified signal is surfaced to a human, never fed to the model."""
+
+    def test_default_severity_is_review(self) -> None:
+        # A detector that forgets to classify its signal must NOT silently get
+        # advisory routing (which would feed the model prompt).
+        assert DetectSignal(kind="k", target_ref="a", summary="b").severity == SEVERITY_REVIEW
+
+    def test_unrecognised_severity_coerced_to_review(self) -> None:
+        sig = DetectSignal("k", "a", "b", severity="totally-bogus")
+        assert sig.severity == SEVERITY_REVIEW
+
+    def test_empty_severity_coerced_to_review(self) -> None:
+        assert DetectSignal("k", "a", "b", severity="").severity == SEVERITY_REVIEW
+
+    def test_explicit_advisory_preserved(self) -> None:
+        sig = DetectSignal("k", "a", "b", severity=SEVERITY_ADVISORY)
+        assert sig.severity == SEVERITY_ADVISORY
+
+    def test_from_dict_missing_severity_is_review(self) -> None:
+        # A serialised signal from a malformed / future version with no severity
+        # key must fail safe to review rather than default to advisory.
+        sig = DetectSignal.from_dict({"kind": "k", "target_ref": "a", "summary": "b"})
+        assert sig.severity == SEVERITY_REVIEW
+
+    def test_from_dict_unrecognised_severity_is_review(self) -> None:
+        sig = DetectSignal.from_dict(
+            {"kind": "k", "target_ref": "a", "summary": "b", "severity": "weird"}
+        )
+        assert sig.severity == SEVERITY_REVIEW
+
+    def test_from_dict_roundtrip_preserves_advisory(self) -> None:
+        original = DetectSignal("k", "a", "b", payload={"x": 1}, severity=SEVERITY_ADVISORY)
+        assert DetectSignal.from_dict(original.to_dict()) == original
+
+
 class TestGProteinDetector:
     def test_transducin_emits_review_signal(self, tmp_path: Path) -> None:
         cache = SequenceCache(tmp_path / "seq.json")
