@@ -531,6 +531,13 @@ GEOMETRY_COUPLING_DECISIVE_RATIO: float = 0.25  # runner-up must be <= this * to
 # never GPCRdb's downstream per-structure curation.
 SITE_REF_DATA_FILE: str = "gpcrdb_generic_numbers.json.gz"
 
+# Endogenous-ligand lookup: a flat set of InChIKeys / PubChem CIDs for every
+# compound the Guide to PHARMACOLOGY lists as an endogenous ligand of any target.
+# is_endogenous is a ligand-intrinsic property (is THIS compound endogenous), not
+# tied to the receptor of a given structure. GtoPdb-derived (CC-BY-SA), built by
+# scripts/build_endogenous_table.py -- upstream-independent of GPCRdb.
+ENDOGENOUS_DATA_FILE: str = "gtopdb_endogenous_ligands.json.gz"
+
 SITE_REF_ORTHOSTERIC: str = "orthosteric"
 SITE_REF_ALLOSTERIC_7TM: str = "allosteric_7tm"
 SITE_REF_EXTRACELLULAR_VESTIBULE: str = "extracellular_vestibule"
@@ -861,6 +868,8 @@ CSV_SCHEMA: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
             "SMILES",
             "InChIKey",
             "Sequence",
+            # Appended: is this bound compound an endogenous ligand (GtoPdb)?
+            "is_endogenous",
         ),
         "g_proteins.csv": (
             "PDB",

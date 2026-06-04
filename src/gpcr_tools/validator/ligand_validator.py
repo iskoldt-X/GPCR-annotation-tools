@@ -24,6 +24,7 @@ from gpcr_tools.config import (
     VALIDATION_MATCHED_SMALL_MOLECULE,
     VALIDATION_SKIPPED_APO,
 )
+from gpcr_tools.validator.endogenous import ENDOGENOUS_UNKNOWN, classify_endogenous
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +99,10 @@ def validate_and_enrich_ligands(
         if not isinstance(lig, dict):
             continue
 
+        # Default: only a matched small molecule can be classified endogenous;
+        # peptides / ions / buffers / ghosts have no usable identifier -> unknown.
+        lig["is_endogenous"] = ENDOGENOUS_UNKNOWN
+
         comp_id = (lig.get("chem_comp_id") or "").strip()
         chain_id = (lig.get("chain_id") or "").strip()
         ai_name = (lig.get("name") or "").strip()
@@ -138,6 +143,9 @@ def validate_and_enrich_ligands(
                 lig["api_pubchem_cid"] = np_match.get("pubchem_cid")
                 lig["SMILES_stereo"] = np_match.get("SMILES_stereo")
                 lig["SMILES"] = np_match.get("SMILES")
+                lig["is_endogenous"] = classify_endogenous(
+                    lig["InChIKey"], lig["api_pubchem_cid"]
+                )
                 continue
 
             if comp_id in LIGAND_EXCLUDE_LIST:
