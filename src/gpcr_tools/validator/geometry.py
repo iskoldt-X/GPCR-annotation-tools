@@ -31,6 +31,7 @@ import gemmi
 import requests
 
 from gpcr_tools.config import (
+    GEOMETRY_BFACTOR_ENV_RADIUS,
     GEOMETRY_BURIAL_CONE_DEG,
     GEOMETRY_BURIAL_SPHERE_DIRS,
     GEOMETRY_CONTACT_RADIUS,
@@ -46,7 +47,7 @@ logger = logging.getLogger(__name__)
 _HETATM_FLAG = "H"  # gemmi residue.het_flag for HETATM (ligands, waters); ATOM is "A"
 
 
-def _is_protein_atom(residue: gemmi.Residue) -> bool:
+def is_protein_atom(residue: gemmi.Residue) -> bool:
     """True for a polymer (protein) residue atom; False for waters / ligands / HET.
 
     A modified standard residue (e.g. selenomethionine) is recorded as HETATM but
@@ -84,7 +85,7 @@ class LigandCopyGeometry:
         return frozenset(num for c, num in self.pocket_residues if c == chain)
 
 
-def _fibonacci_directions(n: int) -> list[gemmi.Vec3]:
+def fibonacci_directions(n: int) -> list[gemmi.Vec3]:
     """Return *n* roughly evenly spread unit directions on the sphere."""
     golden = math.pi * (3.0 - math.sqrt(5.0))
     directions: list[gemmi.Vec3] = []
@@ -97,7 +98,7 @@ def _fibonacci_directions(n: int) -> list[gemmi.Vec3]:
 
 
 # Computed once: the directions are fixed for a given configured count.
-_SPHERE_DIRECTIONS = _fibonacci_directions(GEOMETRY_BURIAL_SPHERE_DIRS)
+_SPHERE_DIRECTIONS = fibonacci_directions(GEOMETRY_BURIAL_SPHERE_DIRS)
 _CONE_COS = math.cos(math.radians(GEOMETRY_BURIAL_CONE_DEG))
 
 
@@ -195,7 +196,7 @@ def _analyze_copy(
             atom.pos, "\0", radius=GEOMETRY_NEIGHBOR_SEARCH_RADIUS
         ):
             cra = mark.to_cra(model)
-            if not _is_protein_atom(cra.residue):  # skip ligands, waters, other HET
+            if not is_protein_atom(cra.residue):  # skip ligands, waters, other HET
                 continue
             res_num = cra.residue.seqid.num
             if res_num is None:
@@ -276,7 +277,7 @@ def ligand_contact_residues(
                     atom.pos, "\0", radius=GEOMETRY_NEIGHBOR_SEARCH_RADIUS
                 ):
                     cra = mark.to_cra(model)
-                    if not _is_protein_atom(cra.residue):
+                    if not is_protein_atom(cra.residue):
                         continue
                     distance = cra.atom.pos.dist(atom.pos)
                     res_num = cra.residue.seqid.num
@@ -318,7 +319,7 @@ def receptor_gprotein_contacts(
         if chain.name not in receptor_chains:
             continue
         for residue in chain:
-            if not _is_protein_atom(residue):  # count receptor protein residues only
+            if not is_protein_atom(residue):  # count receptor protein residues only
                 continue
             touched = False
             for atom in residue:
@@ -332,7 +333,7 @@ def receptor_gprotein_contacts(
                     # nucleotide / ion that happens to sit on the G-alpha chain.
                     if (
                         cra.chain.name in galpha_chains
-                        and _is_protein_atom(cra.residue)
+                        and is_protein_atom(cra.residue)
                         and atom.pos.dist(cra.atom.pos) <= GEOMETRY_CONTACT_RADIUS
                     ):
                         touched = True
@@ -340,3 +341,57 @@ def receptor_gprotein_contacts(
             if touched:
                 counts[chain.name] += 1
     return counts
+
+
+def ligand_bfactor_ratios(structure: gemmi.Structure, comp_id: str) -> list[float | None]:
+    """Per modelled copy of *comp_id*: its mean B-factor / the mean B-factor of the
+    surrounding protein.
+
+    A functional ligand anchored by specific interactions has a B-factor close to
+    its protein environment (ratio ~1); a loosely held structural lipid / detergent
+    is more disordered (ratio >> 1). The environment is protein atoms within
+    ``GEOMETRY_BFACTOR_ENV_RADIUS`` of any ligand atom. Returns ``None`` for a copy
+    with no protein environment or a non-positive environment mean (e.g. a cryo-EM
+    model whose B-factor column is unset), so an absent value never masquerades as
+    a confident ratio. One value per modelled copy, in model order.
+    """
+    model = structure[0]
+    neighbor_search = gemmi.NeighborSearch(
+        model, structure.cell, GEOMETRY_NEIGHBOR_SEARCH_RADIUS
+    ).populate()
+    ratios: list[float | None] = []
+    for chain in model:
+        for residue in chain:
+            if residue.name != comp_id:
+                continue
+            ligand_atoms = list(residue)
+            if not ligand_atoms:
+                ratios.append(None)
+                continue
+            lig_mean = sum(a.b_iso for a in ligand_atoms) / len(ligand_atoms)
+            env_b: dict[tuple[str, int, str], float] = {}
+            for atom in ligand_atoms:
+                for mark in neighbor_search.find_atoms(
+                    atom.pos, "\0", radius=GEOMETRY_BFACTOR_ENV_RADIUS
+                ):
+                    cra = mark.to_cra(model)
+                    if not is_protein_atom(cra.residue):
+                        continue
+                    res_num = cra.residue.seqid.num
+                    if res_num is None:
+                        continue
+                    if atom.pos.dist(cra.atom.pos) <= GEOMETRY_BFACTOR_ENV_RADIUS:
+                        env_b[(cra.chain.name, res_num, cra.atom.name)] = cra.atom.b_iso
+            if not env_b:
+                ratios.append(None)
+                continue
+            env_mean = sum(env_b.values()) / len(env_b)
+            # Need positive B on both sides: a zero ligand mean (e.g. a cryo-EM
+            # entry whose ligand B column is unset while the protein's is set)
+            # would otherwise yield a ratio of 0.0 and read as a perfectly ordered
+            # ligand — the opposite of the truth.
+            if lig_mean > 0 and env_mean > 0:
+                ratios.append(round(lig_mean / env_mean, 2))
+            else:
+                ratios.append(None)
+    return ratios

@@ -19,15 +19,15 @@ from gpcr_tools.validator.geometry import (
     LigandCopyGeometry,
     _burial,
     _centroid,
-    _fibonacci_directions,
     fetch_structure,
+    fibonacci_directions,
     load_structure,
 )
 
 
 class TestFibonacciDirections:
     def test_count_and_unit_length(self) -> None:
-        dirs = _fibonacci_directions(200)
+        dirs = fibonacci_directions(200)
         assert len(dirs) == 200
         for d in dirs:
             assert abs(d.length() - 1.0) < 1e-6

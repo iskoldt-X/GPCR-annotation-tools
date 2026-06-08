@@ -502,7 +502,10 @@ GEOMETRY_BURIAL_MIN: float = 0.80  # a knob: raise toward 0.85 for higher precis
 # least a handful of receptor residues.
 GEOMETRY_CONTACT_RADIUS: float = 4.5
 GEOMETRY_MIN_POCKET_RESIDUES: int = 5
-GEOMETRY_NEIGHBOR_SEARCH_RADIUS: float = 6.0  # >= every query radius above
+GEOMETRY_NEIGHBOR_SEARCH_RADIUS: float = 6.0  # >= every find_atoms query radius
+# Normalised B-factor: protein atoms within this of a ligand atom define its
+# environment. Must stay <= GEOMETRY_NEIGHBOR_SEARCH_RADIUS (the index radius).
+GEOMETRY_BFACTOR_ENV_RADIUS: float = 5.0
 
 # Dual-role rule: the same ligand modelled in two distinct functional pockets on
 # one receptor chain. The copy cap rejects detergent floods (a lipid appears
@@ -510,6 +513,33 @@ GEOMETRY_NEIGHBOR_SEARCH_RADIUS: float = 6.0  # >= every query radius above
 # different (orthosteric vs. allosteric), not the same site re-modelled.
 GEOMETRY_DUAL_ROLE_MAX_COPIES: int = 3
 GEOMETRY_DUAL_ROLE_POCKET_JACCARD_MAX: float = 0.5
+
+# ── Membrane frame (ANVIL-style hydrophobic-slab fit; gemmi-only, no GPCRdb) ──
+# Find the bilayer from coordinates alone: search candidate membrane normals and
+# slab thicknesses for the slab that best encloses exposed HYDROPHOBIC residues
+# while excluding hydrophilic ones. Defaults follow the published ANVIL/Mol*
+# implementation; the exposure proxy + cutoffs are ours and want calibration
+# against OPM on a labelled GPCR set before the values are trusted as exact.
+MEMBRANE_NORMAL_CANDIDATES: int = 175  # candidate normals (golden-spiral sphere points)
+MEMBRANE_THICKNESS_MIN: float = 20.0  # Å, slab total-thickness search lower bound
+MEMBRANE_THICKNESS_MAX: float = 40.0  # Å, upper bound
+MEMBRANE_THICKNESS_STEP: float = 1.0  # Å
+MEMBRANE_OFFSET_STEP: float = 1.0  # Å, slab-centre slide step along the normal
+MEMBRANE_MIN_TM_CA: int = 60  # too few residues -> no reliable frame (None)
+# Surface-exposure proxy (no SASA dep): a residue Cα with fewer than this many
+# other Cα within the radius is treated as surface-exposed (membrane/solvent).
+MEMBRANE_EXPOSURE_CA_RADIUS: float = 10.0  # Å
+MEMBRANE_EXPOSURE_MAX_NEIGHBOR_CA: int = 22
+# Membrane-hydrophobic residue set (aliphatic + aromatic) for the slab objective;
+# all others count as hydrophilic. Polar HIS/SER and side-chain-less GLY are
+# excluded and the aromatic-girdle TYR included; exact membership is
+# calibration-pending (see membrane.py docstring).
+MEMBRANE_HYDROPHOBIC_RESIDUES: frozenset[str] = frozenset(
+    {"ALA", "CYS", "ILE", "LEU", "MET", "PHE", "TRP", "TYR", "VAL"}
+)
+# A ligand centroid within this margin (Å) of the fitted bilayer band counts as
+# "in the membrane band"; the signed depth is reported regardless.
+MEMBRANE_BAND_MARGIN: float = 3.0
 
 # G-protein coupling protomer (detect stage, geometry). A Class C receptor is an
 # obligate dimer and only ONE protomer engages the G protein; in a heterodimer
