@@ -95,7 +95,12 @@ def stub_pipeline(monkeypatch: pytest.MonkeyPatch):
     return copies
 
 
-_ORTH = {"generic_numbers": ["3x33", "6x51"], "segments": ["TM3", "TM6"], "core_hits": 2, "mapped": 10}
+_ORTH = {
+    "generic_numbers": ["3x33", "6x51"],
+    "segments": ["TM3", "TM6"],
+    "core_hits": 2,
+    "mapped": 10,
+}
 _VEST = {"generic_numbers": ["45x52"], "segments": ["ECL2"], "core_hits": 0, "mapped": 8}
 
 

@@ -289,7 +289,9 @@ def ligand_facing_fractions(
             for cn, ca_pos in contact_ca.values():
                 if cn != primary:
                     continue
-                vr = _in_plane(ca_pos.x - center[0], ca_pos.y - center[1], ca_pos.z - center[2], normal)
+                vr = _in_plane(
+                    ca_pos.x - center[0], ca_pos.y - center[1], ca_pos.z - center[2], normal
+                )
                 vl = _in_plane(lcx - ca_pos.x, lcy - ca_pos.y, lcz - ca_pos.z, normal)
                 mr = math.sqrt(vr[0] ** 2 + vr[1] ** 2 + vr[2] ** 2)
                 ml = math.sqrt(vl[0] ** 2 + vl[1] ** 2 + vl[2] ** 2)

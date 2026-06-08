@@ -110,7 +110,14 @@ class TestMembraneFrame:
             _residue(
                 "ARG",
                 i + 1,
-                [_atom("CA", 18 * math.cos(i * 0.7), 18 * math.sin(i * 0.7), -14.0 + 28.0 * (i / 79.0))],
+                [
+                    _atom(
+                        "CA",
+                        18 * math.cos(i * 0.7),
+                        18 * math.sin(i * 0.7),
+                        -14.0 + 28.0 * (i / 79.0),
+                    )
+                ],
             )
             for i in range(80)
         ]
@@ -173,7 +180,14 @@ class TestLigandFacing:
             _residue(
                 "LEU",
                 i + 1,
-                [_atom("CA", center_x + 10 * math.cos(i * math.pi / 6.0), 10 * math.sin(i * math.pi / 6.0), 0.0)],
+                [
+                    _atom(
+                        "CA",
+                        center_x + 10 * math.cos(i * math.pi / 6.0),
+                        10 * math.sin(i * math.pi / 6.0),
+                        0.0,
+                    )
+                ],
             )
             for i in range(12)
         ]
@@ -255,7 +269,10 @@ class TestLigandInteractionCounts:
         lig = _residue(
             "LIG",
             2,
-            [_atom("O1", 3.0, 0.0, 0.0, element="O"), _atom("C1", 0.0, 3.5 + 3.8, 0.0, element="C")],
+            [
+                _atom("O1", 3.0, 0.0, 0.0, element="O"),
+                _atom("C1", 0.0, 3.5 + 3.8, 0.0, element="C"),
+            ],
             het="H",
         )
         assert ligand_interaction_counts(_structure([prot, lig]), "LIG") == [

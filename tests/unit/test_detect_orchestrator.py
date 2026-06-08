@@ -175,7 +175,11 @@ class TestAssembleDetectBlock:
         assert "more than one role" in dual
         assert "entry per" not in dual  # no split command from dual-role
         site = assemble_detect_block(
-            [_site_ref("A1AEI", [_copy(["3x33"], ["TM3"], 1, 0.95), _copy(["45x52"], ["ECL2"], 0, 0.6)])]
+            [
+                _site_ref(
+                    "A1AEI", [_copy(["3x33"], ["TM3"], 1, 0.95), _copy(["45x52"], ["ECL2"], 0, 0.6)]
+                )
+            ]
         )
         assert "one entry per site" in site
 
@@ -270,7 +274,17 @@ def test_detect_block_golden_snapshot() -> None:
             _incidental_candidate("CLR"),
             _site_ref(
                 "ADN",
-                [_copy(["3x33", "6x51"], ["TM3", "TM6"], 2, 0.88, facing=0.9, depth=2.0, in_band=True)],
+                [
+                    _copy(
+                        ["3x33", "6x51"],
+                        ["TM3", "TM6"],
+                        2,
+                        0.88,
+                        facing=0.9,
+                        depth=2.0,
+                        in_band=True,
+                    )
+                ],
             ),
         ]
     )
