@@ -540,6 +540,10 @@ MEMBRANE_HYDROPHOBIC_RESIDUES: frozenset[str] = frozenset(
 # A ligand centroid within this margin (Å) of the fitted bilayer band counts as
 # "in the membrane band"; the signed depth is reported regardless.
 MEMBRANE_BAND_MARGIN: float = 3.0
+# Lipid-facing vs pocket-facing radial test: a contact whose in-plane cosine is
+# within +/- this of 0 (i.e. within ~12 deg of tangential) is ambiguous and
+# excluded from the fraction. Calibration-pending, like the other membrane knobs.
+MEMBRANE_FACING_DEADZONE_COS: float = 0.2
 
 # G-protein coupling protomer (detect stage, geometry). A Class C receptor is an
 # obligate dimer and only ONE protomer engages the G protein; in a heterodimer

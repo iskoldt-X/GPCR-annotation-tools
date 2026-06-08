@@ -12,6 +12,7 @@ import gemmi
 from gpcr_tools.validator.geometry import ligand_bfactor_ratios
 from gpcr_tools.validator.membrane import (
     MembraneFrame,
+    ligand_facing_fractions,
     ligand_membrane_depth,
     membrane_frame,
 )
@@ -45,6 +46,20 @@ def _structure(residues: list[gemmi.Residue], chain_name: str = "A") -> gemmi.St
     for res in residues:
         chain.add_residue(res)
     model.add_chain(chain)
+    st.add_model(model)
+    return st
+
+
+def _multichain_structure(chains: dict[str, list[gemmi.Residue]]) -> gemmi.Structure:
+    st = gemmi.Structure()
+    st.cell = gemmi.UnitCell(400, 400, 400, 90, 90, 90)
+    st.spacegroup_hm = "P 1"
+    model = gemmi.Model("1")
+    for chain_name, residues in chains.items():
+        chain = gemmi.Chain(chain_name)
+        for res in residues:
+            chain.add_residue(res)
+        model.add_chain(chain)
     st.add_model(model)
     return st
 
@@ -133,3 +148,65 @@ class TestLigandBFactorRatios:
     def test_none_when_ligand_b_unset(self):
         # Zero ligand B with a set environment must not read as a perfect ratio of 0.
         assert ligand_bfactor_ratios(self._structure_with_ligand(0.0, 20.0), "LIG") == [None]
+
+
+class TestLigandFacing:
+    _FRAME = MembraneFrame(normal=(0.0, 0.0, 1.0), center=0.0, half_thickness=14.0)
+
+    def _ring_with_ligand(self, lig_x: float) -> gemmi.Structure:
+        # 12 protein Cα on a radius-10 ring in the bilayer band (centroid = origin);
+        # one Cα sits at (10, 0, 0). A one-atom ligand on the x-axis contacts only
+        # that residue (the others are > 4.5 Å away).
+        residues: list[gemmi.Residue] = []
+        for i in range(12):
+            ang = i * (math.pi / 6.0)
+            residues.append(
+                _residue("LEU", i + 1, [_atom("CA", 10 * math.cos(ang), 10 * math.sin(ang), 0.0)])
+            )
+        residues.append(_residue("LIG", 100, [_atom("C1", lig_x, 0.0, 0.0)], het="H"))
+        return _structure(residues)
+
+    def test_pocket_facing_when_inward(self):
+        # Ligand at x=7 is inward of the residue at x=10 -> pocket-facing.
+        assert ligand_facing_fractions(self._ring_with_ligand(7.0), "LIG", self._FRAME) == [1.0]
+
+    def test_lipid_facing_when_outward(self):
+        # Ligand at x=13 is outward of the residue at x=10 -> lipid-facing.
+        assert ligand_facing_fractions(self._ring_with_ligand(13.0), "LIG", self._FRAME) == [0.0]
+
+    def test_none_without_contacts(self):
+        # Ligand far from the ring -> no clear contacts.
+        assert ligand_facing_fractions(self._ring_with_ligand(40.0), "LIG", self._FRAME) == [None]
+
+    @staticmethod
+    def _ring(center_x: float) -> list[gemmi.Residue]:
+        return [
+            _residue(
+                "LEU",
+                i + 1,
+                [_atom("CA", center_x + 10 * math.cos(i * math.pi / 6.0), 10 * math.sin(i * math.pi / 6.0), 0.0)],
+            )
+            for i in range(12)
+        ]
+
+    def test_primary_chain_isolates_bundle_in_dimer(self):
+        # Two bundles: chain A around origin, chain B 60 Å away. The ligand sits in
+        # A's pocket (inward of A's residue at x=10). Using A's own axis -> pocket;
+        # a composite A+B centroid (~x=30) would flip it to lipid.
+        lig = _residue("LIG", 100, [_atom("C1", 7.0, 0.0, 0.0)], het="H")
+        st = _multichain_structure({"A": [*self._ring(0.0), lig], "B": self._ring(60.0)})
+        assert ligand_facing_fractions(st, "LIG", self._FRAME) == [1.0]
+
+    def test_mixed_fraction(self):
+        # Ligand at x=7 contacts the ring residue at x=10 (inward -> pocket) and an
+        # extra inner residue at x=5 (outward -> lipid): 1 of 2 pocket-facing.
+        residues = [*self._ring(0.0), _residue("LEU", 50, [_atom("CA", 5.0, 0.0, 0.0)])]
+        residues.append(_residue("LIG", 100, [_atom("C1", 7.0, 0.0, 0.0)], het="H"))
+        assert ligand_facing_fractions(_structure(residues), "LIG", self._FRAME) == [0.5]
+
+    def test_none_when_primary_chain_not_in_band(self):
+        # Contacted residue (and ligand) lie outside the bilayer band -> the chain
+        # has no in-band Cα, so there is no bundle axis -> None.
+        res = _residue("LEU", 1, [_atom("CA", 10.0, 0.0, 50.0)])
+        lig = _residue("LIG", 2, [_atom("C1", 7.0, 0.0, 50.0)], het="H")
+        assert ligand_facing_fractions(_structure([res, lig]), "LIG", self._FRAME) == [None]

@@ -30,14 +30,19 @@ from __future__ import annotations
 
 import bisect
 import logging
+import math
+from collections import Counter
 from dataclasses import dataclass
 
 import gemmi
 
 from gpcr_tools.config import (
+    GEOMETRY_CONTACT_RADIUS,
+    GEOMETRY_NEIGHBOR_SEARCH_RADIUS,
     MEMBRANE_BAND_MARGIN,
     MEMBRANE_EXPOSURE_CA_RADIUS,
     MEMBRANE_EXPOSURE_MAX_NEIGHBOR_CA,
+    MEMBRANE_FACING_DEADZONE_COS,
     MEMBRANE_HYDROPHOBIC_RESIDUES,
     MEMBRANE_MIN_TM_CA,
     MEMBRANE_NORMAL_CANDIDATES,
@@ -168,3 +173,122 @@ def ligand_membrane_depth(
     signed_depth = (cx * nx + cy * ny + cz * nz) - frame.center
     in_band = abs(signed_depth) <= frame.half_thickness + MEMBRANE_BAND_MARGIN
     return round(signed_depth, 1), in_band
+
+
+def _in_plane(
+    vx: float, vy: float, vz: float, n: tuple[float, float, float]
+) -> tuple[float, float, float]:
+    """Component of a vector in the membrane plane (its normal component removed)."""
+    d = vx * n[0] + vy * n[1] + vz * n[2]
+    return (vx - d * n[0], vy - d * n[1], vz - d * n[2])
+
+
+def _bundle_center(
+    model: gemmi.Model, frame: MembraneFrame, chain_name: str
+) -> tuple[float, float, float] | None:
+    """Centroid of *chain_name*'s protein Cα within the bilayer band ≈ that chain's
+    TM-bundle axis point, the radial origin for lipid-vs-pocket facing.
+
+    Restricted to a single chain on purpose: averaging across all chains would put
+    the origin between the two bundles of a dimer / receptor-plus-transducer
+    complex and flip the pocket/lipid sign for off-centre residues.
+    """
+    nx, ny, nz = frame.normal
+    sx = sy = sz = 0.0
+    k = 0
+    for chain in model:
+        if chain.name != chain_name:
+            continue
+        for residue in chain:
+            if not is_protein_atom(residue):
+                continue
+            ca = next((a for a in residue if a.name == "CA"), None)
+            if ca is None:
+                continue
+            depth = (ca.pos.x * nx + ca.pos.y * ny + ca.pos.z * nz) - frame.center
+            if abs(depth) <= frame.half_thickness:
+                sx += ca.pos.x
+                sy += ca.pos.y
+                sz += ca.pos.z
+                k += 1
+    if k == 0:
+        return None
+    return (sx / k, sy / k, sz / k)
+
+
+def ligand_facing_fractions(
+    structure: gemmi.Structure, comp_id: str, frame: MembraneFrame
+) -> list[float | None]:
+    """Per modelled copy of *comp_id*: the fraction of the contacts on its primary
+    (most-contacted) protein chain that are POCKET-facing rather than lipid-facing.
+
+    Breaks the generic-number "face-blindness": a residue's number is the same
+    whether the ligand touches its pocket-facing (inward) or lipid-facing
+    (outward) side. Radial test in the membrane plane: relative to the TM-bundle
+    axis, a ligand sitting further OUT than the contacted residue is lipid-facing,
+    further IN is pocket-facing; near-tangential contacts (within the cosine
+    dead-zone) are ambiguous and excluded. ``1.0`` = all clear contacts
+    pocket-facing, ``0.0`` = all lipid-facing; ``None`` for a copy with no clear
+    contacts (or no resolvable bundle axis). One value per copy, in model order.
+    """
+    model = structure[0]
+    ns = gemmi.NeighborSearch(model, structure.cell, GEOMETRY_NEIGHBOR_SEARCH_RADIUS).populate()
+    normal = frame.normal
+    results: list[float | None] = []
+    for chain in model:
+        for residue in chain:
+            if residue.name != comp_id:
+                continue
+            ligand_atoms = list(residue)
+            if not ligand_atoms:
+                results.append(None)
+                continue
+            n_at = len(ligand_atoms)
+            lcx = sum(a.pos.x for a in ligand_atoms) / n_at
+            lcy = sum(a.pos.y for a in ligand_atoms) / n_at
+            lcz = sum(a.pos.z for a in ligand_atoms) / n_at
+            # Contacted protein residues -> (chain, Cα), one per residue (the
+            # insertion code is kept so 100 and 100A stay distinct).
+            contact_ca: dict[tuple[str, int, str], tuple[str, gemmi.Position]] = {}
+            for atom in ligand_atoms:
+                for mark in ns.find_atoms(atom.pos, "\0", radius=GEOMETRY_CONTACT_RADIUS):
+                    cra = mark.to_cra(model)
+                    if not is_protein_atom(cra.residue):
+                        continue
+                    res_num = cra.residue.seqid.num
+                    if res_num is None or atom.pos.dist(cra.atom.pos) > GEOMETRY_CONTACT_RADIUS:
+                        continue
+                    key = (cra.chain.name, res_num, cra.residue.seqid.icode)
+                    if key not in contact_ca:
+                        ca = next((a for a in cra.residue if a.name == "CA"), None)
+                        if ca is not None:
+                            contact_ca[key] = (cra.chain.name, ca.pos)
+            if not contact_ca:
+                results.append(None)
+                continue
+            # Bundle axis = the ligand's primary (most-contacted) chain; judge only
+            # that chain's contacts, so a dimer's other protomer (its own axis)
+            # cannot flip the sign.
+            primary = Counter(cn for cn, _ in contact_ca.values()).most_common(1)[0][0]
+            center = _bundle_center(model, frame, primary)
+            if center is None:
+                results.append(None)
+                continue
+            pocket = lipid = 0
+            for cn, ca_pos in contact_ca.values():
+                if cn != primary:
+                    continue
+                vr = _in_plane(ca_pos.x - center[0], ca_pos.y - center[1], ca_pos.z - center[2], normal)
+                vl = _in_plane(lcx - ca_pos.x, lcy - ca_pos.y, lcz - ca_pos.z, normal)
+                mr = math.sqrt(vr[0] ** 2 + vr[1] ** 2 + vr[2] ** 2)
+                ml = math.sqrt(vl[0] ** 2 + vl[1] ** 2 + vl[2] ** 2)
+                if mr < 1e-6 or ml < 1e-6:
+                    continue
+                cosang = (vr[0] * vl[0] + vr[1] * vl[1] + vr[2] * vl[2]) / (mr * ml)
+                if cosang <= -MEMBRANE_FACING_DEADZONE_COS:
+                    pocket += 1
+                elif cosang >= MEMBRANE_FACING_DEADZONE_COS:
+                    lipid += 1
+            total = pocket + lipid
+            results.append(round(pocket / total, 2) if total else None)
+    return results
