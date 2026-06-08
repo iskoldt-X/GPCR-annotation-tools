@@ -1,18 +1,16 @@
-"""Pre-annotation ligand binding-site detector (site_ref), structure geometry.
+"""Pre-annotation ligand binding-site EVIDENCE (site_ref), from structure geometry.
 
-Computes, for every ligand the model will annotate, which receptor site it binds
-(``orthosteric`` / ``allosteric_7tm`` / ``extracellular_vestibule`` /
-``intracellular`` / ``extracellular_domain`` / ``unknown``) and routes it into the
-prompt as evidence. The value is objective and upstream: ligand contact residues
-(gemmi) -> UniProt positions (RCSB alignment) -> GPCRdb generic numbers + segments
-(shipped table) -> a class-aware signature rule. No GPCRdb runtime dependency.
+For every ligand the model will annotate, this computes the objective geometric
+FACTS about where each modelled copy sits -- contact residues (gemmi) -> UniProt
+positions (RCSB alignment) -> GPCRdb generic numbers + segments (shipped table),
+plus enclosure, lipid-vs-pocket facing, and membrane depth -- and routes them into
+the prompt as evidence. It deliberately does NOT compute a site verdict: the model
+infers ``site_ref`` from these facts plus the paper. The old deterministic
+classifier was retired -- a confidently-wrong label dragged the model off the
+right answer; a missing fact is better than a wrong conclusion.
 
-``classify_site`` is the pure rule (signature + segment based, deliberately not
-depth-from-number: TM2/TM4/TM6 are numbered in reverse). ``detect_site_refs`` is
-the detector that wires geometry + alignment + table + rule into advisory signals.
-It needs the coordinate file and the RCSB alignment, so it runs only when API
-checks are enabled. Sparse or unmatched contacts yield no signal -- a missing
-site is better than a wrong one.
+Needs the coordinate file and the RCSB alignment, so it runs only when API checks
+are enabled. Sparse or unmatched contacts yield no facts for that copy.
 """
 
 from __future__ import annotations
@@ -22,89 +20,24 @@ from pathlib import Path
 from typing import Any
 
 from gpcr_tools.config import (
-    EXTRACELLULAR_DOMAIN_SEGMENT,
-    GEOMETRY_BURIAL_MIN,
-    GPCR_CLASS_C,
-    GPCR_CLASS_T2,
-    GPCR_CLASSES_LARGE_ECD,
     INCIDENTAL_CANDIDATES,
-    INTRACELLULAR_SEGMENTS,
     LIGAND_EXCLUDE_LIST,
     LOCUS_LIGANDS,
     ORTHOSTERIC_CORE_GENERIC,
-    ORTHOSTERIC_CORE_GENERIC_T2,
-    SITE_REF_ALLOSTERIC_7TM,
-    SITE_REF_EXTRACELLULAR_DOMAIN,
-    SITE_REF_EXTRACELLULAR_VESTIBULE,
-    SITE_REF_INTRACELLULAR,
     SITE_REF_MIN_MAPPED_CONTACTS,
-    SITE_REF_MIN_ORTHOSTERIC_CORE,
-    SITE_REF_ORTHOSTERIC,
-    SITE_REF_UNKNOWN,
-    VESTIBULE_SEGMENTS,
 )
 from gpcr_tools.detector.signals import SEVERITY_ADVISORY, SIGNAL_SITE_REF, DetectSignal
 from gpcr_tools.validator.api_clients import fetch_polymer_alignment
-from gpcr_tools.validator.generic_numbering import (
-    load_numbering_table,
-    map_contacts,
-    receptor_class,
-)
+from gpcr_tools.validator.generic_numbering import load_numbering_table, map_contacts
 from gpcr_tools.validator.geometry import ligand_contact_residues, load_structure
+from gpcr_tools.validator.membrane import (
+    ligand_facing_fractions,
+    ligand_membrane_depth,
+    membrane_frame,
+)
 from gpcr_tools.validator.oligomer import build_nonpolymer_instance_index, is_gpcr_slug
 
 logger = logging.getLogger(__name__)
-
-
-def classify_site(
-    gpcr_class: str | None,
-    generic_numbers: set[str],
-    segments: set[str],
-) -> str:
-    """Return a ``site_ref`` value for a ligand from its contact signature."""
-    if not generic_numbers and not segments:
-        return SITE_REF_UNKNOWN
-
-    in_tm = any(s.startswith("TM") for s in segments)
-    on_ecd = EXTRACELLULAR_DOMAIN_SEGMENT in segments
-    orthosteric_core = (
-        ORTHOSTERIC_CORE_GENERIC_T2 if gpcr_class == GPCR_CLASS_T2 else ORTHOSTERIC_CORE_GENERIC
-    )
-    # Require several core contacts: a lone grazing core residue (a vestibule
-    # ligand brushing the top of TM3, or a lipid on the bundle's outer face) is
-    # not an orthosteric signature.
-    hits_core = len(generic_numbers & orthosteric_core) >= SITE_REF_MIN_ORTHOSTERIC_CORE
-
-    # Class C: the orthosteric site is the extracellular Venus flytrap; the 7TM
-    # bundle hosts only allosteric modulators. ECD is checked before the 7TM core
-    # by design -- the VFT and the bundle are far apart, so a ligand with N-term
-    # contacts is in the VFT, not a 7TM modulator that happens to graze a loop.
-    if gpcr_class == GPCR_CLASS_C:
-        if on_ecd:
-            return SITE_REF_EXTRACELLULAR_DOMAIN
-        if in_tm:
-            return SITE_REF_ALLOSTERIC_7TM
-        return SITE_REF_UNKNOWN
-
-    # Note: generic numbers + the segments above cover the 7TM core and its loops
-    # plus N-term; adhesion-receptor GAIN-subdomain segments (A.* / B.*) are not in
-    # these sets, so a ligand confined to the GAIN domain falls through to unknown
-    # -- a safe miss rather than a wrong label.
-
-    # Large-ECD classes (B1 secretin, B2 adhesion, F Frizzled CRD): a ligand on
-    # the extracellular domain without reaching the 7TM core binds the ECD.
-    if gpcr_class in GPCR_CLASSES_LARGE_ECD and on_ecd and not hits_core:
-        return SITE_REF_EXTRACELLULAR_DOMAIN
-
-    if hits_core:
-        return SITE_REF_ORTHOSTERIC
-    if segments & INTRACELLULAR_SEGMENTS:
-        return SITE_REF_INTRACELLULAR
-    if segments & VESTIBULE_SEGMENTS:
-        return SITE_REF_EXTRACELLULAR_VESTIBULE
-    if in_tm:
-        return SITE_REF_ALLOSTERIC_7TM
-    return SITE_REF_UNKNOWN
 
 
 def _gpcr_chain_accessions(enriched_entry: dict[str, Any]) -> dict[str, str]:
@@ -144,22 +77,26 @@ def _gpcr_chain_accessions(enriched_entry: dict[str, Any]) -> dict[str, str]:
 def _annotated_ligands(enriched_entry: dict[str, Any]) -> set[str]:
     """Component ids the model annotates: present non-polymers minus the stripped
     buffers (incidental-candidate molecules are un-stripped, so kept). Broad on purpose -- a
-    site label helps every real ligand, not only the studied one."""
+    site fact helps every real ligand, not only the studied one."""
     present = set(build_nonpolymer_instance_index(enriched_entry).keys())
     return present - (LIGAND_EXCLUDE_LIST - INCIDENTAL_CANDIDATES)
 
 
-def _classify_copy(
+def _copy_evidence(
     contacts: list[tuple[str, int, str]],
     chain_accessions: dict[str, str],
     alignment: dict[str, dict[str, list[tuple[int, int, int]]]],
-) -> tuple[str, int]:
-    """Classify one ligand copy from its receptor contacts. Returns (site, mapped)."""
+) -> dict[str, Any] | None:
+    """Objective contact facts for one ligand copy, or ``None`` if too sparse.
+
+    Maps the copy's receptor contacts to GPCRdb generic numbers + segments and
+    counts how many fall in the canonical orthosteric core (a FACT, not a verdict).
+    """
     by_chain: dict[str, list[tuple[int, str]]] = {}
     for auth_chain, label_seq, amino_acid in contacts:
         by_chain.setdefault(auth_chain, []).append((label_seq, amino_acid))
     if not by_chain:
-        return SITE_REF_UNKNOWN, 0
+        return None
     generic_numbers: set[str] = set()
     segments: set[str] = set()
     mapped = 0
@@ -173,25 +110,25 @@ def _classify_copy(
         segments |= s
         mapped += m
     if mapped < SITE_REF_MIN_MAPPED_CONTACTS:
-        return SITE_REF_UNKNOWN, mapped
-    primary_chain = max(by_chain, key=lambda c: len(by_chain[c]))
-    gpcr_class = receptor_class(chain_accessions.get(primary_chain) or "")
-    return classify_site(gpcr_class, generic_numbers, segments), mapped
+        return None
+    return {
+        "generic_numbers": sorted(generic_numbers),
+        "segments": sorted(segments),
+        "core_hits": len(generic_numbers & ORTHOSTERIC_CORE_GENERIC),
+        "mapped": mapped,
+    }
 
 
-def _build_signal(comp_id: str, sites: list[str]) -> DetectSignal:
-    if len(sites) == 1:
-        summary = f"{comp_id} is computed to bind the {sites[0]} site."
-    else:
-        summary = (
-            f"{comp_id} is modelled at {len(sites)} distinct sites "
-            f"({', '.join(sites)}); record one ligand entry per site."
-        )
+def _build_signal(comp_id: str, copies: list[dict[str, Any]]) -> DetectSignal:
+    summary = (
+        f"{comp_id}: geometry facts for {len(copies)} modelled "
+        f"cop{'y' if len(copies) == 1 else 'ies'} (infer the binding site)."
+    )
     return DetectSignal(
         kind=SIGNAL_SITE_REF,
         target_ref=LOCUS_LIGANDS,
         summary=summary,
-        payload={"comp_id": comp_id, "sites": sites},
+        payload={"comp_id": comp_id, "copies": copies},
         severity=SEVERITY_ADVISORY,
     )
 
@@ -201,11 +138,14 @@ def detect_site_refs(
     enriched_entry: dict[str, Any],
     cache_dir: Path,
 ) -> list[DetectSignal]:
-    """One advisory site_ref signal per annotated ligand with a resolved site.
+    """One advisory signal per annotated ligand carrying per-copy geometry facts.
 
-    A ligand at two distinct sites yields a multi-site signal (so the model emits
-    one entry per site). Missing coordinates / alignment, or only sparse/unmatched
-    contacts, yield no signal rather than a guess.
+    Each copy contributes its contact generic numbers + segments + canonical-core
+    count + enclosure + lipid-vs-pocket facing + membrane depth. The model reads
+    these facts (plus the paper) to assign ``site_ref`` itself. Missing coordinates
+    / alignment, or only sparse/unmatched contacts, yield no facts rather than a
+    guess. A ligand modelled at distinct sites simply shows distinct per-copy facts;
+    the model decides whether to emit one entry per site.
     """
     chain_accessions = _gpcr_chain_accessions(enriched_entry)
     if not chain_accessions:
@@ -221,27 +161,39 @@ def detect_site_refs(
         return []
 
     receptor_chains = set(chain_accessions)
+    frame = membrane_frame(structure)
+    # model + per-copy atom lists are only needed for the membrane-depth fact, so
+    # they are resolved only when a frame was fitted.
+    model = structure[0] if frame is not None else None
     signals: list[DetectSignal] = []
     for comp_id in sorted(comp_ids):
-        all_sites: dict[str, int] = {}  # every copy's site -> best mapped count
-        buried_sites: dict[str, int] = {}  # only deeply-buried copies
-        for burial, contacts in ligand_contact_residues(structure, comp_id, receptor_chains):
-            site, mapped = _classify_copy(contacts, chain_accessions, alignment)
-            if site == SITE_REF_UNKNOWN:
-                continue
-            if mapped > all_sites.get(site, 0):
-                all_sites[site] = mapped
-            if burial >= GEOMETRY_BURIAL_MIN and mapped > buried_sites.get(site, 0):
-                buried_sites[site] = mapped
-        if not all_sites:
+        contact_copies = ligand_contact_residues(structure, comp_id, receptor_chains)
+        if not contact_copies:
             continue
-        # A multi-site "emit one entry per site" nudge requires >=2 distinct sites
-        # each from a DEEPLY BURIED copy (a real pocket). A structural lipid
-        # scattered across shallow surface grooves never qualifies, regardless of
-        # how many sites its copies span -- it reports just its dominant site.
-        if len(buried_sites) > 1:
-            site_list = sorted(buried_sites)
-        else:
-            site_list = [max(all_sites, key=lambda s: all_sites[s])]
-        signals.append(_build_signal(comp_id, site_list))
+        # facing + per-copy atom lists are in model order, the same order as
+        # ligand_contact_residues, so they align by index.
+        facings = (
+            ligand_facing_fractions(structure, comp_id, frame)
+            if frame is not None
+            else [None] * len(contact_copies)
+        )
+        atom_lists = (
+            [list(res) for chain in model for res in chain if res.name == comp_id]
+            if model is not None
+            else []
+        )
+        copies: list[dict[str, Any]] = []
+        for i, (burial, contacts) in enumerate(contact_copies):
+            evidence = _copy_evidence(contacts, chain_accessions, alignment)
+            if evidence is None:
+                continue
+            evidence["enclosure"] = round(burial, 2)
+            evidence["facing"] = facings[i] if i < len(facings) else None
+            if frame is not None and i < len(atom_lists):
+                depth_band = ligand_membrane_depth(frame, atom_lists[i])
+                if depth_band is not None:
+                    evidence["depth"], evidence["in_band"] = depth_band
+            copies.append(evidence)
+        if copies:
+            signals.append(_build_signal(comp_id, copies))
     return signals

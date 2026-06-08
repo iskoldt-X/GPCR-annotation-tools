@@ -42,13 +42,19 @@ _ENTRY_9IIX = {
 }
 
 
-def test_9iix_site_ref_resolves_two_sites(tmp_path: Path) -> None:
+def test_9iix_site_ref_emits_two_copy_facts(tmp_path: Path) -> None:
     signals = detect_site_refs("9IIX", _ENTRY_9IIX, tmp_path)
     assert len(signals) == 1
     signal = signals[0]
     assert signal.kind == SIGNAL_SITE_REF
     assert signal.payload["comp_id"] == "A1AEI"
-    sites = signal.payload["sites"]
-    # A1AEI binds the deep orthosteric pocket and the upper extracellular vestibule.
-    assert "orthosteric" in sites
-    assert "extracellular_vestibule" in sites
+    copies = signal.payload["copies"]
+    # A1AEI is modelled at two distinct sites (deep orthosteric + upper vestibule):
+    # two copies with distinct contact facts; the model assigns site_ref from them.
+    assert len(copies) >= 2
+    assert all(c["generic_numbers"] or c["segments"] for c in copies)
+    # The two sites are geometrically distinct (distinct segment sets); the model
+    # reads the per-copy facts and decides whether to emit one entry per site.
+    # (core_hits is a Class A metric and is 0 here -- 9IIX is a taste/Class T
+    # receptor whose orthosteric pocket is not the Class A core, which is correct.)
+    assert len({frozenset(c["segments"]) for c in copies}) >= 2
