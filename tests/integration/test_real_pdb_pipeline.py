@@ -30,7 +30,9 @@ def _load_and_inject(pdb_id: str) -> tuple[dict, dict, dict]:
 # Expected non-empty CSV files per fixture, from PoC verification.
 EXPECTED_CSV_FILES: dict[str, set[str]] = {
     "5G53": {"structures.csv", "ligands.csv", "g_proteins.csv"},
-    "8TII": {"structures.csv", "ligands.csv", "arrestins.csv", "nanobodies.csv", "antibodies.csv"},
+    # No ligands.csv: this entry's only ligand annotation is an apo (no-ligand)
+    # placeholder, which is not exported as a ligand interaction.
+    "8TII": {"structures.csv", "arrestins.csv", "nanobodies.csv", "antibodies.csv"},
     "9AS1": {"structures.csv", "ligands.csv", "g_proteins.csv", "arrestins.csv"},
     "9BLW": {"structures.csv", "ligands.csv", "g_proteins.csv", "nanobodies.csv", "ramp.csv"},
     "9EJZ": {"structures.csv", "ligands.csv", "g_proteins.csv", "nanobodies.csv", "scfv.csv"},
@@ -50,7 +52,8 @@ EXPECTED_CSV_FILES: dict[str, set[str]] = {
     # No ligands.csv: this entry's only annotated ligands are not modelled in
     # the structure (the paper's sweeteners), so they are excluded from export.
     "9NOR": {"structures.csv", "g_proteins.csv"},
-    "9O38": {"structures.csv", "ligands.csv", "g_proteins.csv", "nanobodies.csv"},
+    # No ligands.csv: only ligand annotation is an apo (no-ligand) placeholder.
+    "9O38": {"structures.csv", "g_proteins.csv", "nanobodies.csv"},
 }
 
 
@@ -420,9 +423,9 @@ class TestBatchCSVIntegrity:
 
         for filename, expected_fields in CSV_SCHEMA.items():
             filepath = csv_dir / filename
-            if not filepath.exists():
-                assert filename == "grk.csv", f"Unexpected missing CSV: {filename}"
-                continue
+            # Every schema file is emitted (header-only when it has no rows), so
+            # none should be missing after a batch.
+            assert filepath.exists(), f"Unexpected missing CSV: {filename}"
 
             with open(filepath, encoding="utf-8") as f:
                 reader = csv_mod.DictReader(f, delimiter="\t")
@@ -462,9 +465,10 @@ class TestBatchCSVIntegrity:
 
         assert len(lines) == 10, f"Expected 1 header + 9 data = 10, got {len(lines)}"
 
-    def test_grk_csv_not_created(self, real_pdb_workspace: Path) -> None:
-        """Confirm grk.csv is never created by the current fixture set."""
-        from gpcr_tools.config import get_config
+    def test_grk_csv_created_header_only(self, real_pdb_workspace: Path) -> None:
+        """grk.csv has no rows across the fixture set, but is still emitted
+        header-only so the downstream build never hits a missing file."""
+        from gpcr_tools.config import CSV_SCHEMA, get_config
         from gpcr_tools.csv_generator.csv_writer import append_to_csvs, transform_for_csv
 
         all_csv_data: dict[str, list[dict[str, str]]] = {}
@@ -477,4 +481,6 @@ class TestBatchCSVIntegrity:
         append_to_csvs(all_csv_data)
 
         cfg = get_config()
-        assert not (cfg.csv_output_dir / "grk.csv").exists()
+        grk = cfg.csv_output_dir / "grk.csv"
+        assert grk.exists()
+        assert grk.read_text(encoding="utf-8").splitlines() == ["\t".join(CSV_SCHEMA["grk.csv"])]

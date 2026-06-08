@@ -872,7 +872,6 @@ CSV_SCHEMA: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
             "Name",
             "PubChemID",
             "Role",
-            "Site",
             "Title",
             "Type",
             "Date",
@@ -883,6 +882,10 @@ CSV_SCHEMA: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
             "Sequence",
             # Appended: is this bound compound an endogenous ligand (GtoPdb)?
             "is_endogenous",
+            # Appended, never inserted: the downstream build reads the leading
+            # columns positionally (PDB..In structure), so the binding-site type
+            # goes at the end alongside the other added columns.
+            "Site",
         ),
         "g_proteins.csv": (
             "PDB",

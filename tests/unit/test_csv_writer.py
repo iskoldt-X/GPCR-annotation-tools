@@ -43,20 +43,21 @@ class TestGpcrdbColumnContract:
         )
 
     def test_ligands_core_columns(self):
-        assert CSV_SCHEMA["ligands.csv"][:10] == (
+        # The downstream build reads the leading 9 columns positionally; "Site"
+        # (and the chemistry columns) are appended after, never inserted.
+        assert CSV_SCHEMA["ligands.csv"][:9] == (
             "PDB",
             "ChainID",
             "Name",
             "PubChemID",
             "Role",
-            "Site",
             "Title",
             "Type",
             "Date",
             "In structure",
         )
-        assert {"label_asym_id", "SMILES", "InChIKey", "Sequence", "is_endogenous"} <= set(
-            CSV_SCHEMA["ligands.csv"][10:]
+        assert {"label_asym_id", "SMILES", "InChIKey", "Sequence", "is_endogenous", "Site"} <= set(
+            CSV_SCHEMA["ligands.csv"][9:]
         )
 
     def test_g_proteins_core_columns(self):
@@ -173,6 +174,33 @@ class TestTransformForCSV:
         assert row["Beta_UniProt"] == "gbb1_human"
         assert row["Gamma_UniProt"] == "gbg2_human"
 
+    def test_g_protein_chain_collapses_multivalue(self, sample_pdb_data):
+        # Redundant complexes in the asymmetric unit give a multi-chain subunit
+        # value ("C, D"); it collapses to the primary complex's chain.
+        data = copy.deepcopy(sample_pdb_data)
+        data["signaling_partners"]["g_protein"]["alpha_subunit"]["chain_id"] = "C, D"
+        row = transform_for_csv("TEST1", data)["g_proteins.csv"][0]
+        assert row["Alpha_ChainID"] == "C"
+        # The label column follows the collapsed single chain (not "C, D").
+        assert row["Alpha_label_asym_id"] == "C"
+
+    def test_apo_placeholder_ligand_skipped(self, sample_pdb_data):
+        # An apo / "no ligand" placeholder must not become a ligand row.
+        data = copy.deepcopy(sample_pdb_data)
+        data["ligands"].append(
+            {
+                "name": "Apo",
+                "chem_comp_id": "",
+                "chain_id": "None",
+                "type": "none",
+                "role": {"value": "Apo (no ligand)"},
+                "site_ref": "orthosteric",
+            }
+        )
+        names = [r["Name"] for r in transform_for_csv("TEST1", data)["ligands.csv"]]
+        assert "Apo" not in names
+        assert "Adenosine" in names
+
     def test_nanobody_dispatch(self, sample_pdb_data):
         result = transform_for_csv("TEST1", sample_pdb_data)
         rows = result["nanobodies.csv"]
@@ -279,6 +307,21 @@ class TestAppendToCSVs:
         assert rows[0][0] == "PDB"  # header
         assert rows[1][0] == "TEST1"  # data
 
+    def test_files_use_lf_line_endings(self, tmp_path, monkeypatch, sample_pdb_data):
+        """Output uses LF, not CRLF, to match the consumed annotation data."""
+        monkeypatch.setenv("GPCR_WORKSPACE", str(tmp_path))
+        from gpcr_tools.config import reset_config
+
+        reset_config()
+
+        csv_dir = tmp_path / "csv_out"
+        with _mock_config_with_csv_dir(csv_dir):
+            append_to_csvs(transform_for_csv("TEST1", sample_pdb_data))
+
+        raw = (csv_dir / "structures.csv").read_bytes()
+        assert b"\r\n" not in raw
+        assert b"\n" in raw
+
     def test_append_no_duplicate_header(self, tmp_path, monkeypatch, sample_pdb_data):
         """Test that appending to an existing file does NOT duplicate the header."""
         monkeypatch.setenv("GPCR_WORKSPACE", str(tmp_path))
@@ -304,8 +347,9 @@ class TestAppendToCSVs:
         assert rows[1][0] == "TEST1"
         assert rows[2][0] == "TEST2"
 
-    def test_empty_csv_data_no_file_created(self, tmp_path, monkeypatch):
-        """If all CSV data is empty, no files should be created."""
+    def test_empty_csv_data_creates_header_only_files(self, tmp_path, monkeypatch):
+        """A batch with no rows for a file still emits a header-only file, so the
+        downstream build never hits a missing file (e.g. grk/ramp)."""
         monkeypatch.setenv("GPCR_WORKSPACE", str(tmp_path))
         from gpcr_tools.config import reset_config
 
@@ -318,8 +362,14 @@ class TestAppendToCSVs:
             empty_data = {fname: [] for fname in CSV_SCHEMA}
             append_to_csvs(empty_data)
 
-        csv_files = list(csv_dir.glob("*.csv")) if csv_dir.exists() else []
-        assert len(csv_files) == 0
+            # Every schema file exists, header-only (one line, the header).
+            for fname, expected_fields in CSV_SCHEMA.items():
+                fpath = csv_dir / fname
+                assert fpath.exists(), f"{fname} not created"
+                lines = fpath.read_text(encoding="utf-8").splitlines()
+                assert lines == ["\t".join(expected_fields)]
+            # The header-only write path also uses LF, not CRLF.
+            assert b"\r\n" not in (csv_dir / "grk.csv").read_bytes()
 
     def test_mismatched_headers_raises_error(self, tmp_path, monkeypatch, sample_pdb_data):
         """Existing CSV with outdated headers → CsvSchemaMismatchError raised."""
