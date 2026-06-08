@@ -125,6 +125,9 @@ def ligand_detector_notes(lig: dict) -> list[str]:
     site = lig.get("site_ref")
     if site:
         notes.append(f"Site: {site}")
+    justification = lig.get("site_ref_justification")
+    if justification:
+        notes.append(f"Site justification: {justification}")
     assessment = lig.get("pharmacological_role_check")
     if isinstance(assessment, dict):
         verdict = (

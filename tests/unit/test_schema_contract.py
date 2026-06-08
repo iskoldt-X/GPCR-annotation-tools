@@ -39,5 +39,21 @@ def test_site_ref_justification_is_optional_string() -> None:
     props = _ligand_item_properties()
     assert "site_ref_justification" in props
     assert props["site_ref_justification"].type == types.Type.STRING
-    required = ANNOTATION_TOOL.function_declarations[0].parameters.properties["ligands"].items.required
+    required = (
+        ANNOTATION_TOOL.function_declarations[0].parameters.properties["ligands"].items.required
+    )
     assert "site_ref_justification" not in (required or [])
+
+
+def test_role_site_rule_sets_match_schema_role_enum() -> None:
+    # The ligand_validator role/site safety net keys on exact role.value strings;
+    # a misspelling would silently never fire. Bind its role sets to the schema enum.
+    from gpcr_tools.validator.ligand_validator import (
+        _ALLOSTERIC_ROLES,
+        _FUNCTIONAL_POCKET_ROLES,
+    )
+
+    role_enum = set(_ligand_item_properties()["role"].properties["value"].enum)
+    assert _ALLOSTERIC_ROLES.issubset(role_enum)
+    assert _FUNCTIONAL_POCKET_ROLES.issubset(role_enum)
+    assert "Cofactor" in role_enum

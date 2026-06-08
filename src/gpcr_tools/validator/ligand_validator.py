@@ -16,8 +16,11 @@ from gpcr_tools.config import (
     APO_SENTINEL,
     EMPTY_VALUES,
     LIGAND_EXCLUDE_LIST,
+    LIGAND_TYPE_LIPID,
     LIGAND_TYPE_PEPTIDE,
     LIGAND_TYPE_PROTEIN,
+    SITE_REF_LIPIDIC,
+    SITE_REF_ORTHOSTERIC,
     VALIDATION_EXCLUDED_BUFFER,
     VALIDATION_GHOST_LIGAND,
     VALIDATION_MATCHED_POLYMER,
@@ -160,7 +163,54 @@ def validate_and_enrich_ligands(
         )
 
     _warn_on_apo_with_real_ligands(ligands, warnings)
+    _warn_on_role_site_mismatch(ligands, warnings)
     return warnings
+
+
+# Role values (subsets of the schema role enum) used by the role/site consistency
+# check; the schema owns the full enum.
+_ALLOSTERIC_ROLES = frozenset(
+    {"PAM", "NAM", "Allosteric antagonist", "Allosteric agonist", "Ago-PAM"}
+)
+_FUNCTIONAL_POCKET_ROLES = frozenset(
+    {"Agonist", "Antagonist", "Inverse agonist", "Agonist (partial)", "Co-agonist"}
+)
+# A 'lipid'-typed ligand at the orthosteric site is only a contradiction when it
+# has NO pocket-justifying role: endogenous lipid agonists/modulators (S1P, LPA,
+# 2-AG, prostaglandins) legitimately occupy the orthosteric pocket as type 'lipid'.
+_POCKET_JUSTIFYING_ROLES = _ALLOSTERIC_ROLES | _FUNCTIONAL_POCKET_ROLES | frozenset({"Cofactor"})
+
+
+def _warn_on_role_site_mismatch(ligands: list[Any], warnings: list[str]) -> None:
+    """Flag (for the curator) a ligand whose pharmacological role and binding site
+    contradict each other in the AI's OWN output -- a cheap second safety net that
+    does not depend on the retired geometry classifier. Only unambiguous
+    contradictions are flagged; with no receptor-class lookup, legitimate class C/B
+    extracellular-domain agonists and intracellular agonist sites are never flagged.
+    """
+    for lig in ligands:
+        if not isinstance(lig, dict):
+            continue
+        site = (lig.get("site_ref") or "").strip().lower()
+        role = ((lig.get("role") or {}).get("value") or "").strip()
+        lig_type = (lig.get("type") or "").strip().lower()
+        name = lig.get("name") or lig.get("chem_comp_id") or "?"
+        reason: str | None = None
+        if (
+            lig_type == LIGAND_TYPE_LIPID
+            and site == SITE_REF_ORTHOSTERIC
+            and role not in _POCKET_JUSTIFYING_ROLES
+        ):
+            reason = "type 'lipid' with no functional role at the orthosteric site"
+        elif role in _ALLOSTERIC_ROLES and site == SITE_REF_ORTHOSTERIC:
+            reason = f"allosteric role '{role}' at the orthosteric site"
+        elif role in _FUNCTIONAL_POCKET_ROLES and site == SITE_REF_LIPIDIC:
+            reason = f"functional role '{role}' at the lipidic (membrane-surface) site"
+        if reason:
+            warnings.append(
+                f"ROLE_SITE_MISMATCH at 'ligands': '{name}' has {reason} "
+                f"-- verify the role and binding site are consistent."
+            )
 
 
 def _warn_on_apo_with_real_ligands(ligands: list[Any], warnings: list[str]) -> None:
