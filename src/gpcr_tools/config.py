@@ -506,6 +506,11 @@ GEOMETRY_NEIGHBOR_SEARCH_RADIUS: float = 6.0  # >= every find_atoms query radius
 # Normalised B-factor: protein atoms within this of a ligand atom define its
 # environment. Must stay <= GEOMETRY_NEIGHBOR_SEARCH_RADIUS (the index radius).
 GEOMETRY_BFACTOR_ENV_RADIUS: float = 5.0
+# Element-level ligand-protein interaction typing (heavy-atom, no hydrogens; a
+# coarse proxy, not directional/aromatic typing). All <= GEOMETRY_NEIGHBOR_SEARCH_RADIUS.
+GEOMETRY_HBOND_HEAVY_DIST: float = 3.5  # N/O/S <-> N/O/S polar contact (H-bond proxy)
+GEOMETRY_HYDROPHOBIC_DIST: float = 4.0  # C <-> C apolar contact (also the outer query radius)
+GEOMETRY_METAL_COORD_DIST: float = 3.0  # metal <-> coordinating N/O/S (or metal)
 
 # Dual-role rule: the same ligand modelled in two distinct functional pockets on
 # one receptor chain. The copy cap rejects detergent floods (a lipid appears

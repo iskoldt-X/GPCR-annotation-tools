@@ -9,7 +9,7 @@ import math
 
 import gemmi
 
-from gpcr_tools.validator.geometry import ligand_bfactor_ratios
+from gpcr_tools.validator.geometry import ligand_bfactor_ratios, ligand_interaction_counts
 from gpcr_tools.validator.membrane import (
     MembraneFrame,
     ligand_facing_fractions,
@@ -18,12 +18,14 @@ from gpcr_tools.validator.membrane import (
 )
 
 
-def _atom(name: str, x: float, y: float, z: float, b_iso: float = 20.0) -> gemmi.Atom:
+def _atom(
+    name: str, x: float, y: float, z: float, b_iso: float = 20.0, element: str = "C"
+) -> gemmi.Atom:
     a = gemmi.Atom()
     a.name = name
     a.pos = gemmi.Position(x, y, z)
     a.b_iso = b_iso
-    a.element = gemmi.Element("C")
+    a.element = gemmi.Element(element)
     return a
 
 
@@ -210,3 +212,63 @@ class TestLigandFacing:
         res = _residue("LEU", 1, [_atom("CA", 10.0, 0.0, 50.0)])
         lig = _residue("LIG", 2, [_atom("C1", 7.0, 0.0, 50.0)], het="H")
         assert ligand_facing_fractions(_structure([res, lig]), "LIG", self._FRAME) == [None]
+
+
+class TestLigandInteractionCounts:
+    def test_polar_contact(self):
+        # Ligand O 3.0 Å from a protein N -> one polar (H-bond proxy) residue.
+        prot = _residue("ASN", 1, [_atom("ND2", 0.0, 0.0, 0.0, element="N")])
+        lig = _residue("LIG", 2, [_atom("O1", 3.0, 0.0, 0.0, element="O")], het="H")
+        assert ligand_interaction_counts(_structure([prot, lig]), "LIG") == [
+            {"polar": 1, "metal": 0, "hydrophobic": 0}
+        ]
+
+    def test_hydrophobic_contact(self):
+        # Ligand C 3.8 Å from a protein C -> one hydrophobic residue.
+        prot = _residue("LEU", 1, [_atom("CD1", 0.0, 0.0, 0.0, element="C")])
+        lig = _residue("LIG", 2, [_atom("C1", 3.8, 0.0, 0.0, element="C")], het="H")
+        assert ligand_interaction_counts(_structure([prot, lig]), "LIG") == [
+            {"polar": 0, "metal": 0, "hydrophobic": 1}
+        ]
+
+    def test_metal_coordination(self):
+        # A metal-ion ligand 2.5 Å from a protein O -> one metal-coordination residue.
+        prot = _residue("ASP", 1, [_atom("OD1", 0.0, 0.0, 0.0, element="O")])
+        lig = _residue("ZN", 2, [_atom("ZN", 2.5, 0.0, 0.0, element="Zn")], het="H")
+        assert ligand_interaction_counts(_structure([prot, lig]), "ZN") == [
+            {"polar": 0, "metal": 1, "hydrophobic": 0}
+        ]
+
+    def test_two_polar_residues(self):
+        # Ligand O within 3.5 Å of a polar atom (N or O) on each of two residues.
+        r1 = _residue("ASN", 1, [_atom("ND2", 0.0, 0.0, 0.0, element="N")])
+        r2 = _residue("SER", 2, [_atom("OG", 6.0, 0.0, 0.0, element="O")])
+        lig = _residue("LIG", 3, [_atom("O1", 3.0, 0.0, 0.0, element="O")], het="H")
+        assert ligand_interaction_counts(_structure([r1, r2, lig]), "LIG") == [
+            {"polar": 2, "metal": 0, "hydrophobic": 0}
+        ]
+
+    def test_residue_counts_in_two_types(self):
+        # One residue with both a polar (N) and a carbon atom near the ligand's
+        # O and C respectively contributes to BOTH polar and hydrophobic.
+        prot = _residue(
+            "ASN",
+            1,
+            [_atom("ND2", 0.0, 0.0, 0.0, element="N"), _atom("CB", 0.0, 3.5, 0.0, element="C")],
+        )
+        lig = _residue(
+            "LIG",
+            2,
+            [_atom("O1", 3.0, 0.0, 0.0, element="O"), _atom("C1", 0.0, 3.5 + 3.8, 0.0, element="C")],
+            het="H",
+        )
+        assert ligand_interaction_counts(_structure([prot, lig]), "LIG") == [
+            {"polar": 1, "metal": 0, "hydrophobic": 1}
+        ]
+
+    def test_nothing_in_range(self):
+        prot = _residue("ASN", 1, [_atom("ND2", 0.0, 0.0, 0.0, element="N")])
+        lig = _residue("LIG", 2, [_atom("O1", 5.0, 0.0, 0.0, element="O")], het="H")
+        assert ligand_interaction_counts(_structure([prot, lig]), "LIG") == [
+            {"polar": 0, "metal": 0, "hydrophobic": 0}
+        ]
