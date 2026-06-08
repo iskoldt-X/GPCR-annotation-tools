@@ -329,6 +329,7 @@ APO_SENTINEL: str = "apo"
 # Ligand type classifiers
 LIGAND_TYPE_PEPTIDE: str = "peptide"
 LIGAND_TYPE_PROTEIN: str = "protein"
+LIGAND_TYPE_LIPID: str = "lipid"
 
 
 # ---------------------------------------------------------------------------
@@ -579,7 +580,9 @@ SITE_REF_ALLOSTERIC_7TM: str = "allosteric_7tm"
 SITE_REF_EXTRACELLULAR_VESTIBULE: str = "extracellular_vestibule"
 SITE_REF_INTRACELLULAR: str = "intracellular"
 SITE_REF_EXTRACELLULAR_DOMAIN: str = "extracellular_domain"
-SITE_REF_LIPIDIC: str = "lipidic"  # membrane/lipid-facing surface site (structural lipids, detergents)
+SITE_REF_LIPIDIC: str = (
+    "lipidic"  # membrane/lipid-facing surface site (structural lipids, detergents)
+)
 SITE_REF_UNKNOWN: str = "unknown"
 SITE_REF_VALUES: tuple[str, ...] = (
     SITE_REF_ORTHOSTERIC,

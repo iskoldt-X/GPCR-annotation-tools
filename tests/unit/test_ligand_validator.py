@@ -67,6 +67,22 @@ def _poly_entity(chain_id: str, sequence: str = "MDEF") -> dict[str, Any]:
     }
 
 
+def _lig(
+    *,
+    name: str = "LIG",
+    comp: str = "LIG",
+    type_: str = "small-molecule",
+    role: str | None = None,
+    site: str | None = None,
+) -> dict[str, Any]:
+    lig: dict[str, Any] = {"name": name, "chem_comp_id": comp, "type": type_}
+    if role is not None:
+        lig["role"] = {"value": role}
+    if site is not None:
+        lig["site_ref"] = site
+    return lig
+
+
 class TestSmallMoleculeMatch:
     def test_matched(self) -> None:
         data: dict[str, Any] = {"ligands": [{"chem_comp_id": "ATP", "name": "Adenosine"}]}
@@ -271,3 +287,50 @@ class TestWarningFormat:
         warnings = validate_and_enrich_ligands("TEST", data, enriched)
         for warn in warnings:
             assert _WARNING_REGEX.search(warn) is not None, f"Warning fails regex: {warn}"
+
+
+class TestRoleSiteMismatch:
+    """The role/site self-consistency net flags only unambiguous contradictions in
+    the AI's own output; legitimate non-Class-A sites must never be flagged."""
+
+    def _mismatch_warnings(self, lig: dict[str, Any]) -> list[str]:
+        warnings = validate_and_enrich_ligands("TEST", {"ligands": [lig]}, _make_enriched())
+        return [w for w in warnings if "ROLE_SITE_MISMATCH" in w]
+
+    def test_lipid_at_orthosteric_warns(self) -> None:
+        # A lipid with NO functional role at the orthosteric pocket is the
+        # mislabelled-structural-lipid case (the original 7E2X failure).
+        assert self._mismatch_warnings(_lig(type_="lipid", site="orthosteric"))
+
+    def test_lipid_agonist_at_orthosteric_ok(self) -> None:
+        # An endogenous lipid agonist (S1P / LPA / 2-AG / prostaglandin) legitimately
+        # binds the orthosteric pocket as type 'lipid' -> not a contradiction.
+        assert not self._mismatch_warnings(_lig(type_="lipid", role="Agonist", site="orthosteric"))
+
+    def test_allosteric_role_at_orthosteric_warns(self) -> None:
+        assert self._mismatch_warnings(_lig(role="PAM", site="orthosteric"))
+        assert self._mismatch_warnings(_lig(role="Allosteric agonist", site="orthosteric"))
+
+    def test_functional_role_at_lipidic_warns(self) -> None:
+        assert self._mismatch_warnings(_lig(role="Agonist", site="lipidic"))
+
+    def test_agonist_at_orthosteric_ok(self) -> None:
+        assert not self._mismatch_warnings(_lig(role="Agonist", site="orthosteric"))
+
+    def test_agonist_at_extracellular_domain_ok(self) -> None:
+        # Class C / B orthosteric site IS the extracellular domain -> not flagged.
+        assert not self._mismatch_warnings(_lig(role="Agonist", site="extracellular_domain"))
+
+    def test_agonist_at_intracellular_ok(self) -> None:
+        # Intracellular agonist binding sites are real -> not flagged.
+        assert not self._mismatch_warnings(_lig(role="Agonist", site="intracellular"))
+
+    def test_pam_at_allosteric_ok(self) -> None:
+        assert not self._mismatch_warnings(_lig(role="PAM", site="allosteric_7tm"))
+
+    def test_lipid_at_lipidic_ok(self) -> None:
+        assert not self._mismatch_warnings(_lig(type_="lipid", site="lipidic"))
+
+    def test_warning_matches_regex(self) -> None:
+        warnings = self._mismatch_warnings(_lig(role="PAM", site="orthosteric"))
+        assert warnings and _WARNING_REGEX.search(warnings[0]) is not None
