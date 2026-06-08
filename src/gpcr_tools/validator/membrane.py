@@ -229,8 +229,11 @@ def ligand_facing_fractions(
     further IN is pocket-facing; near-tangential contacts (within the cosine
     dead-zone) are ambiguous and excluded. ``1.0`` = all clear contacts
     pocket-facing, ``0.0`` = all lipid-facing; ``None`` for a copy with no clear
-    contacts (or no resolvable bundle axis). One value per copy, in model order.
+    contacts, no resolvable bundle axis, or one sitting outside the membrane band
+    (where a facing fraction would be meaningless). One value per copy, in model order.
     """
+    if len(structure) == 0:
+        return []
     model = structure[0]
     ns = gemmi.NeighborSearch(model, structure.cell, GEOMETRY_NEIGHBOR_SEARCH_RADIUS).populate()
     normal = frame.normal
@@ -247,6 +250,14 @@ def ligand_facing_fractions(
             lcx = sum(a.pos.x for a in ligand_atoms) / n_at
             lcy = sum(a.pos.y for a in ligand_atoms) / n_at
             lcz = sum(a.pos.z for a in ligand_atoms) / n_at
+            # Facing is only meaningful inside the bilayer band; an off-bundle copy
+            # (e.g. a nucleotide bound to a soluble partner, far from any TM bundle)
+            # has no membrane face, so abstain rather than report a misleading
+            # fraction from whichever residues it happens to brush.
+            depth = (lcx * normal[0] + lcy * normal[1] + lcz * normal[2]) - frame.center
+            if abs(depth) > frame.half_thickness + MEMBRANE_BAND_MARGIN:
+                results.append(None)
+                continue
             # Contacted protein residues -> (chain, Cα), one per residue (the
             # insertion code is kept so 100 and 100A stay distinct).
             contact_ca: dict[tuple[str, int, str], tuple[str, gemmi.Position]] = {}

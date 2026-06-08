@@ -503,9 +503,6 @@ GEOMETRY_BURIAL_MIN: float = 0.80  # a knob: raise toward 0.85 for higher precis
 GEOMETRY_CONTACT_RADIUS: float = 4.5
 GEOMETRY_MIN_POCKET_RESIDUES: int = 5
 GEOMETRY_NEIGHBOR_SEARCH_RADIUS: float = 6.0  # >= every find_atoms query radius
-# Normalised B-factor: protein atoms within this of a ligand atom define its
-# environment. Must stay <= GEOMETRY_NEIGHBOR_SEARCH_RADIUS (the index radius).
-GEOMETRY_BFACTOR_ENV_RADIUS: float = 5.0
 # Element-level ligand-protein interaction typing (heavy-atom, no hydrogens; a
 # coarse proxy, not directional/aromatic typing). All <= GEOMETRY_NEIGHBOR_SEARCH_RADIUS.
 GEOMETRY_HBOND_HEAVY_DIST: float = 3.5  # N/O/S <-> N/O/S polar contact (H-bond proxy)
