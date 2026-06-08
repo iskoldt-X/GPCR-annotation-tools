@@ -31,7 +31,6 @@ import gemmi
 import requests
 
 from gpcr_tools.config import (
-    GEOMETRY_BFACTOR_ENV_RADIUS,
     GEOMETRY_BURIAL_CONE_DEG,
     GEOMETRY_BURIAL_SPHERE_DIRS,
     GEOMETRY_CONTACT_RADIUS,
@@ -346,60 +345,6 @@ def receptor_gprotein_contacts(
     return counts
 
 
-def ligand_bfactor_ratios(structure: gemmi.Structure, comp_id: str) -> list[float | None]:
-    """Per modelled copy of *comp_id*: its mean B-factor / the mean B-factor of the
-    surrounding protein.
-
-    A functional ligand anchored by specific interactions has a B-factor close to
-    its protein environment (ratio ~1); a loosely held structural lipid / detergent
-    is more disordered (ratio >> 1). The environment is protein atoms within
-    ``GEOMETRY_BFACTOR_ENV_RADIUS`` of any ligand atom. Returns ``None`` for a copy
-    with no protein environment or a non-positive environment mean (e.g. a cryo-EM
-    model whose B-factor column is unset), so an absent value never masquerades as
-    a confident ratio. One value per modelled copy, in model order.
-    """
-    model = structure[0]
-    neighbor_search = gemmi.NeighborSearch(
-        model, structure.cell, GEOMETRY_NEIGHBOR_SEARCH_RADIUS
-    ).populate()
-    ratios: list[float | None] = []
-    for chain in model:
-        for residue in chain:
-            if residue.name != comp_id:
-                continue
-            ligand_atoms = list(residue)
-            if not ligand_atoms:
-                ratios.append(None)
-                continue
-            lig_mean = sum(a.b_iso for a in ligand_atoms) / len(ligand_atoms)
-            env_b: dict[tuple[str, int, str], float] = {}
-            for atom in ligand_atoms:
-                for mark in neighbor_search.find_atoms(
-                    atom.pos, "\0", radius=GEOMETRY_BFACTOR_ENV_RADIUS
-                ):
-                    cra = mark.to_cra(model)
-                    if not is_protein_atom(cra.residue):
-                        continue
-                    res_num = cra.residue.seqid.num
-                    if res_num is None:
-                        continue
-                    if atom.pos.dist(cra.atom.pos) <= GEOMETRY_BFACTOR_ENV_RADIUS:
-                        env_b[(cra.chain.name, res_num, cra.atom.name)] = cra.atom.b_iso
-            if not env_b:
-                ratios.append(None)
-                continue
-            env_mean = sum(env_b.values()) / len(env_b)
-            # Need positive B on both sides: a zero ligand mean (e.g. a cryo-EM
-            # entry whose ligand B column is unset while the protein's is set)
-            # would otherwise yield a ratio of 0.0 and read as a perfectly ordered
-            # ligand — the opposite of the truth.
-            if lig_mean > 0 and env_mean > 0:
-                ratios.append(round(lig_mean / env_mean, 2))
-            else:
-                ratios.append(None)
-    return ratios
-
-
 _POLAR_ELEMENTS = frozenset({"N", "O", "S"})
 
 
@@ -420,6 +365,8 @@ def ligand_interaction_counts(structure: gemmi.Structure, comp_id: str) -> list[
     metal-near-carbon contact falls in no bucket. One dict per modelled copy, in
     model order.
     """
+    if len(structure) == 0:
+        return []
     model = structure[0]
     neighbor_search = gemmi.NeighborSearch(
         model, structure.cell, GEOMETRY_NEIGHBOR_SEARCH_RADIUS

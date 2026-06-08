@@ -9,7 +9,7 @@ import math
 
 import gemmi
 
-from gpcr_tools.validator.geometry import ligand_bfactor_ratios, ligand_interaction_counts
+from gpcr_tools.validator.geometry import is_protein_atom, ligand_interaction_counts
 from gpcr_tools.validator.membrane import (
     MembraneFrame,
     ligand_facing_fractions,
@@ -103,6 +103,19 @@ class TestMembraneFrame:
     def test_empty_structure_returns_none(self):
         assert membrane_frame(gemmi.Structure()) is None
 
+    def test_all_hydrophilic_returns_none(self):
+        # Enough residues to pass the count gate, but all hydrophilic (ARG): there is
+        # no hydrophobic belt to enclose, so the best slab score is <= 0 -> None.
+        residues = [
+            _residue(
+                "ARG",
+                i + 1,
+                [_atom("CA", 18 * math.cos(i * 0.7), 18 * math.sin(i * 0.7), -14.0 + 28.0 * (i / 79.0))],
+            )
+            for i in range(80)
+        ]
+        assert membrane_frame(_structure(residues)) is None
+
 
 class TestLigandMembraneDepth:
     _FRAME = MembraneFrame(normal=(0.0, 0.0, 1.0), center=0.0, half_thickness=14.0)
@@ -124,32 +137,6 @@ class TestLigandMembraneDepth:
 
     def test_empty_atoms_returns_none(self):
         assert ligand_membrane_depth(self._FRAME, []) is None
-
-
-class TestLigandBFactorRatios:
-    def _structure_with_ligand(self, lig_b: float, env_b: float) -> gemmi.Structure:
-        # One protein residue (env) ~2 Å from a one-atom ligand "LIG".
-        prot = _residue("LEU", 1, [_atom("CA", 0.0, 0.0, 0.0, env_b)])
-        lig = _residue("LIG", 2, [_atom("C1", 2.0, 0.0, 0.0, lig_b)], het="H")
-        return _structure([prot, lig])
-
-    def test_ratio_one_when_matched(self):
-        assert ligand_bfactor_ratios(self._structure_with_ligand(20.0, 20.0), "LIG") == [1.0]
-
-    def test_ratio_high_when_disordered(self):
-        assert ligand_bfactor_ratios(self._structure_with_ligand(60.0, 20.0), "LIG") == [3.0]
-
-    def test_none_without_protein_environment(self):
-        lig = _residue("LIG", 1, [_atom("C1", 0.0, 0.0, 0.0, 30.0)], het="H")
-        assert ligand_bfactor_ratios(_structure([lig]), "LIG") == [None]
-
-    def test_none_when_environment_b_unset(self):
-        # All-zero protein B (e.g. a cryo-EM model) -> no usable ratio, not 0/inf.
-        assert ligand_bfactor_ratios(self._structure_with_ligand(40.0, 0.0), "LIG") == [None]
-
-    def test_none_when_ligand_b_unset(self):
-        # Zero ligand B with a set environment must not read as a perfect ratio of 0.
-        assert ligand_bfactor_ratios(self._structure_with_ligand(0.0, 20.0), "LIG") == [None]
 
 
 class TestLigandFacing:
@@ -213,6 +200,15 @@ class TestLigandFacing:
         lig = _residue("LIG", 2, [_atom("C1", 7.0, 0.0, 50.0)], het="H")
         assert ligand_facing_fractions(_structure([res, lig]), "LIG", self._FRAME) == [None]
 
+    def test_none_when_ligand_out_of_band(self):
+        # A copy whose centroid is far outside the bilayer band (e.g. a nucleotide on
+        # a soluble partner) gets no facing fraction, even though it brushes a residue
+        # whose chain has an in-band bundle axis -> abstain, not a misleading value.
+        near = _residue("LEU", 50, [_atom("CA", 10.0, 0.0, 30.0)])
+        lig = _residue("LIG", 100, [_atom("C1", 7.0, 0.0, 30.0)], het="H")
+        st = _structure([*self._ring(0.0), near, lig])
+        assert ligand_facing_fractions(st, "LIG", self._FRAME) == [None]
+
 
 class TestLigandInteractionCounts:
     def test_polar_contact(self):
@@ -272,3 +268,29 @@ class TestLigandInteractionCounts:
         assert ligand_interaction_counts(_structure([prot, lig]), "LIG") == [
             {"polar": 0, "metal": 0, "hydrophobic": 0}
         ]
+
+    def test_modified_residue_is_protein_only_after_setup_entities(self):
+        # The counter (and every geometry function) gates protein-vs-HET on
+        # is_protein_atom(), which for a HETATM-recorded residue depends on the
+        # PRODUCTION entity typing: load_structure() calls setup_entities(), which
+        # types a modified standard residue (e.g. selenomethionine, MSE) as Polymer
+        # so it counts as protein. Before that call its entity is Unknown and it is
+        # wrongly excluded. The other synthetic fixtures here skip setup_entities,
+        # leaving residues Unknown; this pins the branch that call controls.
+        def _backbone(i: int) -> list[gemmi.Atom]:
+            x = i * 3.8
+            return [
+                _atom("N", x, 0.0, 0.0, element="N"),
+                _atom("CA", x + 1.0, 0.0, 0.0),
+                _atom("C", x + 2.0, 0.0, 0.0),
+                _atom("O", x + 2.5, 0.0, 0.0, element="O"),
+            ]
+
+        chain = [
+            _residue("MSE" if i == 1 else "ALA", i + 1, _backbone(i), het="H" if i == 1 else "A")
+            for i in range(6)
+        ]
+        st = _structure(chain)
+        assert not is_protein_atom(st[0][0][1])  # MSE Unknown before setup_entities -> excluded
+        st.setup_entities()
+        assert is_protein_atom(st[0][0][1])  # MSE typed Polymer after -> counted as protein
