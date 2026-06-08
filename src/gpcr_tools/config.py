@@ -579,6 +579,7 @@ SITE_REF_ALLOSTERIC_7TM: str = "allosteric_7tm"
 SITE_REF_EXTRACELLULAR_VESTIBULE: str = "extracellular_vestibule"
 SITE_REF_INTRACELLULAR: str = "intracellular"
 SITE_REF_EXTRACELLULAR_DOMAIN: str = "extracellular_domain"
+SITE_REF_LIPIDIC: str = "lipidic"  # membrane/lipid-facing surface site (structural lipids, detergents)
 SITE_REF_UNKNOWN: str = "unknown"
 SITE_REF_VALUES: tuple[str, ...] = (
     SITE_REF_ORTHOSTERIC,
@@ -586,53 +587,20 @@ SITE_REF_VALUES: tuple[str, ...] = (
     SITE_REF_EXTRACELLULAR_VESTIBULE,
     SITE_REF_INTRACELLULAR,
     SITE_REF_EXTRACELLULAR_DOMAIN,
+    SITE_REF_LIPIDIC,
     SITE_REF_UNKNOWN,
 )
 
-# Orthosteric-pocket generic-number signature (GPCRdb structure-based "x"
-# numbers). Most classes share the 7TM mid-bundle core; the taste-type-2 pocket
-# (class 009) sits deeper, so it has its own signature.
-ORTHOSTERIC_CORE_GENERIC: frozenset[str] = frozenset(
-    {
-        "3x32",
-        "3x33",
-        "3x36",
-        "5x43",
-        "5x461",
-        "6x48",
-        "6x51",
-        "6x55",
-        "7x38",
-        "7x39",
-        "7x42",
-        "7x43",
-    }
-)
-ORTHOSTERIC_CORE_GENERIC_T2: frozenset[str] = frozenset(
-    {"3x47", "3x50", "3x51", "5x54", "5x58", "6x37", "6x38", "7x49", "7x53", "7x56"}
-)
-
-# Segment zones for the non-core sites (segments are reliable; intra-helix
-# depth from the bare number is NOT — TM2/4/6 are numbered in reverse).
-INTRACELLULAR_SEGMENTS: frozenset[str] = frozenset({"ICL1", "ICL2", "ICL3", "H8"})
-VESTIBULE_SEGMENTS: frozenset[str] = frozenset({"ECL1", "ECL2", "ECL3"})
-EXTRACELLULAR_DOMAIN_SEGMENT: str = "N-term"
-
-# GPCR class slug prefixes whose orthosteric site is in an extracellular domain
-# (class C Venus flytrap) or large ECD (B1 secretin, B2 adhesion, F Frizzled CRD).
-GPCR_CLASS_C: str = "004"
-GPCR_CLASS_T2: str = "009"
-GPCR_CLASSES_LARGE_ECD: frozenset[str] = frozenset({"002", "003", "006"})
+# Validated minimal Class A orthosteric-pocket core (GPCRdb structure-based "x"
+# numbers), from Moitra et al. 2012. Fed to the model only as a FACT -- how many
+# Class A core positions a ligand contacts -- never as a site verdict; 0 for a
+# non-Class-A pocket (taste/Class C/B) is honest, not a counter-signal. None of
+# these sit at a TM bulge where Ballesteros-Weinstein and the x-number diverge.
+ORTHOSTERIC_CORE_GENERIC: frozenset[str] = frozenset({"3x33", "5x42", "6x51", "7x39"})
 
 # A ligand needs at least this many mapped receptor contacts to be classified
 # (fewer -> the signature is too sparse, so site_ref is unknown).
 SITE_REF_MIN_MAPPED_CONTACTS: int = 5
-
-# Orthosteric requires at least this many distinct core-pocket generic positions.
-# A genuine orthosteric ligand contacts ~9-10; a single grazing core contact (a
-# vestibule ligand brushing the top of TM3, or a lipid on the bundle's outer
-# face) must NOT be called orthosteric.
-SITE_REF_MIN_ORTHOSTERIC_CORE: int = 2
 
 # How a subtype call was resolved against the alpha5 window.
 CHIMERA_SUBTYPE_RESOLVED: str = "resolved"

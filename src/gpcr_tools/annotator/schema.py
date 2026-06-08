@@ -209,15 +209,20 @@ ANNOTATION_TOOL = types.Tool(
                                     },
                                     "site_ref": {
                                         "type": "string",
-                                        "description": "The binding site of this ligand on the receptor. A value computed from the structure geometry is supplied to you as detector evidence — use it unless the paper clearly places the ligand elsewhere; use 'unknown' if unclear. If one ligand is modelled at more than one distinct site, emit a separate entry per site, each with its own site_ref.",
+                                        "description": "The binding site of this ligand on the receptor. Infer it from the geometric facts in the DETECTOR EVIDENCE block plus the paper; use 'unknown' if neither settles it — do not guess. A structural lipid or detergent sitting against the membrane-facing surface is 'lipidic'. If one ligand is modelled at more than one distinct site, emit a separate entry per site.",
                                         "enum": [
                                             "orthosteric",
                                             "allosteric_7tm",
                                             "extracellular_vestibule",
                                             "intracellular",
                                             "extracellular_domain",
+                                            "lipidic",
                                             "unknown",
                                         ],
+                                    },
+                                    "site_ref_justification": {
+                                        "type": "string",
+                                        "description": "Brief free-text justification for the site_ref call: which geometric facts and/or paper statements support it. Optional; omit if the site is obvious or unknown.",
                                     },
                                 },
                                 "required": [

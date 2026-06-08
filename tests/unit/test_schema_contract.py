@@ -7,6 +7,8 @@ validators silently disagree. These tests fail loudly on any such drift.
 
 from __future__ import annotations
 
+from google.genai import types
+
 from gpcr_tools.annotator.schema import ANNOTATION_TOOL
 from gpcr_tools.config import SITE_REF_VALUES
 
@@ -29,3 +31,13 @@ def test_site_ref_enum_matches_config() -> None:
 
     # The structure-state enum (incl. its 'unknown' escape) is pinned to the
     # downstream-accepted CSV tokens by test_state_vocab_contract.
+
+
+def test_site_ref_justification_is_optional_string() -> None:
+    # The justification is a curator-facing free-text field on each ligand: it must
+    # exist with type string and must NOT be required (the model may omit it).
+    props = _ligand_item_properties()
+    assert "site_ref_justification" in props
+    assert props["site_ref_justification"].type == types.Type.STRING
+    required = ANNOTATION_TOOL.function_declarations[0].parameters.properties["ligands"].items.required
+    assert "site_ref_justification" not in (required or [])

@@ -26,12 +26,34 @@ from gpcr_tools.detector.signals import (
 )
 
 
-def _site_ref(comp: str, sites: list[str]) -> DetectSignal:
+def _copy(
+    generic: list[str],
+    segments: list[str],
+    core_hits: int,
+    enclosure: float,
+    facing: float | None = None,
+    depth: float | None = None,
+    in_band: bool | None = None,
+) -> dict:
+    copy: dict = {
+        "generic_numbers": generic,
+        "segments": segments,
+        "core_hits": core_hits,
+        "enclosure": enclosure,
+        "facing": facing,
+    }
+    if depth is not None:
+        copy["depth"] = depth
+        copy["in_band"] = in_band
+    return copy
+
+
+def _site_ref(comp: str, copies: list[dict]) -> DetectSignal:
     return DetectSignal(
         kind=SIGNAL_SITE_REF,
         target_ref="ligands",
-        summary=f"{comp} site",
-        payload={"comp_id": comp, "sites": sites},
+        summary=f"{comp} facts",
+        payload={"comp_id": comp, "copies": copies},
         severity=SEVERITY_ADVISORY,
     )
 
@@ -119,35 +141,48 @@ class TestAssembleDetectBlock:
         b = assemble_detect_block([_chimeric_advisory(), _incidental_candidate("PLM")])
         assert a == b
 
-    def test_site_ref_single_site_evidence(self) -> None:
-        block = assemble_detect_block([_site_ref("ADN", ["orthosteric"])])
-        assert block is not None
-        assert "ADN" in block and "orthosteric" in block and "site_ref" in block
-
-    def test_site_ref_multi_site_evidence(self) -> None:
+    def test_site_ref_single_copy_facts(self) -> None:
         block = assemble_detect_block(
-            [_site_ref("A1AEI", ["extracellular_vestibule", "orthosteric"])]
+            [_site_ref("ADN", [_copy(["3x33", "6x51"], ["TM3", "TM6"], 2, 0.88, facing=0.9)])]
         )
         assert block is not None
-        assert "2 distinct sites" in block
-        assert "one ligand entry per site" in block
+        # Facts are rendered; no site verdict / "places it at the X site" label.
+        assert "ADN" in block and "3x33" in block and "geometry facts" in block
+        assert "places it at" not in block
+
+    def test_site_ref_multi_copy_facts(self) -> None:
+        block = assemble_detect_block(
+            [
+                _site_ref(
+                    "A1AEI",
+                    [
+                        _copy(["3x33", "6x51"], ["TM3", "TM6"], 2, 0.95, facing=0.9),
+                        _copy(["45x52"], ["ECL2"], 0, 0.6, facing=0.2),
+                    ],
+                )
+            ]
+        )
+        assert block is not None
+        # Both copies' facts present; the conditional per-site split instruction shown.
+        assert "3x33" in block and "ECL2" in block
+        assert "one entry per site" in block
 
     def test_split_instruction_owned_by_site_ref_not_dual_role(self) -> None:
         # The dual-role signal gives burial evidence but must NOT command a split;
-        # only the site_ref multi-site signal owns the "one entry per site" nudge.
+        # only the site_ref facts carry the "one entry per site" instruction.
         dual = assemble_detect_block([_dual_role("A1AEI")])
         assert dual is not None
         assert "more than one role" in dual
         assert "entry per" not in dual  # no split command from dual-role
         site = assemble_detect_block(
-            [_site_ref("A1AEI", ["extracellular_vestibule", "orthosteric"])]
+            [_site_ref("A1AEI", [_copy(["3x33"], ["TM3"], 1, 0.95), _copy(["45x52"], ["ECL2"], 0, 0.6)])]
         )
-        assert "one ligand entry per site" in site
+        assert "one entry per site" in site
 
-    def test_dual_role_renders_per_copy_evidence_and_site_ref(self) -> None:
+    def test_dual_role_renders_per_copy_pocket_evidence(self) -> None:
         block = assemble_detect_block([_dual_role("A1AEI")])
         assert block is not None
-        assert "A1AEI" in block and "site_ref" in block
+        assert "A1AEI" in block and "distinct binding site" in block
         # one line per buried copy, with its enclosure and pocket residues
         assert "R/601" in block and "R/602" in block
         assert "104" in block  # a pocket residue of the first copy
@@ -233,7 +268,10 @@ def test_detect_block_golden_snapshot() -> None:
             chimeric,
             _coupling_advisory(),
             _incidental_candidate("CLR"),
-            _site_ref("ADN", ["orthosteric"]),
+            _site_ref(
+                "ADN",
+                [_copy(["3x33", "6x51"], ["TM3", "TM6"], 2, 0.88, facing=0.9, depth=2.0, in_band=True)],
+            ),
         ]
     )
     expected = (
@@ -250,8 +288,12 @@ def test_detect_block_golden_snapshot() -> None:
         "- CLR is present; it can be a functional ligand in some structures and an "
         "incidental structural component in others. Judge its role from the paper and "
         "record a pharmacological_role_check.\n"
-        "- ADN: structure geometry places it at the orthosteric site — record "
-        "site_ref='orthosteric' unless the paper clearly says otherwise."
+        "- ADN: geometry facts per modelled copy below — infer site_ref from these "
+        "plus the paper, use 'unknown' if neither settles it; if copies sit at distinct "
+        "sites, emit one entry per site:\n"
+        "  a copy: enclosure 0.88; contacts generic numbers [3x33, 6x51] in segments "
+        "[TM3, TM6] (2 Class A orthosteric-core); 0.90 pocket-facing (1=buried in "
+        "pocket, 0=lipid-facing); within the membrane band"
     )
     assert block == expected
 

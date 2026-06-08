@@ -98,17 +98,7 @@ def _format_signal(signal: DetectSignal) -> str | None:
     if signal.kind == SIGNAL_DUAL_ROLE_LIGAND:
         return _format_dual_role(payload)
     if signal.kind == SIGNAL_SITE_REF:
-        comp = payload.get("comp_id") or "?"
-        sites = payload.get("sites") or []
-        if len(sites) == 1:
-            return (
-                f"{comp}: structure geometry places it at the {sites[0]} site — record "
-                f"site_ref='{sites[0]}' unless the paper clearly says otherwise."
-            )
-        return (
-            f"{comp}: structure geometry shows it at {len(sites)} distinct sites "
-            f"({', '.join(sites)}) — emit one ligand entry per site, each with its site_ref."
-        )
+        return _format_site_ref(payload)
     # A whitelisted kind with no branch above (should not happen): never leak a
     # raw summary -- the _MODEL_FACING_KINDS guard and this fall-through agree.
     return None
@@ -118,11 +108,10 @@ def _format_dual_role(payload: dict[str, Any]) -> str:
     """Render the dual-role signal as burial evidence, one line per buried copy.
 
     This provides geometric evidence that the ligand sits in more than one pocket
-    (so it may play more than one role); it deliberately does NOT command a split
-    into one entry per site -- the site_ref signal owns that instruction, since it
-    names each site. When site_ref resolves the pockets to distinct site classes
-    it carries the split nudge; if both pockets are the same class it does not, and
-    this burial evidence still flags the possible multiple roles for the model.
+    (so it may play more than one role and may be more than one binding site). The
+    model decides whether to split into one entry per site from the per-copy facts
+    (the site_ref signal carries each copy's contact/segment facts); this dual-role
+    block adds the buried-pocket count + residue context.
     """
     comp = payload.get("comp_id") or "?"
     chain = payload.get("gpcr_chain") or "?"
@@ -146,8 +135,52 @@ def _format_dual_role(payload: dict[str, Any]) -> str:
     body = "\n".join(copy_lines)
     return (
         f"{comp} is buried in {len(copies)} distinct receptor pockets on chain {chain} "
-        f"(geometry below), so weigh whether it plays more than one role; the computed "
-        f"site_ref names each site:\n{body}"
+        f"(geometry below), so weigh whether it plays more than one role and whether each "
+        f"pocket is a distinct binding site:\n{body}"
+    )
+
+
+def _format_site_ref(payload: dict[str, Any]) -> str | None:
+    """Render the site_ref signal as per-copy geometry FACTS (no site verdict).
+
+    The model infers site_ref from these facts plus the paper; distinct per-copy
+    facts let it decide whether a ligand modelled at more than one site needs one
+    entry per site.
+    """
+    comp = payload.get("comp_id") or "?"
+    copies = payload.get("copies") or []
+    if not copies:
+        return None
+    copy_lines = []
+    for copy in copies:
+        generic = ", ".join(copy.get("generic_numbers") or []) or "none mapped"
+        segments = ", ".join(copy.get("segments") or []) or "?"
+        core = copy.get("core_hits") or 0
+        facing = copy.get("facing")
+        facing_txt = (
+            f"{facing:.2f} pocket-facing (1=buried in pocket, 0=lipid-facing)"
+            if facing is not None
+            else "facing n/a"
+        )
+        depth = copy.get("depth")
+        if depth is not None:
+            band = (
+                "within the membrane band"
+                if copy.get("in_band")
+                else f"outside the membrane band (depth {depth} Å)"
+            )
+        else:
+            band = "membrane depth n/a"
+        copy_lines.append(
+            f"  a copy: enclosure {copy.get('enclosure')}; contacts generic numbers "
+            f"[{generic}] in segments [{segments}] ({core} Class A orthosteric-core); "
+            f"{facing_txt}; {band}"
+        )
+    body = "\n".join(copy_lines)
+    return (
+        f"{comp}: geometry facts per modelled copy below — infer site_ref from these plus "
+        f"the paper, use 'unknown' if neither settles it; if copies sit at distinct sites, "
+        f"emit one entry per site:\n{body}"
     )
 
 
