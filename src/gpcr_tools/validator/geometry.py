@@ -36,6 +36,9 @@ from gpcr_tools.config import (
     GEOMETRY_BURIAL_SPHERE_DIRS,
     GEOMETRY_CONTACT_RADIUS,
     GEOMETRY_ENV_RADIUS,
+    GEOMETRY_HBOND_HEAVY_DIST,
+    GEOMETRY_HYDROPHOBIC_DIST,
+    GEOMETRY_METAL_COORD_DIST,
     GEOMETRY_NEIGHBOR_SEARCH_RADIUS,
     RCSB_STRUCTURE_DOWNLOAD_URL,
     STRUCTURE_CACHE_SUBDIR,
@@ -395,3 +398,75 @@ def ligand_bfactor_ratios(structure: gemmi.Structure, comp_id: str) -> list[floa
             else:
                 ratios.append(None)
     return ratios
+
+
+_POLAR_ELEMENTS = frozenset({"N", "O", "S"})
+
+
+def ligand_interaction_counts(structure: gemmi.Structure, comp_id: str) -> list[dict[str, int]]:
+    """Per modelled copy of *comp_id*: a coarse, element-level count of the protein
+    residues it contacts by interaction chemistry.
+
+    Heavy-atom only (no hydrogens, as deposited): ``polar`` = residues with an
+    N/O/S within ``GEOMETRY_HBOND_HEAVY_DIST`` of a ligand N/O/S (a hydrogen-bond
+    proxy — distance only, no donor/acceptor or angle); ``metal`` = residues in a
+    metal coordination (a metal on either side within ``GEOMETRY_METAL_COORD_DIST``
+    of a coordinating N/O/S or metal on the other); ``hydrophobic`` = residues with
+    a carbon within ``GEOMETRY_HYDROPHOBIC_DIST`` of a ligand carbon. Each count is
+    DISTINCT protein residues; a residue may contribute to more than one type. This
+    is a proxy, not full interaction typing (no aromatic/pi, salt-bridge, or
+    directional hydrogen bonds — those need ligand chemistry/connectivity). A
+    metal ligand atom counts only toward ``metal`` (never ``polar``), and a
+    metal-near-carbon contact falls in no bucket. One dict per modelled copy, in
+    model order.
+    """
+    model = structure[0]
+    neighbor_search = gemmi.NeighborSearch(
+        model, structure.cell, GEOMETRY_NEIGHBOR_SEARCH_RADIUS
+    ).populate()
+    counts: list[dict[str, int]] = []
+    for chain in model:
+        for residue in chain:
+            if residue.name != comp_id:
+                continue
+            polar: set[tuple[str, int, str]] = set()
+            metal: set[tuple[str, int, str]] = set()
+            hydrophobic: set[tuple[str, int, str]] = set()
+            for atom in residue:
+                lig_el = atom.element.name
+                lig_metal = atom.element.is_metal
+                lig_polar = lig_el in _POLAR_ELEMENTS
+                for mark in neighbor_search.find_atoms(
+                    atom.pos, "\0", radius=GEOMETRY_HYDROPHOBIC_DIST
+                ):
+                    cra = mark.to_cra(model)
+                    if not is_protein_atom(cra.residue):
+                        continue
+                    res_num = cra.residue.seqid.num
+                    if res_num is None:
+                        continue
+                    dist = atom.pos.dist(cra.atom.pos)
+                    if dist > GEOMETRY_HYDROPHOBIC_DIST:
+                        continue
+                    p_el = cra.atom.element.name
+                    p_metal = cra.atom.element.is_metal
+                    key = (cra.chain.name, res_num, cra.residue.seqid.icode)
+                    if lig_polar and p_el in _POLAR_ELEMENTS and dist <= GEOMETRY_HBOND_HEAVY_DIST:
+                        polar.add(key)
+                    # A metal on either side coordinating an N/O/S (or another
+                    # metal). Protein-side metals are rare (HETATM, usually already
+                    # excluded), so in practice this fires for a metal-ion ligand
+                    # near a protein N/O/S.
+                    if dist <= GEOMETRY_METAL_COORD_DIST and (
+                        (lig_metal and (p_el in _POLAR_ELEMENTS or p_metal))
+                        or (p_metal and lig_el in _POLAR_ELEMENTS)
+                    ):
+                        metal.add(key)
+                    # Hydrophobic carbon-carbon; the outer query radius IS the
+                    # hydrophobic cutoff, so no extra distance check is needed.
+                    if lig_el == "C" and p_el == "C":
+                        hydrophobic.add(key)
+            counts.append(
+                {"polar": len(polar), "metal": len(metal), "hydrophobic": len(hydrophobic)}
+            )
+    return counts
