@@ -860,6 +860,7 @@ ALERT_PREFIX_CHIMERIC_REVIEW: str = "[CHIMERIC G-PROTEIN]"
 ALERT_PREFIX_MISSED_POLYMER: str = "[UNANNOTATED CHAIN]"
 ALERT_PREFIX_FUSION_NOTE: str = "[CRYSTALLIZATION FUSION]"
 ALERT_PREFIX_ALPHA5_GRAFT: str = "[ALPHA5 GRAFT]"
+ALERT_PREFIX_UNRECOGNISED_G_ALPHA: str = "[UNRECOGNISED G-ALPHA]"
 
 # ---------------------------------------------------------------------------
 # Annotator function call name

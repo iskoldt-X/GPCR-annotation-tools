@@ -49,11 +49,13 @@ from gpcr_tools.config import (
     ALERT_PREFIX_HALLUCINATION,
     ALERT_PREFIX_TIE_BREAKER_ALIGNED,
     ALERT_PREFIX_TIE_BREAKER_OVERRIDE,
+    ALERT_PREFIX_UNRECOGNISED_G_ALPHA,
     CHIMERA_STATUS_NO_G_PROTEIN,
     CHIMERA_STATUS_SKIPPED,
     CHIMERA_STATUS_SUCCESS,
     CHIMERA_SUBTYPE_LOW_CONFIDENCE,
     EMPTY_VALUES,
+    FULL_G_ALPHA_CANDIDATES,
     LOW_CONFIDENCE_LEVELS,
     get_config,
 )
@@ -121,6 +123,37 @@ class AggregateResult:
 # Validation report assembly
 # ---------------------------------------------------------------------------
 
+# The recognised G-alpha subunit slugs (the values of the curated human G-alpha
+# roster). A specific alpha-subunit slug outside this set is not a known G-alpha
+# candidate and must reach a human. Built once at import.
+_RECOGNISED_G_ALPHA_SLUGS = frozenset(FULL_G_ALPHA_CANDIDATES.values())
+
+
+def _warn_on_unrecognised_g_alpha(best_run_data: dict[str, Any]) -> list[str]:
+    """Flag (for the curator) a G-protein alpha subunit named with a specific slug
+    that is NOT in the curated G-alpha candidate set.
+
+    The candidate roster is alpha-specific, so this checks the alpha subunit only;
+    beta/gamma carry their own slugs and are out of scope. An honest abstention
+    (missing / empty / 'unknown' name) is never flagged -- only a specific,
+    off-roster slug, which is the signature of an invented subtype/species. The
+    warning is a critical warning so it disables one-click accept-all for the PDB.
+    """
+    slug = extract_ai_g_protein(best_run_data)
+    if not isinstance(slug, str):
+        return []
+    normalised = slug.strip().lower()
+    if normalised in EMPTY_VALUES or normalised == "unknown":
+        return []
+    if normalised in _RECOGNISED_G_ALPHA_SLUGS:
+        return []
+    return [
+        f"{ALERT_PREFIX_UNRECOGNISED_G_ALPHA} at "
+        f"'signaling_partners.g_protein.alpha_subunit': G-protein alpha subunit "
+        f"'{slug}' is not a recognised G-alpha candidate (off the curated human "
+        f"G-alpha set); verify the subtype/species against the paper."
+    ]
+
 
 def _build_validation_report(
     pdb_id: str,
@@ -149,6 +182,11 @@ def _build_validation_report(
     # Integrity checks (ghost chain, fake UniProt/PubChem, ghost ligand, method)
     integrity_warnings = validate_all(pdb_id, best_run_data, enriched_entry, cache=validation_cache)
     report["critical_warnings"].extend(integrity_warnings)
+
+    # Candidate-membership backstop: a specific G-alpha slug outside the curated
+    # roster reaches a human. Deterministic, independent of the alpha5 API check,
+    # so it fires even under --skip-api-checks.
+    report["critical_warnings"].extend(_warn_on_unrecognised_g_alpha(best_run_data))
 
     # Non-GPCR polymer chains present in the structure but never annotated by the
     # model (the oligomer missed-protomer check covers GPCR chains only).
