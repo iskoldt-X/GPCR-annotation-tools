@@ -38,6 +38,15 @@ def run_pipeline(
     cfg = get_config()
     runs = num_runs if num_runs is not None else GEMINI_DEFAULT_RUNS
 
+    # Fail fast on a stale / missing storage contract BEFORE any expensive
+    # stage runs (the AI annotate stage in particular). Previously only the
+    # interactive curate step validated the contract, so a mismatch surfaced
+    # only after the costly work had already completed.
+    if not dry_run:
+        from gpcr_tools.workspace import validate_contract
+
+        validate_contract(cfg)
+
     stages = ["fetch"]
     if not skip_fetch_papers:
         stages.append("fetch-papers")

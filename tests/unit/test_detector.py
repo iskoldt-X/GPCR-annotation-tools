@@ -181,9 +181,15 @@ class TestGProteinDetector:
 class TestDetectStage:
     @pytest.fixture
     def ws(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        from gpcr_tools.config import SUPPORTED_CONTRACT_VERSION
+
         workspace = tmp_path / "ws"
-        for sub in ("enriched", "detect", "cache"):
+        for sub in ("enriched", "detect", "cache", "contract"):
             (workspace / sub).mkdir(parents=True)
+        # run_detect_stage now validates the storage contract before working.
+        (workspace / "contract" / "storage_contract.json").write_text(
+            json.dumps({"storage_contract_version": SUPPORTED_CONTRACT_VERSION})
+        )
         monkeypatch.setenv("GPCR_WORKSPACE", str(workspace))
         reset_config()
         yield workspace

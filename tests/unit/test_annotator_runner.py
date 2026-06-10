@@ -455,6 +455,29 @@ def test_discover_annotation_targets_is_model_aware(tmp_path, monkeypatch):
     assert "AAA" in runner.discover_annotation_targets(2, "model-y")
 
 
+def test_run_annotation_stage_fails_fast_on_stale_contract(tmp_path, monkeypatch):
+    """The expensive AI annotate stage must fail fast on a stale storage
+    contract -- before resolving targets or making any model call.
+    """
+    import pytest
+
+    monkeypatch.setenv("GPCR_WORKSPACE", str(tmp_path))
+    reset_config()
+    config = get_config()
+    config.contract_file.parent.mkdir(parents=True, exist_ok=True)
+    # Unsupported (stale) version recorded in the workspace.
+    config.contract_file.write_text(json.dumps({"storage_contract_version": 1}))
+
+    # Targets / model discovery must NOT be reached if the gate fires first.
+    def _boom(*args, **kwargs):
+        raise AssertionError("expensive work ran despite a stale contract")
+
+    monkeypatch.setattr(runner, "discover_annotation_targets", _boom)
+
+    with pytest.raises(SystemExit):
+        runner.run_annotation_stage()
+
+
 def test_registry_fresh_uri_expiry():
     """A cached upload URI is reused only within the Files-API TTL; a stale or
     legacy entry returns None so the caller re-uploads."""

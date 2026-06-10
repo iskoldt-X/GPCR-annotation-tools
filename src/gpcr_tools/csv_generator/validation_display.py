@@ -18,6 +18,7 @@ from gpcr_tools.config import (
     ALERT_SUSPICIOUS_7TM,
     TM_STATUS_INCOMPLETE,
     VALIDATION_FATAL_KEYWORDS,
+    ensure_alert_prefix,
 )
 from gpcr_tools.csv_generator.ui import console
 
@@ -49,9 +50,13 @@ def inject_oligomer_alerts(oligo: dict, validation_data: dict) -> None:
     for alert in oligo.get("alerts") or []:
         atype = alert.get("type") or ""
         if atype in (ALERT_HALLUCINATION, ALERT_MISSED_PROTOMER, ALERT_SUSPICIOUS_7TM):
-            warnings.append(
-                f"OLIGOMER ALERT at 'receptor_info': [{atype}] {alert.get('message') or ''}"
-            )
+            # The "at 'receptor_info'" prefix is a routing anchor so this alert
+            # buckets under the receptor block during review. ensure_alert_prefix
+            # keeps the message's own "[TYPE]" label present exactly once --
+            # current validator messages already carry it (re-prepending would
+            # duplicate it), while older recorded data needs it added.
+            message = ensure_alert_prefix(atype, alert.get("message"))
+            warnings.append(f"OLIGOMER ALERT at 'receptor_info': {message}")
         elif atype == ALERT_MULTI_COPY_LIGAND:
             # Already carries its own 'ligands[...]' path, so it buckets with the
             # ligand block during review rather than under receptor_info.

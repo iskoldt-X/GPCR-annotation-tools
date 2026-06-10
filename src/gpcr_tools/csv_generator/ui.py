@@ -15,10 +15,13 @@ from rich.text import Text
 from rich.theme import Theme
 
 from gpcr_tools.config import (
+    ALERT_ASSEMBLY_MISMATCH,
     ALERT_CHAIN_ID_OVERRIDDEN,
     ALERT_CONFIRMED_OLIGOMER,
     ALERT_HALLUCINATION,
     ALERT_MISSED_PROTOMER,
+    ALERT_MULTI_COPY_LIGAND,
+    ALERT_PROTOMER_IN_AUXILIARY,
     ALERT_SUSPICIOUS_7TM,
     OLIGOMER_HETEROMER,
     OLIGOMER_HOMOMER,
@@ -32,6 +35,7 @@ from gpcr_tools.config import (
     VALIDATION_MATCHED_POLYMER,
     VALIDATION_MATCHED_SMALL_MOLECULE,
     VALIDATION_SKIPPED_APO,
+    ensure_alert_prefix,
 )
 
 # ── Console Setup ───────────────────────────────────────────────────────
@@ -58,6 +62,39 @@ def display_pdb_footer(pdb_id: str) -> None:
     screen scrolls.  Intentionally faint — a quiet marker, not a banner.
     """
     console.print(f"[dim]── PDB {pdb_id} ──[/dim]")
+
+
+def display_critical_warnings_summary(validation_data: dict) -> bool:
+    """Render the validation critical warnings + algorithm conflicts up front.
+
+    These are the same findings that gate the PDB (disable global accept-all)
+    and surface as RED sections once review mode is entered.  Showing them on
+    the Initial Summary lets the curator see *why* a PDB is gated immediately,
+    without first stepping into review.  Returns True if anything was rendered.
+    """
+    if not validation_data:
+        return False
+    critical = validation_data.get("critical_warnings") or []
+    conflicts = validation_data.get("algo_conflicts") or []
+    if not critical and not conflicts:
+        return False
+
+    warn_text = Text()
+    for w in critical:
+        warn_text.append(f"• {w}\n", style="bold red")
+    for c in conflicts:
+        warn_text.append(f"• {c}\n", style="bold yellow")
+
+    count = len(critical) + len(conflicts)
+    console.print(
+        Panel(
+            warn_text,
+            title=f"[bold red]CRITICAL VALIDATION FINDINGS ({count})[/]",
+            border_style="red",
+            box=box.DOUBLE,
+        )
+    )
+    return True
 
 
 # ── Dashboard ───────────────────────────────────────────────────────────
@@ -351,9 +388,17 @@ def display_oligomer_analysis_panel(main_data: dict) -> None:
                 ALERT_MISSED_PROTOMER: "bold yellow",
                 ALERT_CONFIRMED_OLIGOMER: "green",
                 ALERT_SUSPICIOUS_7TM: "bold yellow on red",
+                ALERT_MULTI_COPY_LIGAND: "bold yellow",
+                ALERT_PROTOMER_IN_AUXILIARY: "bold yellow",
+                ALERT_ASSEMBLY_MISMATCH: "bold yellow",
             }.get(atype) or "white"
-            alert_text.append(f"  [{atype}] ", style=style)
-            alert_text.append(f"{alert.get('message') or ''}\n", style="white")
+            # Keep the "[TYPE]" label present exactly once and use the type
+            # only to pick a style. Current validator messages already carry the
+            # prefix (prepending it again would duplicate it, e.g.
+            # "[MULTI_COPY_LIGAND] [MULTI_COPY_LIGAND] ..."), while older recorded
+            # data needs it added.
+            message = ensure_alert_prefix(atype, alert.get("message"))
+            alert_text.append(f"  {message}\n", style=style)
         elements.append(Text())
         elements.append(Text("Alerts:", style="bold underline"))
         elements.append(alert_text)
