@@ -24,6 +24,7 @@ from gpcr_tools.config import (
     ALERT_MULTI_COPY_LIGAND,
     ALERT_PREFIX_FUSION_NOTE,
     ALERT_PREFIX_MISSED_POLYMER,
+    ALERT_PROTOMER_IN_AUXILIARY,
     ALERT_SUSPICIOUS_7TM,
     APO_SENTINEL,
     CRYSTALLIZATION_FUSION_KEYWORDS,
@@ -909,6 +910,63 @@ def _apply_chain_override(
 
 
 # ---------------------------------------------------------------------------
+# GPCR protomer mis-filed as auxiliary protein
+# ---------------------------------------------------------------------------
+
+
+def reconcile_gpcr_in_auxiliary(
+    best_run_data: dict[str, Any],
+    gpcr_roster: dict[str, dict[str, Any]],
+    alerts: list[dict[str, str]],
+) -> None:
+    """Evict any GPCR protomer mis-filed under ``auxiliary_proteins`` (mutates in-place).
+
+    A Class C receptor is an obligate dimer; its partner protomer is a real GPCR
+    chain. When the model files that partner under ``auxiliary_proteins`` (often as
+    type "Other"), it pollutes ``other_aux_proteins.csv``. The partner is already
+    recorded independently in the structures.csv Partner columns (via
+    :func:`resolve_partner_protomer` over ``all_gpcr_chains``), so removing the
+    auxiliary entry loses no data.
+
+    For each ``auxiliary_proteins`` entry, the chain_id is parsed and tested
+    against the FULL *gpcr_roster* (not the 7TM-narrowed classify roster) so a
+    truncated or under-annotated but genuine protomer is still rescued. An entry
+    whose chain_id matches a roster chain is removed and a domain-language alert is
+    appended. An entry with an empty/garbled/missing chain_id is left untouched
+    (fail-safe to current behaviour).
+    """
+    aux_list = best_run_data.get("auxiliary_proteins")
+    if not isinstance(aux_list, list) or not gpcr_roster:
+        return
+
+    kept: list[Any] = []
+    for aux in aux_list:
+        if not isinstance(aux, dict):
+            kept.append(aux)
+            continue
+        aux_chains = _split_chain_ids(aux.get("chain_id"))
+        roster_hits = sorted(aux_chains & set(gpcr_roster.keys()))
+        if not roster_hits:
+            kept.append(aux)
+            continue
+        name = aux.get("name") or "unknown"
+        slug = gpcr_roster[roster_hits[0]].get("slug") or "unknown"
+        chains_text = ", ".join(roster_hits)
+        alerts.append(
+            {
+                "type": ALERT_PROTOMER_IN_AUXILIARY,
+                "message": (
+                    f"[{ALERT_PROTOMER_IN_AUXILIARY}] at 'auxiliary_proteins': "
+                    f"auxiliary protein '{name}' (chain {chains_text}, slug {slug}) "
+                    f"is a GPCR protomer recorded as the dimer partner; "
+                    f"removed from auxiliary proteins."
+                ),
+            }
+        )
+    best_run_data["auxiliary_proteins"] = kept
+
+
+# ---------------------------------------------------------------------------
 # Main analysis
 # ---------------------------------------------------------------------------
 
@@ -1023,6 +1081,13 @@ def analyze_oligomer(
                 ),
             }
         )
+
+    # 6b. Evict any GPCR protomer mis-filed under auxiliary_proteins (the obligate
+    # dimer partner of a Class C receptor). Tested against the full roster so a
+    # truncated/under-annotated real protomer is still rescued. The partner is
+    # already in the structures.csv Partner columns via resolve_partner_protomer,
+    # so eviction loses no data; an alert flags the move for review.
+    reconcile_gpcr_in_auxiliary(best_run_data, gpcr_roster, alerts)
 
     # 7. Smart override: correct chain_id when AI is objectively wrong
     override_info = _apply_chain_override(

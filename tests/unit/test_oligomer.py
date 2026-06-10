@@ -22,6 +22,7 @@ from gpcr_tools.config import (
     ALERT_HALLUCINATION,
     ALERT_MISSED_PROTOMER,
     ALERT_MULTI_COPY_LIGAND,
+    ALERT_PROTOMER_IN_AUXILIARY,
     ALERT_SUSPICIOUS_7TM,
     OLIGOMER_HETEROMER,
     OLIGOMER_HOMOMER,
@@ -31,6 +32,7 @@ from gpcr_tools.config import (
     TM_STATUS_INCOMPLETE,
     TM_STATUS_UNKNOWN,
 )
+from gpcr_tools.csv_generator.logic import resolve_partner_protomer
 from gpcr_tools.validator.oligomer import (
     _analyze_tm_for_entity_instance,
     _apply_chain_override,
@@ -45,6 +47,7 @@ from gpcr_tools.validator.oligomer import (
     get_sequence_length,
     is_gpcr_slug,
     map_uniprot_to_entity,
+    reconcile_gpcr_in_auxiliary,
     scan_all_chains_7tm,
 )
 
@@ -1119,3 +1122,144 @@ class TestMultiCopyLigandAlert:
         }
         analyze_oligomer("TEST", data, enriched)
         assert self._multi_copy_alerts(data) == []
+
+
+# ===================================================================
+# reconcile_gpcr_in_auxiliary — GPCR protomer mis-filed as auxiliary
+# ===================================================================
+
+
+def _aux(name: str, chain_id: Any, type_value: str = "Other") -> dict[str, Any]:
+    """Build an auxiliary_proteins entry mirroring the schema shape."""
+    return {"name": name, "type": {"value": type_value}, "chain_id": chain_id}
+
+
+class TestReconcileGpcrInAuxiliary:
+    """A Class C obligate-dimer partner protomer mis-filed under
+    auxiliary_proteins must be evicted (with an alert) and never reach
+    other_aux_proteins.csv, while genuine non-GPCR auxiliaries stay put."""
+
+    def test_protomer_evicted_with_alert(self) -> None:
+        roster = {
+            "A": {"slug": "grm2_human", "length": 800, "asym_id": "A"},
+            "B": {"slug": "grm7_human", "length": 850, "asym_id": "B"},
+        }
+        data: dict[str, Any] = {
+            "auxiliary_proteins": [_aux("Metabotropic glutamate receptor 7", "B")],
+        }
+        alerts: list[dict[str, str]] = []
+        reconcile_gpcr_in_auxiliary(data, roster, alerts)
+
+        assert data["auxiliary_proteins"] == []
+        assert len(alerts) == 1
+        assert alerts[0]["type"] == ALERT_PROTOMER_IN_AUXILIARY
+        msg = alerts[0]["message"]
+        assert "auxiliary_proteins" in msg
+        assert "chain B" in msg
+        assert "grm7_human" in msg
+        assert "Metabotropic glutamate receptor 7" in msg
+
+    def test_evicted_partner_still_resolvable(self) -> None:
+        # The partner protomer lives in all_gpcr_chains independently of the
+        # auxiliary block, so eviction loses no data: resolve_partner_protomer
+        # still returns it.
+        roster = {
+            "A": {"slug": "grm2_human", "length": 800, "asym_id": "A"},
+            "B": {"slug": "grm7_human", "length": 850, "asym_id": "B"},
+        }
+        data: dict[str, Any] = {
+            "auxiliary_proteins": [_aux("mGlu7 partner", "B")],
+        }
+        reconcile_gpcr_in_auxiliary(data, roster, [])
+        assert data["auxiliary_proteins"] == []
+
+        oligo = {
+            "all_gpcr_chains": [{"chain_id": c, "slug": info["slug"]} for c, info in roster.items()]
+        }
+        partner_uniprot, partner_chains = resolve_partner_protomer(oligo, "A")
+        assert partner_uniprot == "grm7_human"
+        assert partner_chains == "B"
+
+    def test_non_gpcr_auxiliary_not_evicted(self) -> None:
+        # A genuine non-GPCR auxiliary (nanobody chain not in the GPCR roster)
+        # must survive — no false eviction.
+        roster = {"A": {"slug": "grm2_human", "length": 800, "asym_id": "A"}}
+        nanobody = _aux("Nanobody-35", "N", type_value="Nanobody")
+        data: dict[str, Any] = {"auxiliary_proteins": [nanobody]}
+        alerts: list[dict[str, str]] = []
+        reconcile_gpcr_in_auxiliary(data, roster, alerts)
+
+        assert data["auxiliary_proteins"] == [nanobody]
+        assert alerts == []
+
+    def test_empty_chain_id_not_evicted(self) -> None:
+        # An entry with empty/missing chain_id parses to no chains and is left
+        # untouched (fail-safe to current behaviour).
+        roster = {"A": {"slug": "grm2_human", "length": 800, "asym_id": "A"}}
+        empty = _aux("T4-Lysozyme", "")
+        missing = _aux("BRIL", None)
+        data: dict[str, Any] = {"auxiliary_proteins": [empty, missing]}
+        alerts: list[dict[str, str]] = []
+        reconcile_gpcr_in_auxiliary(data, roster, alerts)
+
+        assert data["auxiliary_proteins"] == [empty, missing]
+        assert alerts == []
+
+    def test_mixed_list_only_protomer_evicted(self) -> None:
+        roster = {
+            "A": {"slug": "grm2_human", "length": 800, "asym_id": "A"},
+            "B": {"slug": "grm7_human", "length": 850, "asym_id": "B"},
+        }
+        nanobody = _aux("Nanobody-6", "N", type_value="Nanobody")
+        partner = _aux("mGlu7 partner", "B")
+        data: dict[str, Any] = {"auxiliary_proteins": [nanobody, partner]}
+        alerts: list[dict[str, str]] = []
+        reconcile_gpcr_in_auxiliary(data, roster, alerts)
+
+        assert data["auxiliary_proteins"] == [nanobody]
+        assert len(alerts) == 1
+        assert alerts[0]["type"] == ALERT_PROTOMER_IN_AUXILIARY
+
+    def test_empty_roster_no_op(self) -> None:
+        partner = _aux("mGlu7 partner", "B")
+        data: dict[str, Any] = {"auxiliary_proteins": [partner]}
+        alerts: list[dict[str, str]] = []
+        reconcile_gpcr_in_auxiliary(data, {}, alerts)
+        assert data["auxiliary_proteins"] == [partner]
+        assert alerts == []
+
+    def test_no_auxiliary_proteins_no_op(self) -> None:
+        roster = {"A": {"slug": "grm2_human", "length": 800, "asym_id": "A"}}
+        data: dict[str, Any] = {}
+        alerts: list[dict[str, str]] = []
+        reconcile_gpcr_in_auxiliary(data, roster, alerts)
+        assert alerts == []
+
+    def test_end_to_end_via_analyze_oligomer(self) -> None:
+        # Through analyze_oligomer: a heterodimer (grm2 chain A + grm7 chain B)
+        # where the model mis-filed chain B's protomer as an "Other" auxiliary.
+        # After analysis the auxiliary block is clean and the alert is recorded.
+        enriched = _make_enriched_with_entities(
+            [
+                _make_entity("grm2_human", "A"),
+                _make_entity("grm7_human", "B"),
+            ]
+        )
+        data: dict[str, Any] = {
+            "receptor_info": {"chain_id": "A"},
+            "auxiliary_proteins": [_aux("Metabotropic glutamate receptor 7", "B")],
+        }
+        with patch(
+            "gpcr_tools.validator.oligomer.scan_all_chains_7tm",
+            return_value=({}, None),
+        ):
+            analyze_oligomer("TEST", data, enriched)
+
+        assert data["auxiliary_proteins"] == []
+        analysis = data["oligomer_analysis"]
+        evictions = [a for a in analysis["alerts"] if a["type"] == ALERT_PROTOMER_IN_AUXILIARY]
+        assert len(evictions) == 1
+        # The partner is still recorded via all_gpcr_chains -> Partner columns.
+        partner_uniprot, partner_chains = resolve_partner_protomer(analysis, "A")
+        assert partner_uniprot == "grm7_human"
+        assert partner_chains == "B"

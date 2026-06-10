@@ -731,6 +731,7 @@ ALERT_CHAIN_ID_OVERRIDDEN: str = "CHAIN_ID_OVERRIDDEN"
 ALERT_7TM_UPGRADE: str = "7TM_UPGRADE"
 ALERT_SUSPICIOUS_7TM: str = "SUSPICIOUS_7TM"
 ALERT_MULTI_COPY_LIGAND: str = "MULTI_COPY_LIGAND"
+ALERT_PROTOMER_IN_AUXILIARY: str = "PROTOMER_IN_AUXILIARY"
 
 # ---------------------------------------------------------------------------
 # 7TM statuses & detection constants
