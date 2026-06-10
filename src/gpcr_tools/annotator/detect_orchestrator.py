@@ -169,6 +169,12 @@ def _format_site_ref(payload: dict[str, Any]) -> str | None:
                 if copy.get("in_band")
                 else f"outside the membrane band (depth {depth} Å)"
             )
+            # Append the oriented side fact when the structure could be oriented;
+            # the outside-band wording keeps its signed depth number, and
+            # unoriented copies keep the old no-side wording.
+            side = copy.get("side")
+            if side is not None:
+                band = f"{band}, {side}"
         else:
             band = "membrane depth n/a"
         copy_lines.append(

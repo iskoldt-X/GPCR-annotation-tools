@@ -12,6 +12,7 @@ import gemmi
 from gpcr_tools.validator.geometry import is_protein_atom, ligand_interaction_counts
 from gpcr_tools.validator.membrane import (
     MembraneFrame,
+    intracellular_side_sign,
     ligand_facing_fractions,
     ligand_membrane_depth,
     membrane_frame,
@@ -144,6 +145,28 @@ class TestLigandMembraneDepth:
 
     def test_empty_atoms_returns_none(self):
         assert ligand_membrane_depth(self._FRAME, []) is None
+
+
+class TestIntracellularSideSign:
+    _FRAME = MembraneFrame(normal=(0.0, 0.0, 1.0), center=0.0, half_thickness=14.0)
+
+    def test_reference_below_midplane_gives_negative_sign(self):
+        # An intracellular reference at z=-30 (below the mid-plane) makes the
+        # negative-depth side intracellular -> sign -1.
+        assert intracellular_side_sign(self._FRAME, (0.0, 0.0, -30.0)) == -1
+
+    def test_reference_above_midplane_gives_positive_sign(self):
+        assert intracellular_side_sign(self._FRAME, (0.0, 0.0, 30.0)) == 1
+
+    def test_reference_on_midplane_is_unresolvable(self):
+        # A reference exactly in the mid-plane has no side -> None (abstain).
+        assert intracellular_side_sign(self._FRAME, (0.0, 0.0, 0.0)) is None
+
+    def test_sign_follows_the_normal_direction(self):
+        # With the normal flipped (sign-arbitrary frame), the same reference point
+        # yields the opposite sign -- the helper resolves the side, not the depth.
+        flipped = MembraneFrame(normal=(0.0, 0.0, -1.0), center=0.0, half_thickness=14.0)
+        assert intracellular_side_sign(flipped, (0.0, 0.0, -30.0)) == 1
 
 
 class TestLigandFacing:

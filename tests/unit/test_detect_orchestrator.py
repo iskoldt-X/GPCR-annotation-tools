@@ -34,6 +34,7 @@ def _copy(
     facing: float | None = None,
     depth: float | None = None,
     in_band: bool | None = None,
+    side: str | None = None,
 ) -> dict:
     copy: dict = {
         "generic_numbers": generic,
@@ -45,6 +46,8 @@ def _copy(
     if depth is not None:
         copy["depth"] = depth
         copy["in_band"] = in_band
+    if side is not None:
+        copy["side"] = side
     return copy
 
 
@@ -183,6 +186,65 @@ class TestAssembleDetectBlock:
         )
         assert "one entry per site" in site
 
+    def test_site_ref_renders_intracellular_side(self) -> None:
+        # An oriented copy outside the band on the cytoplasmic side appends the
+        # qualitative side fact while keeping the signed depth number.
+        block = assemble_detect_block(
+            [
+                _site_ref(
+                    "GTP",
+                    [
+                        _copy(
+                            ["3x50", "7x53"],
+                            ["H8", "ICL3"],
+                            0,
+                            0.7,
+                            depth=-24.0,
+                            in_band=False,
+                            side="on the intracellular side",
+                        )
+                    ],
+                )
+            ]
+        )
+        assert block is not None
+        assert "outside the membrane band (depth -24.0 Å)" in block  # depth number kept
+        assert "on the intracellular side" in block
+
+    def test_site_ref_renders_mid_membrane_side(self) -> None:
+        # A mid-bilayer inter-helical copy inside the band is reported mid-membrane.
+        block = assemble_detect_block(
+            [
+                _site_ref(
+                    "OLA",
+                    [
+                        _copy(
+                            ["3x40", "4x56", "5x46"],
+                            ["TM3", "TM4", "TM5"],
+                            0,
+                            0.8,
+                            depth=1.0,
+                            in_band=True,
+                            side="mid-membrane",
+                        )
+                    ],
+                )
+            ]
+        )
+        assert block is not None
+        assert "within the membrane band, mid-membrane" in block
+
+    def test_site_ref_unoriented_copy_keeps_old_wording(self) -> None:
+        # When the structure could not be oriented, no side fact is added: the copy
+        # keeps the existing no-side band wording (honest abstain).
+        block = assemble_detect_block(
+            [_site_ref("ADN", [_copy(["3x33"], ["TM3"], 1, 0.85, depth=3.0, in_band=True)])]
+        )
+        assert block is not None
+        assert "within the membrane band" in block
+        for side in ("intracellular side", "extracellular side", "mid-membrane"):
+            assert side not in block
+
     def test_dual_role_renders_per_copy_pocket_evidence(self) -> None:
         block = assemble_detect_block([_dual_role("A1AEI")])
         assert block is not None
@@ -283,6 +345,7 @@ def test_detect_block_golden_snapshot() -> None:
                         facing=0.9,
                         depth=2.0,
                         in_band=True,
+                        side="mid-membrane",
                     )
                 ],
             ),
@@ -307,7 +370,7 @@ def test_detect_block_golden_snapshot() -> None:
         "sites, emit one entry per site:\n"
         "  a copy: enclosure 0.88; contacts generic numbers [3x33, 6x51] in segments "
         "[TM3, TM6] (2 Class A orthosteric-core); 0.90 pocket-facing (1=buried in "
-        "pocket, 0=lipid-facing); within the membrane band"
+        "pocket, 0=lipid-facing); within the membrane band, mid-membrane"
     )
     assert block == expected
 

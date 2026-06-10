@@ -605,6 +605,23 @@ ORTHOSTERIC_CORE_GENERIC: frozenset[str] = frozenset({"3x33", "5x42", "6x51", "7
 # (fewer -> the signature is too sparse, so site_ref is unknown).
 SITE_REF_MIN_MAPPED_CONTACTS: int = 5
 
+# Intracellular landmarks for orienting the membrane normal (which side is the
+# cytoplasm). The membrane frame leaves the normal's sign arbitrary; projecting
+# the centroid of these receptor cytoplasmic-face residues onto the normal fixes
+# the sign so a ligand's signed depth gains a physical "which side" meaning. This
+# uses the receptor's own 7TM backbone via the shipped generic numbering, so it
+# works for apo / no-G-protein structures too (where a G-alpha reference fails).
+# Canonical cytoplasmic-anchor generic numbers: the DRY arginine (3x50) and the
+# NPxxY motif (7x49-7x53), both at the intracellular ends of their helices.
+MEMBRANE_INTRACELLULAR_ANCHOR_GENERIC: frozenset[str] = frozenset(
+    {"3x50", "7x49", "7x50", "7x51", "7x52", "7x53"}
+)
+# Segments that lie wholly on the cytoplasmic face of the receptor.
+MEMBRANE_INTRACELLULAR_SEGMENTS: frozenset[str] = frozenset({"H8", "ICL1", "ICL2", "ICL3"})
+# Too few located landmark Cα -> orientation by landmarks is unreliable; fall
+# back to the G-alpha cross-check or stay unoriented (honest abstain).
+MEMBRANE_MIN_ORIENT_LANDMARKS: int = 3
+
 # How a subtype call was resolved against the alpha5 window.
 CHIMERA_SUBTYPE_RESOLVED: str = "resolved"
 CHIMERA_SUBTYPE_INSEPARABLE_SET: str = "inseparable_set"
