@@ -619,6 +619,14 @@ def run_annotation_stage(
     Raises ``FileNotFoundError`` when no prompt is available.
     """
     config = get_config()
+
+    # Fail fast on a stale / missing storage contract BEFORE the expensive AI
+    # calls. Previously only the interactive curate step validated the contract,
+    # so a layout mismatch surfaced only after annotation had already run.
+    from gpcr_tools.workspace import validate_contract
+
+    validate_contract(config)
+
     model_name = model or get_gemini_model_name()
 
     if pdb_id:

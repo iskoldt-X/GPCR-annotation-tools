@@ -63,6 +63,103 @@ class TestDisplayPdbFooter:
         assert "PDB" in out
 
 
+class TestOligomerAlertRendering:
+    """The oligomer analysis panel must render each alert's type prefix exactly
+    once. Current validator messages already carry their own "[TYPE]" prefix, so
+    the renderer must not prepend it again; older recorded data has no prefix, so
+    the renderer must add it. The rendering is idempotent either way.
+    """
+
+    def test_multi_copy_ligand_prefix_not_duplicated(self, capsys):
+        from gpcr_tools.config import ALERT_MULTI_COPY_LIGAND
+        from gpcr_tools.csv_generator.ui import display_oligomer_analysis_panel
+
+        msg = (
+            f"[{ALERT_MULTI_COPY_LIGAND}] at 'ligands[CLR]': modelled in 2 copies "
+            f"(instances D, E); one annotation row may hide copies at distinct "
+            f"sites or with distinct roles. Human review recommended."
+        )
+        main_data = {
+            "oligomer_analysis": {
+                "classification": "MONOMER",
+                "alerts": [{"type": ALERT_MULTI_COPY_LIGAND, "message": msg}],
+            }
+        }
+        display_oligomer_analysis_panel(main_data)
+        out = capsys.readouterr().out
+        # The type prefix must appear exactly once, never doubled.
+        assert out.count(f"[{ALERT_MULTI_COPY_LIGAND}]") == 1
+        assert f"[{ALERT_MULTI_COPY_LIGAND}] [{ALERT_MULTI_COPY_LIGAND}]" not in out
+
+    def test_hallucination_prefix_not_duplicated(self, capsys):
+        from gpcr_tools.config import ALERT_HALLUCINATION
+        from gpcr_tools.csv_generator.ui import display_oligomer_analysis_panel
+
+        msg = f"[{ALERT_HALLUCINATION}] at 'oligomer_analysis': chain Z not in source."
+        main_data = {
+            "oligomer_analysis": {
+                "classification": "MONOMER",
+                "alerts": [{"type": ALERT_HALLUCINATION, "message": msg}],
+            }
+        }
+        display_oligomer_analysis_panel(main_data)
+        out = capsys.readouterr().out
+        assert out.count(f"[{ALERT_HALLUCINATION}]") == 1
+
+    def test_bare_message_gets_single_prefix(self, capsys):
+        # Older recorded data stored the bare description (no "[TYPE]" prefix);
+        # the renderer must add it exactly once so the type stays visible.
+        from gpcr_tools.config import ALERT_MISSED_PROTOMER
+        from gpcr_tools.csv_generator.ui import display_oligomer_analysis_panel
+
+        main_data = {
+            "oligomer_analysis": {
+                "classification": "MONOMER",
+                "alerts": [
+                    {"type": ALERT_MISSED_PROTOMER, "message": "GPCR roster has chains A, B."}
+                ],
+            }
+        }
+        display_oligomer_analysis_panel(main_data)
+        out = capsys.readouterr().out
+        assert out.count(f"[{ALERT_MISSED_PROTOMER}]") == 1
+
+
+class TestDisplayCriticalWarningsSummary:
+    """Critical validation findings must be surfaced on the Initial Summary so
+    the curator sees *why* a PDB is gated without entering review mode.
+    """
+
+    def test_renders_critical_warnings(self, capsys):
+        from gpcr_tools.csv_generator.ui import display_critical_warnings_summary
+
+        rendered = display_critical_warnings_summary(
+            {
+                "critical_warnings": [
+                    "APO_WITH_LIGANDS at 'ligands': structure is apo but ligands annotated.",
+                    "CHIMERIC G-PROTEIN at 'signaling_partners': fusion detected.",
+                ],
+                "algo_conflicts": ["CONFLICT! AI: 'gnai1' vs Algo: 'gnas2'"],
+            }
+        )
+        out = capsys.readouterr().out
+        assert rendered is True
+        assert "APO_WITH_LIGANDS" in out
+        assert "CHIMERIC G-PROTEIN" in out
+        assert "gnai1" in out
+        assert "CRITICAL VALIDATION FINDINGS" in out
+
+    def test_silent_when_no_findings(self, capsys):
+        from gpcr_tools.csv_generator.ui import display_critical_warnings_summary
+
+        assert display_critical_warnings_summary({}) is False
+        assert (
+            display_critical_warnings_summary({"critical_warnings": [], "algo_conflicts": []})
+            is False
+        )
+        assert capsys.readouterr().out == ""
+
+
 class TestCanonicalizePath:
     def test_dots_stripped(self):
         assert canonicalize_path(".receptor_info.chain_id") == "receptor_info.chain_id"

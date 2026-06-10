@@ -12,6 +12,7 @@ from gpcr_tools.config import (
     ALERT_MISSED_PROTOMER,
     OLIGOMER_HETEROMER,
     OLIGOMER_HOMOMER,
+    ensure_alert_prefix,
 )
 
 
@@ -193,7 +194,11 @@ def build_structure_note(
         for alert in oligo.get("alerts") or []:
             atype = alert.get("type") or ""
             if atype in (ALERT_HALLUCINATION, ALERT_MISSED_PROTOMER):
-                parts.append(f"[{atype}: {alert.get('message') or ''}]")
+                # Keep the "[TYPE]" label present exactly once in the persisted
+                # note. Current validator messages already carry it; older
+                # recorded data does not. Re-wrapping with "[{atype}: ...]" would
+                # duplicate it (e.g. "[HALLUCINATION: [HALLUCINATION] ...]").
+                parts.append(ensure_alert_prefix(atype, alert.get("message")))
 
     if truncation_note:
         parts.append(truncation_note)

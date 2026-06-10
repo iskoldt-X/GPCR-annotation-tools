@@ -107,6 +107,13 @@ def run_detect(
 def run_detect_stage(pdb_id: str | None = None, *, skip_api_checks: bool = False) -> dict[str, int]:
     """Run detect on one PDB or every enriched PDB. Returns {pdb_id: signal count}."""
     cfg = get_config()
+
+    # Fail fast on a stale / missing storage contract before any detection work,
+    # so a layout mismatch is caught before the expensive annotate stage.
+    from gpcr_tools.workspace import validate_contract
+
+    validate_contract(cfg)
+
     if pdb_id:
         targets = [pdb_id]
     elif cfg.enriched_dir.exists():

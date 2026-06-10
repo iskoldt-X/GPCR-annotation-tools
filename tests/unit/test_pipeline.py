@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from gpcr_tools import pipeline
-from gpcr_tools.config import get_config, reset_config
+from gpcr_tools.config import SUPPORTED_CONTRACT_VERSION, get_config, reset_config
 
 
 @pytest.fixture()
@@ -17,6 +18,10 @@ def cfg(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
     reset_config()
     c = get_config()
     c.enriched_dir.mkdir(parents=True, exist_ok=True)
+    # The pipeline now validates the storage contract before running any stage,
+    # so a valid contract must exist in the test workspace.
+    c.contract_file.parent.mkdir(parents=True, exist_ok=True)
+    c.contract_file.write_text(json.dumps({"storage_contract_version": SUPPORTED_CONTRACT_VERSION}))
     return c
 
 
@@ -118,4 +123,32 @@ def test_dry_run_logs_the_plan(
     with caplog.at_level(logging.INFO, logger="gpcr_tools.pipeline"):
         pipeline.run_pipeline(dry_run=True)
     assert "would run" in caplog.text  # the preview is emitted (not swallowed)
+    assert calls == []
+
+
+def test_stale_contract_fails_fast_before_any_stage(
+    cfg: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale storage contract must fail fast BEFORE any (expensive) stage
+    runs -- not crash late at the curate step after AI annotation completed.
+    """
+    # Overwrite the valid contract with an unsupported (stale) version.
+    cfg.contract_file.write_text(json.dumps({"storage_contract_version": 1}))
+    (cfg.enriched_dir / "7W55.json").write_text("{}")
+    calls: list[str] = []
+    _patch_stages(monkeypatch, calls)
+
+    with pytest.raises(SystemExit):
+        pipeline.run_pipeline()
+
+    # The gate fired before fetch -- no stage ran.
+    assert calls == []
+
+
+def test_dry_run_skips_contract_gate(cfg: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A dry run only prints the plan, so it must not fail on a stale contract."""
+    cfg.contract_file.write_text(json.dumps({"storage_contract_version": 1}))
+    calls: list[str] = []
+    _patch_stages(monkeypatch, calls)
+    pipeline.run_pipeline(dry_run=True)  # must not raise
     assert calls == []

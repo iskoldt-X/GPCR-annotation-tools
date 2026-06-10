@@ -357,6 +357,24 @@ def is_empty_key(value: Any) -> bool:
     return not value
 
 
+def ensure_alert_prefix(alert_type: str, message: str | None) -> str:
+    """Return *message* guaranteed to carry its ``[TYPE]`` prefix exactly once.
+
+    Oligomer alert messages built by the current validator already start with
+    ``"[TYPE] at '...': ..."``, but older recorded data stored the bare
+    description with no prefix.  Renderers must therefore be idempotent: prepend
+    ``[TYPE]`` only when it is absent, so the prefix is never duplicated
+    (e.g. ``"[MISSED_PROTOMER] [MISSED_PROTOMER] at ..."``) and never dropped.
+    """
+    text = (message or "").strip()
+    prefix = f"[{alert_type}]"
+    if not text:
+        return prefix
+    if text.startswith(prefix):
+        return text
+    return f"{prefix} {text}"
+
+
 def list_item_identity(item: dict[str, Any], key_field: str, idx: int) -> str:
     """Stable grouping identity for a list item — the key field when usable,
     else a namespaced fallback (name -> type -> index).

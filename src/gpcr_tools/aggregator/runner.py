@@ -481,6 +481,11 @@ def aggregate_pdb(
 
     Use ``if enriched is None:`` — NOT ``if not enriched:`` (an empty dict is valid).
     """
+    # Fail fast on a stale / missing storage contract before doing real work.
+    from gpcr_tools.workspace import validate_contract
+
+    validate_contract(get_config())
+
     # 1. Load AI runs
     runs = load_ai_runs(pdb_id)
     if not runs:
@@ -584,6 +589,11 @@ def aggregate_all(
     except Exception as exc:
         logger.error("Failed to initialize workspace config: %s", exc)
         return []
+
+    # Fail fast on a stale / missing storage contract before the batch begins.
+    from gpcr_tools.workspace import validate_contract
+
+    validate_contract(cfg)
 
     # Cache initialization
     try:

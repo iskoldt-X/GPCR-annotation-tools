@@ -4,7 +4,41 @@ from pathlib import Path
 
 import pytest
 
-from gpcr_tools.config import WorkspaceConfig, get_config, list_item_identity, reset_config
+from gpcr_tools.config import (
+    WorkspaceConfig,
+    ensure_alert_prefix,
+    get_config,
+    list_item_identity,
+    reset_config,
+)
+
+
+class TestEnsureAlertPrefix:
+    """The "[TYPE]" prefix must appear exactly once regardless of whether the
+    incoming message already carries it (current validator output) or not
+    (older recorded data)."""
+
+    def test_prefixed_message_kept_once(self) -> None:
+        # Current validator format already carries the prefix.
+        msg = "[MISSED_PROTOMER] at 'oligomer_analysis': Missed: ['A']."
+        out = ensure_alert_prefix("MISSED_PROTOMER", msg)
+        assert out == msg
+        assert out.count("[MISSED_PROTOMER]") == 1
+
+    def test_bare_message_gets_prefix(self) -> None:
+        # Older recorded data stored the bare description, no prefix.
+        out = ensure_alert_prefix("MISSED_PROTOMER", "GPCR roster has chains ['A', 'B'].")
+        assert out == "[MISSED_PROTOMER] GPCR roster has chains ['A', 'B']."
+        assert out.count("[MISSED_PROTOMER]") == 1
+
+    def test_empty_message_returns_prefix(self) -> None:
+        assert ensure_alert_prefix("HALLUCINATION", "") == "[HALLUCINATION]"
+        assert ensure_alert_prefix("HALLUCINATION", None) == "[HALLUCINATION]"
+
+    def test_leading_whitespace_prefixed_message(self) -> None:
+        out = ensure_alert_prefix("HALLUCINATION", "  [HALLUCINATION] at 'x': y")
+        assert out.count("[HALLUCINATION]") == 1
+        assert out.startswith("[HALLUCINATION]")
 
 
 class TestListItemIdentity:

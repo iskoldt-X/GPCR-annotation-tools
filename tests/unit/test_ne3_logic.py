@@ -250,23 +250,41 @@ class TestBuildStructureNote:
         assert "[HETEROMER: chains R, S]" in result
 
     def test_missed_protomer_alert(self):
+        # Real validator messages already carry a "[TYPE] at '...'" prefix.
         oligo = {
             "classification": "MONOMER",
             "chain_id_override": {"applied": False},
-            "alerts": [{"type": "MISSED_PROTOMER", "message": "Missed B"}],
+            "alerts": [
+                {
+                    "type": "MISSED_PROTOMER",
+                    "message": "[MISSED_PROTOMER] at 'oligomer_analysis': Missed B",
+                }
+            ],
             "all_gpcr_chains": [],
         }
         result = build_structure_note({"note": ""}, oligo)
-        assert "[MISSED_PROTOMER: Missed B]" in result
+        assert "[MISSED_PROTOMER]" in result
+        assert "Missed B" in result
+        # The type prefix must appear exactly once in the persisted note.
+        assert result.count("[MISSED_PROTOMER]") == 1
+        assert "[MISSED_PROTOMER: [MISSED_PROTOMER]" not in result
 
     def test_hallucination_alert(self):
         oligo = {
             "chain_id_override": {"applied": False},
-            "alerts": [{"type": "HALLUCINATION", "message": "Chain G fake"}],
+            "alerts": [
+                {
+                    "type": "HALLUCINATION",
+                    "message": "[HALLUCINATION] at 'oligomer_analysis': Chain G fake",
+                }
+            ],
             "all_gpcr_chains": [],
         }
         result = build_structure_note({"note": ""}, oligo)
-        assert "[HALLUCINATION: Chain G fake]" in result
+        assert "[HALLUCINATION]" in result
+        assert "Chain G fake" in result
+        assert result.count("[HALLUCINATION]") == 1
+        assert "[HALLUCINATION: [HALLUCINATION]" not in result
 
     def test_confirmed_oligomer_not_included(self):
         """CONFIRMED_OLIGOMER alerts should NOT appear in the note."""
