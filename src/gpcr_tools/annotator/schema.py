@@ -111,7 +111,7 @@ ANNOTATION_TOOL = types.Tool(
                         },
                         "ligands": {
                             "type": "array",
-                            "description": "A list of ALL ligands. Must include an 'Apo' entry if no ligand is present. A G-protein-derived or transducer-mimetic peptide is a signaling partner, not a receptor ligand — do not record it here.",
+                            "description": "A list of ALL ligands. Must include an 'Apo' entry if no ligand is present. A G-protein-derived or transducer-mimetic peptide is not a ligand",
                             "items": {
                                 "type": "object",
                                 "properties": {
@@ -301,7 +301,7 @@ ANNOTATION_TOOL = types.Tool(
                                         },
                                         "note": {
                                             "type": "string",
-                                            "description": "Any notes, e.g., 'Engineered G protein', 'Gs/Gi chimera'. If is_chimeric is true, briefly explain the chimera's composition here. SOURCING REQUIREMENT: the specific composition details (parent isoforms, species, chimera breakpoints) MUST be stated in the paper or PDB metadata. If the source does not state them, do NOT write them -- stay at the family level (e.g. 'Gs-family G-alpha; specific subtype/species not stated in paper').",
+                                            "description": "Any notes, e.g., 'Engineered G protein', 'Gs/Gi chimera'. If is_chimeric is true, briefly explain the chimera's composition here. SOURCING REQUIREMENT: the specific composition details MUST be stated in the paper or PDB metadata.",
                                         },
                                     },
                                     "required": ["alpha_subunit"],
