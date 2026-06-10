@@ -177,6 +177,66 @@ class TestChimericForcesReview:
         )
 
 
+class TestUnrecognisedGAlphaBackstop:
+    """A specific alpha-subunit slug off the curated G-alpha roster must reach a
+    human; an in-roster slug or an honest abstention must not."""
+
+    @staticmethod
+    def _alpha(slug):
+        # The alpha-subunit name field is present and carries the given value
+        # (including an explicit null). For the field-absent case, pass {} directly.
+        return {
+            "signaling_partners": {"g_protein": {"alpha_subunit": {"uniprot_entry_name": slug}}}
+        }
+
+    def test_off_roster_slug_disables_accept_all(self, monkeypatch):
+        # gnas_crigr (hamster Gs) is a real, specific slug that is not one of the
+        # curated human G-alpha candidates: it must land in critical_warnings (the
+        # channel that disables one-click accept-all).
+        report = _report(self._alpha("gnas_crigr"), monkeypatch)
+        assert any("gnas_crigr" in w for w in report["critical_warnings"])
+        assert any("g_protein" in w for w in report["critical_warnings"])
+
+    def test_in_roster_slug_no_warning(self, monkeypatch):
+        report = _report(self._alpha("gnas2_human"), monkeypatch)
+        assert report["critical_warnings"] == []
+
+    def test_missing_alpha_subunit_no_warning(self, monkeypatch):
+        # The g_protein block is absent entirely (the field-not-present path).
+        report = _report({}, monkeypatch)
+        assert report["critical_warnings"] == []
+
+    @pytest.mark.parametrize("abstention", ["unknown", "Unknown", "none", "", "  ", None])
+    def test_honest_abstention_no_warning(self, abstention, monkeypatch):
+        # The AI honestly declining to name a subtype must never be flagged. The
+        # None arm exercises the explicit-null (uniprot_entry_name: null) path,
+        # distinct from the field-absent case above.
+        report = _report(self._alpha(abstention), monkeypatch)
+        assert report["critical_warnings"] == []
+
+    def test_backstop_is_alpha_only(self, monkeypatch):
+        # The candidate roster is alpha-specific; an off-roster beta/gamma slug is
+        # out of scope and must not trigger the alpha-subunit backstop.
+        best = {
+            "signaling_partners": {
+                "g_protein": {
+                    "alpha_subunit": {"uniprot_entry_name": "gnas2_human"},
+                    "beta_subunit": {"uniprot_entry_name": "gbb1_human"},
+                    "gamma_subunit": {"uniprot_entry_name": "gbg2_human"},
+                }
+            }
+        }
+        report = _report(best, monkeypatch)
+        assert report["critical_warnings"] == []
+
+    def test_backstop_fires_independent_of_alpha5(self, monkeypatch):
+        # Deterministic: it does not depend on the alpha5 API check, so it fires
+        # even with the default skipped chimera_result (the --skip-api-checks path).
+        report = _report(self._alpha("gnas_crigr"), monkeypatch)
+        assert report["chimera_status"] is not None
+        assert any("not a recognised G-alpha candidate" in w for w in report["critical_warnings"])
+
+
 def _chimera_report(chimera_result, ai_uniprot, monkeypatch):
     monkeypatch.setattr("gpcr_tools.aggregator.runner.validate_all", lambda *a, **k: [])
     _no_detect_signals(monkeypatch)

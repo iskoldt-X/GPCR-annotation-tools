@@ -7,6 +7,8 @@ validators silently disagree. These tests fail loudly on any such drift.
 
 from __future__ import annotations
 
+import importlib.resources
+
 from google.genai import types
 
 from gpcr_tools.annotator.schema import ANNOTATION_TOOL
@@ -17,6 +19,18 @@ def _ligand_item_properties() -> dict:
     """The per-ligand item schema's properties, from the live tool object."""
     params = ANNOTATION_TOOL.function_declarations[0].parameters
     return params.properties["ligands"].items.properties
+
+
+def _g_protein_properties() -> dict:
+    """The g_protein object schema's properties, from the live tool object."""
+    params = ANNOTATION_TOOL.function_declarations[0].parameters
+    return params.properties["signaling_partners"].properties["g_protein"].properties
+
+
+def _v5_prompt_text() -> str:
+    """The bundled annotation prompt, read from package data."""
+    src = importlib.resources.files("gpcr_tools") / "data" / "prompts" / "v5.md"
+    return src.read_text(encoding="utf-8")
 
 
 def test_site_ref_enum_matches_config() -> None:
@@ -57,3 +71,31 @@ def test_role_site_rule_sets_match_schema_role_enum() -> None:
     assert _ALLOSTERIC_ROLES.issubset(role_enum)
     assert _FUNCTIONAL_POCKET_ROLES.issubset(role_enum)
     assert "Cofactor" in role_enum
+
+
+def test_g_protein_note_carries_sourcing_constraint() -> None:
+    # The g_protein.note description must require that specific composition
+    # details (parent isoforms, species, breakpoints) be stated in the source
+    # before they are written -- the constraint that stops the model from
+    # inventing an unsourced subtype/species in the free-text note.
+    note_desc = (_g_protein_properties()["note"].description or "").lower()
+    assert "paper or pdb metadata" in note_desc
+    assert "parent isoforms" in note_desc
+    assert "species" in note_desc
+    assert "family level" in note_desc
+
+
+def test_v5_note_example_is_sourced_not_invented() -> None:
+    # The note EXAMPLE in the prompt must not present an invented, unsourced
+    # composition as the pattern to follow, and the prompt must carry a one-line
+    # sourcing constraint matching the schema. (is_chimeric wording is untouched
+    # and deliberately not asserted here.)
+    text = _v5_prompt_text()
+    lower = text.lower()
+    # The old example invented a fully specified composition; the sourcing
+    # constraint must now be present in the prompt.
+    assert "sourcing constraint" in lower
+    assert "stay at the family level" in lower
+    # The example must not present the previously-invented composition verbatim
+    # as the model-facing pattern.
+    assert "gα chimera from gnas2_human and gna15_human, the specificity determinants" not in lower
