@@ -14,6 +14,7 @@ from typing import Any
 
 from gpcr_tools.config import (
     ALERT_PREFIX_G_PROTEIN_LIGAND,
+    ALERT_PREFIX_MULTIPLE_AGONISTS,
     APO_SENTINEL,
     EMPTY_VALUES,
     G_PROTEIN_SUBUNIT_SLUG_PREFIXES,
@@ -174,6 +175,7 @@ def validate_and_enrich_ligands(
     _warn_on_apo_with_real_ligands(ligands, warnings)
     _warn_on_role_site_mismatch(ligands, warnings)
     _warn_on_g_protein_peptide_as_ligand(ligands, api["poly_by_chain"], warnings)
+    _warn_on_multiple_agonists(ligands, warnings)
     return warnings
 
 
@@ -301,4 +303,49 @@ def _warn_on_apo_with_real_ligands(ligands: list[Any], warnings: list[str]) -> N
             f"APO_WITH_LIGANDS at 'ligands': an apo (ligand-free) placeholder "
             f"coexists with {len(real)} real ligand(s) [{names}] — verify whether "
             f"this structure is truly apo."
+        )
+
+
+def _warn_on_multiple_agonists(ligands: list[Any], warnings: list[str]) -> None:
+    """Flag (for the curator) a structure carrying two or more *distinct* ligands
+    each annotated with the plain 'Agonist' role -- a configuration the model may
+    have read as two independent agonists when they in fact act together as
+    co-agonists (e.g. a metal ion and an amino-acid agonist co-occupying one site).
+
+    Distinct MOLECULES are counted, not entries: one agonist modelled at two sites
+    is emitted as two ligand entries (site_ref split) with the same identity and
+    must count once. Identity is the chem_comp_id when present, else the
+    case-insensitive name. Only the plain 'Agonist' role is considered: 'Co-agonist'
+    means the model already recognised the relationship, and 'Allosteric agonist' /
+    'Agonist (partial)' / 'Ago-PAM' describe different mechanisms.
+
+    Warning-only and non-asserting: co-agonism is a nuanced call, so the reminder
+    asks the curator to verify it rather than declaring it. No role or data is
+    changed.
+    """
+    seen: set[str] = set()
+    display_names: list[str] = []
+    for lig in ligands:
+        if not isinstance(lig, dict):
+            continue
+        role = ((lig.get("role") or {}).get("value") or "").strip()
+        if role != "Agonist":
+            continue
+        comp_id = (lig.get("chem_comp_id") or "").strip()
+        name = (lig.get("name") or "").strip()
+        identity = (
+            comp_id.lower() if comp_id and comp_id.lower() not in EMPTY_VALUES else name.lower()
+        )
+        if not identity or identity in seen:
+            continue
+        seen.add(identity)
+        display_names.append(name or comp_id or "?")
+
+    if len(seen) >= 2:
+        names = ", ".join(display_names)
+        warnings.append(
+            f"{ALERT_PREFIX_MULTIPLE_AGONISTS} at 'ligands': two or more distinct "
+            f"ligands are annotated as agonists ({names}); verify whether they are "
+            f"co-agonists acting together, or whether one is the primary agonist and "
+            f"the other is incidental."
         )

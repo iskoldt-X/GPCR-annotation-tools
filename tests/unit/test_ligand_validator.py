@@ -454,3 +454,126 @@ class TestGProteinPeptideAsLigand:
         lig = {"chain_id": "B", "name": "C-terminal peptide", "type": "peptide"}
         polymer = [_poly_entity("B", sequence="ACDEF", description=_G_ALPHA_DESC)]
         assert not self._gp_warnings(lig, polymer)
+
+
+class TestMultipleAgonists:
+    """Two or more DISTINCT ligands annotated as plain 'Agonist' may be unrecognised
+    co-agonists. The net surfaces them for the curator without asserting co-agonism;
+    a single agonist split across two binding sites (same identity) is deduped to one
+    and never fires, and non-agonist or mixed-role pairs are untouched.
+    """
+
+    def _agonist_warnings(self, ligands: list[dict[str, Any]]) -> list[str]:
+        nonpolymer = [
+            _np_entity(lig["chem_comp_id"])
+            for lig in ligands
+            if lig.get("chem_comp_id") and lig["chem_comp_id"] not in ("", "None")
+        ]
+        warnings = validate_and_enrich_ligands(
+            "TEST", {"ligands": ligands}, _make_enriched(nonpolymer=nonpolymer or None)
+        )
+        return [w for w in warnings if "MULTIPLE AGONISTS" in w]
+
+    def test_two_distinct_agonists_warn(self) -> None:
+        # A metal-ion agonist and a small-molecule agonist co-occupying a structure:
+        # the classic missed-co-agonist configuration.
+        ligands = [
+            _lig(name="Calcium ion", comp="CA", role="Agonist"),
+            _lig(name="L-glutamate", comp="GLU", role="Agonist"),
+        ]
+        warnings = self._agonist_warnings(ligands)
+        assert warnings
+        assert _WARNING_REGEX.search(warnings[0]) is not None
+        # Non-asserting: it asks the curator to verify, not declares co-agonism.
+        assert "verify" in warnings[0].lower()
+        assert "Calcium ion" in warnings[0]
+        assert "L-glutamate" in warnings[0]
+
+    def test_warning_reaches_accept_all_disabling_channel(self) -> None:
+        # The returned warning list is extended verbatim into critical_warnings,
+        # the channel that disables one-click accept-all for the PDB.
+        from gpcr_tools.aggregator.runner import _build_validation_report
+
+        ligands = [
+            _lig(name="Calcium ion", comp="CA", role="Agonist"),
+            _lig(name="L-glutamate", comp="GLU", role="Agonist"),
+        ]
+        ligand_warnings = validate_and_enrich_ligands(
+            "TEST", {"ligands": ligands}, _make_enriched()
+        )
+        report = _build_validation_report("TEST", {}, {}, ligand_warnings, {}, None)
+        assert any("MULTIPLE AGONISTS" in w for w in report["critical_warnings"])
+
+    def test_single_agonist_two_sites_deduped_by_comp_id(self) -> None:
+        # One agonist modelled at two sites -> two entries (site_ref split) with the
+        # SAME chem_comp_id -> ONE distinct molecule -> no reminder.
+        ligands = [
+            _lig(name="L-glutamate", comp="GLU", role="Agonist", site="orthosteric"),
+            _lig(name="L-glutamate", comp="GLU", role="Agonist", site="allosteric_7tm"),
+        ]
+        assert not self._agonist_warnings(ligands)
+
+    def test_single_agonist_two_sites_deduped_by_name(self) -> None:
+        # Same molecule at two sites with no chem_comp_id -> deduped by
+        # case-insensitive name -> one distinct molecule -> no reminder.
+        ligands = [
+            _lig(name="L-glutamate", comp="", role="Agonist", site="orthosteric"),
+            _lig(name="l-glutamate", comp="", role="Agonist", site="allosteric_7tm"),
+        ]
+        assert not self._agonist_warnings(ligands)
+
+    def test_single_agonist_no_warning(self) -> None:
+        assert not self._agonist_warnings([_lig(name="L-glutamate", comp="GLU", role="Agonist")])
+
+    def test_agonist_plus_antagonist_no_warning(self) -> None:
+        ligands = [
+            _lig(name="L-glutamate", comp="GLU", role="Agonist"),
+            _lig(name="Inhibitor", comp="INH", role="Antagonist"),
+        ]
+        assert not self._agonist_warnings(ligands)
+
+    def test_two_non_agonist_ligands_no_warning(self) -> None:
+        ligands = [
+            _lig(name="Inhibitor", comp="INH", role="Antagonist"),
+            _lig(name="Modulator", comp="MOD", role="PAM"),
+        ]
+        assert not self._agonist_warnings(ligands)
+
+    def test_co_agonist_role_not_counted(self) -> None:
+        # If the model already said 'Co-agonist' it recognised the relationship;
+        # only the plain 'Agonist' role is in scope, so this pair does not fire.
+        ligands = [
+            _lig(name="Calcium ion", comp="CA", role="Co-agonist"),
+            _lig(name="L-glutamate", comp="GLU", role="Co-agonist"),
+        ]
+        assert not self._agonist_warnings(ligands)
+
+    def test_distinct_agonist_mechanisms_not_counted(self) -> None:
+        # 'Allosteric agonist' / 'Agonist (partial)' describe different mechanisms;
+        # mixing them with a plain agonist leaves only one plain agonist -> no fire.
+        ligands = [
+            _lig(name="L-glutamate", comp="GLU", role="Agonist"),
+            _lig(name="Allosteric drug", comp="ALL", role="Allosteric agonist"),
+            _lig(name="Partial drug", comp="PAR", role="Agonist (partial)"),
+        ]
+        assert not self._agonist_warnings(ligands)
+
+    def test_agonist_plus_co_agonist_no_warning(self) -> None:
+        # 'Co-agonist' means the model already recognised the relationship, so it is
+        # out of scope: one plain Agonist + one Co-agonist leaves only one plain
+        # agonist -> no fire.
+        ligands = [
+            _lig(name="L-glutamate", comp="GLU", role="Agonist"),
+            _lig(name="Calcium ion", comp="CA", role="Co-agonist"),
+        ]
+        assert not self._agonist_warnings(ligands)
+
+    def test_agonist_with_no_usable_identity_skipped(self) -> None:
+        # An agonist entry with neither a usable chem_comp_id nor a name resolves to
+        # an empty identity and is skipped, so it cannot inflate the distinct count:
+        # one such entry plus one real agonist is only ONE distinct molecule -> no fire.
+        ligands = [
+            _lig(name="", comp="", role="Agonist"),
+            _lig(name="L-glutamate", comp="GLU", role="Agonist"),
+        ]
+        assert not self._agonist_warnings(ligands)
