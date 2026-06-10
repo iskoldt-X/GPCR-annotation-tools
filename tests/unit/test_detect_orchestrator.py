@@ -18,6 +18,7 @@ from gpcr_tools.detector.signals import (
     SEVERITY_ADVISORY,
     SEVERITY_REVIEW,
     SIGNAL_CHIMERIC_GPROTEIN,
+    SIGNAL_CLASS_C_MULTI_PROTOMER,
     SIGNAL_COUPLING_PROTOMER,
     SIGNAL_DUAL_ROLE_LIGAND,
     SIGNAL_INCIDENTAL_CANDIDATE,
@@ -266,6 +267,36 @@ def _coupling_advisory() -> DetectSignal:
     )
 
 
+def _class_c_multi_protomer() -> DetectSignal:
+    return DetectSignal(
+        kind=SIGNAL_CLASS_C_MULTI_PROTOMER,
+        target_ref="receptor_info",
+        summary="Class C receptor structure with more than one GPCR protomer.",
+        payload={"gpcr_chains": ["A", "B"], "accessions": ["O75899", "P47869"]},
+        severity=SEVERITY_ADVISORY,
+    )
+
+
+class TestClassCMultiProtomerEvidence:
+    """The Class C multi-protomer advisory renders the owner-locked verbatim
+    one-liner exactly, with no chain names or embellishment."""
+
+    _VERBATIM = "This is a Class C receptor structure with more than one GPCR protomer."
+
+    def test_renders_verbatim_one_liner(self) -> None:
+        block = assemble_detect_block([_class_c_multi_protomer()])
+        assert block is not None
+        assert self._VERBATIM in block
+
+    def test_no_chain_names_or_embellishment(self) -> None:
+        block = assemble_detect_block([_class_c_multi_protomer()])
+        assert block is not None
+        # The advisory line must be exactly the verbatim text (no chain ids, no
+        # "weigh against the paper" tail, no accession leak).
+        line = next(line for line in block.splitlines() if line.startswith("- "))
+        assert line == f"- {self._VERBATIM}"
+
+
 class TestNoUnreviewedLeakIntoPrompt:
     """Only kinds with a reviewed model-facing formatter reach the prompt; a kind
     without one is dropped, never leaked verbatim as evidence."""
@@ -332,6 +363,7 @@ def test_detect_block_golden_snapshot() -> None:
     block = assemble_detect_block(
         [
             chimeric,
+            _class_c_multi_protomer(),
             _coupling_advisory(),
             _incidental_candidate("CLR"),
             _site_ref(
@@ -358,6 +390,7 @@ def test_detect_block_golden_snapshot() -> None:
         "- G-protein alpha5 analysis: the modelled alpha5 tail 'IKENLKDCGLF' matches "
         "the Gi/o family (subtype gnai1_human). Weigh this against the paper before "
         "assigning the G-alpha identity.\n"
+        "- This is a Class C receptor structure with more than one GPCR protomer.\n"
         "- Structure geometry shows the G protein engages receptor chain B "
         "(gabbr2_human); that protomer is the active, G-protein-coupling one — in a "
         "heterodimer not necessarily the agonist-binding protomer. Weigh this against "
