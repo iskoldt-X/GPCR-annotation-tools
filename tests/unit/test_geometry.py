@@ -18,7 +18,7 @@ from gpcr_tools.validator.geometry import (
     _SPHERE_DIRECTIONS,
     LigandCopyGeometry,
     _burial,
-    _centroid,
+    centroid,
     fetch_structure,
     fibonacci_directions,
     load_structure,
@@ -59,7 +59,7 @@ class TestCentroid:
             atom = gemmi.Atom()
             atom.pos = gemmi.Position(x, 0.0, 0.0)
             atoms.append(atom)
-        c = _centroid(atoms)
+        c = centroid(atoms)
         assert (c.x, c.y, c.z) == (1.0, 0.0, 0.0)
 
 

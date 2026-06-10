@@ -76,6 +76,16 @@ def _chain_slugs(enriched_entry: dict[str, Any]) -> dict[str, str]:
     return out
 
 
+def galpha_auth_chains(enriched_entry: dict[str, Any]) -> set[str]:
+    """Author chain ids carrying a G-alpha (``gna*``) slug (None-safe, may be empty).
+
+    Shared definition of "which chains are the G-alpha" so the coupling detector,
+    membrane-side orientation, and any future transducer check all agree on one
+    rule instead of each re-deriving the ``gna*`` prefix test.
+    """
+    return {c for c, s in _chain_slugs(enriched_entry).items() if s.startswith("gna")}
+
+
 def detect_coupling_protomer(
     pdb_id: str,
     enriched_entry: dict[str, Any],
@@ -90,7 +100,7 @@ def detect_coupling_protomer(
     a monomer, or an ambiguous interface yields no signal.
     """
     chain_slug = _chain_slugs(enriched_entry)
-    galpha_chains = {c for c, s in chain_slug.items() if s.startswith("gna")}
+    galpha_chains = galpha_auth_chains(enriched_entry)
     receptor_chains = {c: s for c, s in chain_slug.items() if is_gpcr_slug(s)}
     # Need a G protein plus more than one protomer; with a single receptor chain
     # there is nothing to tell apart.

@@ -175,6 +175,27 @@ def ligand_membrane_depth(
     return round(signed_depth, 1), in_band
 
 
+def intracellular_side_sign(
+    frame: MembraneFrame, reference_point: tuple[float, float, float]
+) -> int | None:
+    """Sign that makes a signed membrane depth POSITIVE on the intracellular side.
+
+    The fitted frame leaves the normal's sign arbitrary. Given an intracellular
+    reference point (e.g. the centroid of the receptor's cytoplasmic-face
+    landmark residues, or the G-alpha centroid), this returns ``+1`` or ``-1``
+    such that ``signed_depth * sign > 0`` means a copy sits on the intracellular
+    side and ``< 0`` the extracellular side. Returns ``None`` when the reference
+    lies in the bilayer mid-plane (no resolvable side). The slug / numbering logic
+    that locates the reference stays in the caller; this is pure geometry.
+    """
+    rx, ry, rz = reference_point
+    nx, ny, nz = frame.normal
+    reference_depth = (rx * nx + ry * ny + rz * nz) - frame.center
+    if abs(reference_depth) < 1e-6:
+        return None
+    return 1 if reference_depth > 0 else -1
+
+
 def _in_plane(
     vx: float, vy: float, vz: float, n: tuple[float, float, float]
 ) -> tuple[float, float, float]:

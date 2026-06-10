@@ -149,7 +149,8 @@ def load_structure(pdb_id: str, cache_dir: Path) -> gemmi.Structure | None:
     return structure
 
 
-def _centroid(atoms: list[gemmi.Atom]) -> gemmi.Position:
+def centroid(atoms: list[gemmi.Atom]) -> gemmi.Position:
+    """Return the mean position of the given atoms (caller ensures non-empty)."""
     n = len(atoms)
     return gemmi.Position(
         sum(a.pos.x for a in atoms) / n,
@@ -211,7 +212,7 @@ def _analyze_copy(
                     pocket.add((cra.chain.name, res_num))
                 else:
                     contacts_partner = True
-    burial = _burial(_centroid(ligand_atoms), list(env.values())) if ligand_atoms else 0.0
+    burial = _burial(centroid(ligand_atoms), list(env.values())) if ligand_atoms else 0.0
     copy_seq = residue.seqid.num
     return LigandCopyGeometry(
         auth_chain=chain_name,
@@ -292,7 +293,7 @@ def ligand_contact_residues(
                             contacts[(cra.chain.name, label_seq)] = (
                                 info.one_letter_code.upper() if info else "X"
                             )
-            burial = _burial(_centroid(ligand_atoms), list(env.values())) if ligand_atoms else 0.0
+            burial = _burial(centroid(ligand_atoms), list(env.values())) if ligand_atoms else 0.0
             copies.append(
                 (burial, [(chain_name, ls, aa) for (chain_name, ls), aa in contacts.items()])
             )

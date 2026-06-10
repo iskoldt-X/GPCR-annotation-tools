@@ -209,7 +209,18 @@ ANNOTATION_TOOL = types.Tool(
                                     },
                                     "site_ref": {
                                         "type": "string",
-                                        "description": "The binding site of this ligand on the receptor. Infer it from the geometric facts in the DETECTOR EVIDENCE block plus the paper; use 'unknown' if neither settles it — do not guess. A structural lipid or detergent sitting against the membrane-facing surface is 'lipidic'. If one ligand is modelled at more than one distinct site, emit a separate entry per site.",
+                                        "description": (
+                                            "The binding site of this ligand on the receptor. Infer it from the geometric facts in the "
+                                            "DETECTOR EVIDENCE block plus the paper; use 'unknown' if neither settles it — do not guess. "
+                                            "If one ligand is modelled at more than one distinct site, emit a separate entry per site. "
+                                            "Boundaries of each value: "
+                                            "'orthosteric' = the classic agonist core pocket where the endogenous/primary ligand binds. "
+                                            "'extracellular_vestibule' = the vestibule just above the orthosteric pocket toward the extracellular end of the 7TM bundle, often adjacent to or overlapping the orthosteric site. "
+                                            "'allosteric_7tm' = a non-orthosteric pocket embedded WITHIN the 7TM helical bundle / mid-bilayer (between helices, mid-membrane), NOT at either membrane end; keep this tight — a mid-bilayer positive allosteric modulator (e.g. an inter-helical TM3/4/5 pocket) is allosteric_7tm, not intracellular. "
+                                            "'intracellular' = on the receptor cytoplasmic face / the receptor-transducer (G protein / arrestin) interface / around the DRY-Arg (3.50), helix 8, and the intracellular ends of TM3/5/6/7. EVEN IF the ligand is pharmacologically allosteric, if it sits on the cytoplasmic side it is intracellular, NOT allosteric_7tm. "
+                                            "'extracellular_domain' = the extracellular domain (ECD), Venus-flytrap (VFT), or N-terminal domain, outside the 7TM bundle. "
+                                            "'lipidic' = a structural lipid or detergent sitting against the membrane-facing (lipid-exposed) surface of the bundle."
+                                        ),
                                         "enum": [
                                             "orthosteric",
                                             "allosteric_7tm",
