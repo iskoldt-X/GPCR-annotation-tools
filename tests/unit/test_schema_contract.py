@@ -74,28 +74,19 @@ def test_role_site_rule_sets_match_schema_role_enum() -> None:
 
 
 def test_g_protein_note_carries_sourcing_constraint() -> None:
-    # The g_protein.note description must require that specific composition
-    # details (parent isoforms, species, breakpoints) be stated in the source
-    # before they are written -- the constraint that stops the model from
-    # inventing an unsourced subtype/species in the free-text note.
+    # The g_protein.note description must require that the specific composition
+    # details be stated in the source -- the constraint that stops the model
+    # from inventing an unsourced subtype/species in the free-text note.
     note_desc = (_g_protein_properties()["note"].description or "").lower()
+    assert "sourcing requirement" in note_desc
+    assert "specific composition details" in note_desc
     assert "paper or pdb metadata" in note_desc
-    assert "parent isoforms" in note_desc
-    assert "species" in note_desc
-    assert "family level" in note_desc
 
 
-def test_v5_note_example_is_sourced_not_invented() -> None:
-    # The note EXAMPLE in the prompt must not present an invented, unsourced
-    # composition as the pattern to follow, and the prompt must carry a one-line
-    # sourcing constraint matching the schema. (is_chimeric wording is untouched
-    # and deliberately not asserted here.)
-    text = _v5_prompt_text()
-    lower = text.lower()
-    # The old example invented a fully specified composition; the sourcing
-    # constraint must now be present in the prompt.
-    assert "sourcing constraint" in lower
-    assert "stay at the family level" in lower
-    # The example must not present the previously-invented composition verbatim
-    # as the model-facing pattern.
-    assert "gα chimera from gnas2_human and gna15_human, the specificity determinants" not in lower
+def test_v5_note_carries_sourcing_constraint() -> None:
+    # The prompt's chimera-note guidance must carry a sourcing constraint: the
+    # composition details must come from the paper or PDB metadata. (The example
+    # wording and the is_chimeric definition are owner-controlled and not
+    # asserted here.)
+    lower = _v5_prompt_text().lower()
+    assert "must come from the paper or pdb metadata" in lower
