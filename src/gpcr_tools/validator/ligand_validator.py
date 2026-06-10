@@ -13,8 +13,10 @@ import logging
 from typing import Any
 
 from gpcr_tools.config import (
+    ALERT_PREFIX_G_PROTEIN_LIGAND,
     APO_SENTINEL,
     EMPTY_VALUES,
+    G_PROTEIN_SUBUNIT_SLUG_PREFIXES,
     LIGAND_EXCLUDE_LIST,
     LIGAND_TYPE_LIPID,
     LIGAND_TYPE_PEPTIDE,
@@ -27,6 +29,7 @@ from gpcr_tools.config import (
     VALIDATION_MATCHED_SMALL_MOLECULE,
     VALIDATION_SKIPPED_APO,
 )
+from gpcr_tools.validator.chimera import is_g_alpha_description
 from gpcr_tools.validator.endogenous import ENDOGENOUS_UNKNOWN, classify_endogenous
 
 logger = logging.getLogger(__name__)
@@ -63,6 +66,11 @@ def _build_ligand_api_context(
         ep = p_ent.get("entity_poly") or {}
         desc = (p_ent.get("rcsb_polymer_entity") or {}).get("pdbx_description") or ""
         seq = ep.get("pdbx_seq_one_letter_code_can") or ""
+        slug: str | None = None
+        for u in p_ent.get("uniprots") or []:
+            if isinstance(u, dict) and u.get("gpcrdb_entry_name_slug"):
+                slug = u["gpcrdb_entry_name_slug"]
+                break
         for inst in p_ent.get("polymer_entity_instances") or []:
             chain = (inst.get("rcsb_polymer_entity_instance_container_identifiers") or {}).get(
                 "auth_asym_id"
@@ -72,6 +80,7 @@ def _build_ligand_api_context(
                     "description": desc,
                     "type": (ep.get("type") or ""),
                     "sequence": seq,
+                    "slug": slug,
                 }
 
     return {"np_by_comp": np_by_comp, "poly_by_chain": poly_by_chain}
@@ -164,6 +173,7 @@ def validate_and_enrich_ligands(
 
     _warn_on_apo_with_real_ligands(ligands, warnings)
     _warn_on_role_site_mismatch(ligands, warnings)
+    _warn_on_g_protein_peptide_as_ligand(ligands, api["poly_by_chain"], warnings)
     return warnings
 
 
@@ -211,6 +221,58 @@ def _warn_on_role_site_mismatch(ligands: list[Any], warnings: list[str]) -> None
                 f"ROLE_SITE_MISMATCH at 'ligands': '{name}' has {reason} "
                 f"-- verify the role and binding site are consistent."
             )
+
+
+def _warn_on_g_protein_peptide_as_ligand(
+    ligands: list[Any],
+    poly_by_chain: dict[str, dict[str, Any]],
+    warnings: list[str],
+) -> None:
+    """Flag (for the curator) a transducer-derived / G-protein-mimetic peptide that
+    the model has filed as a receptor ligand with a functional pocket role.
+
+    A peptide whose chain is a G-protein subunit (its polymer description reads as a
+    G-alpha, or its GPCRdb slug is a G-protein alpha/beta/gamma subunit) is a
+    signaling partner, not an agonist. This catches a G-alpha C-terminal /
+    transducin-mimetic peptide mislabelled as e.g. role 'Agonist', which would
+    otherwise sit next to the genuine small-molecule agonist.
+
+    Fires only when the model committed to a functional pocket role; an honest
+    'unknown' / 'Apo' / absent role is never flagged (abstaining is not an error).
+    Warning-only -- the ligand is left untouched for the curator to decide.
+    """
+    for lig in ligands:
+        if not isinstance(lig, dict):
+            continue
+        lig_type = (lig.get("type") or "").strip().lower()
+        if lig_type not in (LIGAND_TYPE_PEPTIDE, LIGAND_TYPE_PROTEIN):
+            continue
+        role = ((lig.get("role") or {}).get("value") or "").strip()
+        if role not in _FUNCTIONAL_POCKET_ROLES:
+            continue
+
+        chain_id = (lig.get("chain_id") or "").strip()
+        matched_desc: str | None = None
+        for c in (c.strip() for c in chain_id.split(",")):
+            poly = poly_by_chain.get(c)
+            if not poly:
+                continue
+            desc = (poly.get("description") or "").strip()
+            slug = (poly.get("slug") or "").strip().lower()
+            if is_g_alpha_description(desc) or slug.startswith(G_PROTEIN_SUBUNIT_SLUG_PREFIXES):
+                matched_desc = desc
+                break
+        if matched_desc is None:
+            continue
+
+        name = lig.get("name") or lig.get("chem_comp_id") or "?"
+        warnings.append(
+            f"{ALERT_PREFIX_G_PROTEIN_LIGAND} at 'ligands': ligand '{name}' "
+            f"(chain {chain_id}) is described as '{matched_desc}', a "
+            f"G-protein-derived / transducer-mimetic peptide, but is annotated as "
+            f"role '{role}'. Verify it belongs under signaling partners, not as a "
+            f"receptor agonist."
+        )
 
 
 def _warn_on_apo_with_real_ligands(ligands: list[Any], warnings: list[str]) -> None:

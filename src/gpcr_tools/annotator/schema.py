@@ -111,7 +111,7 @@ ANNOTATION_TOOL = types.Tool(
                         },
                         "ligands": {
                             "type": "array",
-                            "description": "A list of ALL ligands. Must include an 'Apo' entry if no ligand is present.",
+                            "description": "A list of ALL ligands. Must include an 'Apo' entry if no ligand is present. A G-protein-derived or transducer-mimetic peptide is a signaling partner, not a receptor ligand — do not record it here.",
                             "items": {
                                 "type": "object",
                                 "properties": {

@@ -54,17 +54,25 @@ def _np_entity(
     }
 
 
-def _poly_entity(chain_id: str, sequence: str = "MDEF") -> dict[str, Any]:
-    return {
+def _poly_entity(
+    chain_id: str,
+    sequence: str = "MDEF",
+    description: str = "Test protein",
+    slug: str | None = None,
+) -> dict[str, Any]:
+    entity: dict[str, Any] = {
         "entity_poly": {
             "pdbx_seq_one_letter_code_can": sequence,
             "type": "polypeptide(L)",
         },
-        "rcsb_polymer_entity": {"pdbx_description": "Test protein"},
+        "rcsb_polymer_entity": {"pdbx_description": description},
         "polymer_entity_instances": [
             {"rcsb_polymer_entity_instance_container_identifiers": {"auth_asym_id": chain_id}}
         ],
     }
+    if slug is not None:
+        entity["uniprots"] = [{"gpcrdb_entry_name_slug": slug}]
+    return entity
 
 
 def _lig(
@@ -334,3 +342,115 @@ class TestRoleSiteMismatch:
     def test_warning_matches_regex(self) -> None:
         warnings = self._mismatch_warnings(_lig(role="PAM", site="orthosteric"))
         assert warnings and _WARNING_REGEX.search(warnings[0]) is not None
+
+
+_G_ALPHA_DESC = "GUANINE NUCLEOTIDE-BINDING PROTEIN G(T) SUBUNIT ALPHA-3"
+
+
+class TestGProteinPeptideAsLigand:
+    """A transducer-derived / G-protein-mimetic peptide filed as a receptor ligand
+    with a functional pocket role is a signaling partner mis-annotation. The net
+    surfaces it for the curator; an honest abstention (unknown role) is never
+    flagged, and genuine small-molecule agonists / auxiliary proteins are untouched.
+    """
+
+    def _gp_warnings(
+        self,
+        lig: dict[str, Any],
+        polymer: list[dict[str, Any]],
+    ) -> list[str]:
+        warnings = validate_and_enrich_ligands(
+            "TEST", {"ligands": [lig]}, _make_enriched(polymer=polymer)
+        )
+        return [w for w in warnings if "G-PROTEIN PEPTIDE AS LIGAND" in w]
+
+    def test_g_alpha_description_peptide_agonist_warns(self) -> None:
+        # Chain B's polymer description reads as a G-alpha subunit, yet the peptide
+        # is filed as an Agonist -> surface for the curator.
+        lig = {"chain_id": "B", "name": "C-terminal peptide", "type": "peptide"}
+        lig["role"] = {"value": "Agonist"}
+        polymer = [_poly_entity("B", sequence="ACDEF", description=_G_ALPHA_DESC)]
+        warnings = self._gp_warnings(lig, polymer)
+        assert warnings
+        assert _WARNING_REGEX.search(warnings[0]) is not None
+
+    def test_g_alpha_warning_reaches_accept_all_disabling_channel(self) -> None:
+        # The returned warning list is extended verbatim into critical_warnings,
+        # the channel that disables one-click accept-all.
+        from gpcr_tools.aggregator.runner import _build_validation_report
+
+        lig = {"chain_id": "B", "name": "C-terminal peptide", "type": "peptide"}
+        lig["role"] = {"value": "Agonist"}
+        polymer = [_poly_entity("B", sequence="ACDEF", description=_G_ALPHA_DESC)]
+        ligand_warnings = validate_and_enrich_ligands(
+            "TEST", {"ligands": [lig]}, _make_enriched(polymer=polymer)
+        )
+        report = _build_validation_report("TEST", {}, {}, ligand_warnings, {}, None)
+        assert any("G-PROTEIN PEPTIDE AS LIGAND" in w for w in report["critical_warnings"])
+
+    def test_slug_branch_peptide_agonist_warns(self) -> None:
+        # Description does NOT read as a G-alpha, but the chain's GPCRdb slug is a
+        # G-protein subunit -> the slug branch (+ poly_by_chain slug extension) fire.
+        lig = {"chain_id": "B", "name": "Transducin mimetic", "type": "peptide"}
+        lig["role"] = {"value": "Agonist"}
+        polymer = [
+            _poly_entity(
+                "B", sequence="ACDEF", description="Engineered peptide", slug="gnat1_bovin"
+            )
+        ]
+        warnings = self._gp_warnings(lig, polymer)
+        assert warnings
+        assert _WARNING_REGEX.search(warnings[0]) is not None
+
+    def test_slug_branch_gna_prefix_warns(self) -> None:
+        lig = {"chain_id": "C", "name": "Mini-G peptide", "type": "protein"}
+        lig["role"] = {"value": "Agonist"}
+        polymer = [
+            _poly_entity("C", sequence="ACDEF", description="some construct", slug="gnas2_human")
+        ]
+        assert self._gp_warnings(lig, polymer)
+
+    def test_slug_branch_gbb_and_gbg_prefixes_warn(self) -> None:
+        # The G-beta / G-gamma subunit slug prefixes are also signaling-partner
+        # markers: a beta/gamma chain filed as a functional ligand should fire.
+        for slug in ("gbb1_human", "gbg2_human"):
+            lig = {"chain_id": "D", "name": "Subunit peptide", "type": "peptide"}
+            lig["role"] = {"value": "Agonist"}
+            polymer = [_poly_entity("D", sequence="ACDEF", description="some construct", slug=slug)]
+            assert self._gp_warnings(lig, polymer), slug
+
+    def test_small_molecule_agonist_not_flagged(self) -> None:
+        # The real agonist is a small molecule, not a peptide on a G-protein chain.
+        data: dict[str, Any] = {
+            "ligands": [
+                {
+                    "chem_comp_id": "RET",
+                    "name": "all-trans-retinal",
+                    "type": "small-molecule",
+                    "role": {"value": "Agonist"},
+                }
+            ]
+        }
+        enriched = _make_enriched(nonpolymer=[_np_entity("RET")])
+        warnings = validate_and_enrich_ligands("TEST", data, enriched)
+        assert not any("G-PROTEIN PEPTIDE AS LIGAND" in w for w in warnings)
+
+    def test_auxiliary_fab_not_flagged(self) -> None:
+        # A stabilising Fab/nanobody is an auxiliary protein, not a peptide ligand
+        # with a functional pocket role -> no agonist mis-annotation to flag.
+        lig = {"chain_id": "H", "name": "Fab heavy chain", "type": "protein"}
+        polymer = [_poly_entity("H", sequence="ACDEF", description="Antibody Fab fragment")]
+        # No functional role: this is just a structural auxiliary protein.
+        assert not self._gp_warnings(lig, polymer)
+
+    def test_g_alpha_peptide_with_unknown_role_not_flagged(self) -> None:
+        # The model honestly abstaining (role unknown) must never be flagged.
+        lig = {"chain_id": "B", "name": "C-terminal peptide", "type": "peptide"}
+        lig["role"] = {"value": "unknown"}
+        polymer = [_poly_entity("B", sequence="ACDEF", description=_G_ALPHA_DESC)]
+        assert not self._gp_warnings(lig, polymer)
+
+    def test_g_alpha_peptide_with_absent_role_not_flagged(self) -> None:
+        lig = {"chain_id": "B", "name": "C-terminal peptide", "type": "peptide"}
+        polymer = [_poly_entity("B", sequence="ACDEF", description=_G_ALPHA_DESC)]
+        assert not self._gp_warnings(lig, polymer)

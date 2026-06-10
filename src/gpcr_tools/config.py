@@ -706,6 +706,11 @@ G_ALPHA_EXCLUDE_KEYWORDS: tuple[str, ...] = (
     "subunit g",
 )
 
+# GPCRdb slug prefixes that mark a heterotrimeric G-protein subunit (alpha, beta,
+# or gamma). A transducer-derived / G-protein-mimetic peptide whose chain carries
+# one of these slugs is a signaling partner, not a receptor ligand.
+G_PROTEIN_SUBUNIT_SLUG_PREFIXES: tuple[str, ...] = ("gna", "gnat", "gbb", "gbg")
+
 # ---------------------------------------------------------------------------
 # Oligomer classifications
 # ---------------------------------------------------------------------------
@@ -861,6 +866,7 @@ ALERT_PREFIX_MISSED_POLYMER: str = "[UNANNOTATED CHAIN]"
 ALERT_PREFIX_FUSION_NOTE: str = "[CRYSTALLIZATION FUSION]"
 ALERT_PREFIX_ALPHA5_GRAFT: str = "[ALPHA5 GRAFT]"
 ALERT_PREFIX_UNRECOGNISED_G_ALPHA: str = "[UNRECOGNISED G-ALPHA]"
+ALERT_PREFIX_G_PROTEIN_LIGAND: str = "[G-PROTEIN PEPTIDE AS LIGAND]"
 
 # ---------------------------------------------------------------------------
 # Annotator function call name
