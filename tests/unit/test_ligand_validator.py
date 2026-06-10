@@ -443,6 +443,33 @@ class TestGProteinPeptideAsLigand:
         # No functional role: this is just a structural auxiliary protein.
         assert not self._gp_warnings(lig, polymer)
 
+    def test_bare_sequence_alpha5_mimetic_peptide_warns(self) -> None:
+        # A G-alpha alpha5 C-terminal mimetic deposited under a bare-sequence name
+        # (no G-protein wording, no slug) is now recognised via its conserved motif.
+        lig = {"chain_id": "B", "name": "alpha5 mimetic", "type": "peptide"}
+        lig["role"] = {"value": "Agonist"}
+        polymer = [_poly_entity("B", sequence="ILENLKDVGLF", description="ILENLKDVGLF peptide CT2")]
+        warnings = self._gp_warnings(lig, polymer)
+        assert warnings
+        assert _WARNING_REGEX.search(warnings[0]) is not None
+
+    def test_gnb5_subunit_caught_via_slug(self) -> None:
+        # G-beta-5's curated slug is gnb5_*, which the old "gbb" prefix missed; the
+        # added "gnb" prefix catches it.
+        lig = {"chain_id": "E", "name": "subunit peptide", "type": "protein"}
+        lig["role"] = {"value": "Agonist"}
+        polymer = [
+            _poly_entity("E", sequence="ACDEF", description="some construct", slug="gnb5_human")
+        ]
+        assert self._gp_warnings(lig, polymer)
+
+    def test_glp1_peptide_agonist_not_flagged(self) -> None:
+        # A genuine peptide-hormone agonist on a non-G-protein chain is not flagged.
+        lig = {"chain_id": "P", "name": "GLP-1", "type": "peptide"}
+        lig["role"] = {"value": "Agonist"}
+        polymer = [_poly_entity("P", sequence="HAEGTFTSD", description="Glucagon-like peptide-1")]
+        assert not self._gp_warnings(lig, polymer)
+
     def test_g_alpha_peptide_with_unknown_role_not_flagged(self) -> None:
         # The model honestly abstaining (role unknown) must never be flagged.
         lig = {"chain_id": "B", "name": "C-terminal peptide", "type": "peptide"}
