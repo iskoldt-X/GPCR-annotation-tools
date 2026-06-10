@@ -28,6 +28,7 @@ from gpcr_tools.validator.cache import SequenceCache
 from gpcr_tools.validator.chimera import (
     calculate_match_score,
     get_chimera_analysis,
+    is_alpha5_mimetic_description,
     is_g_alpha_description,
 )
 
@@ -86,6 +87,40 @@ class TestIsGAlphaDescription:
     def test_alpha_overrides_exclude(self) -> None:
         """If 'alpha' is present, exclude keywords are bypassed."""
         assert is_g_alpha_description("G-alpha receptor fusion") is True
+
+    def test_bare_sequence_alpha5_mimetic_caught(self) -> None:
+        """A G-alpha alpha5 C-terminal mimetic deposited under a bare-sequence
+        name (no G-protein wording) is now recognised by its conserved motif."""
+        assert is_g_alpha_description("ILENLKDVGLF peptide CT2") is True
+
+    def test_gi_alpha5_mimetic_caught(self) -> None:
+        assert is_g_alpha_description("IKENLKDCGLF peptide") is True
+
+    def test_glp1_peptide_hormone_not_a_mimetic(self) -> None:
+        # A genuine peptide-hormone agonist must not be mistaken for a G-alpha tail.
+        assert is_g_alpha_description("Glucagon-like peptide-1") is False
+        assert is_g_alpha_description("Glucagon") is False
+
+
+class TestIsAlpha5MimeticDescription:
+    """The standalone alpha5-mimetic recognizer anchors on the conserved G-alpha
+    C-terminal motif, not on 'is a short peptide'."""
+
+    def test_transducin_motif(self) -> None:
+        assert is_alpha5_mimetic_description("ILENLKDVGLF peptide CT2") is True
+
+    def test_gi_motif(self) -> None:
+        assert is_alpha5_mimetic_description("IKENLKDCGLF") is True
+
+    def test_genuine_peptide_hormone_not_matched(self) -> None:
+        for name in ("Glucagon-like peptide-1", "Glucagon", "CXCL12 chemokine", "Substance P"):
+            assert is_alpha5_mimetic_description(name) is False, name
+
+    def test_small_molecule_not_matched(self) -> None:
+        assert is_alpha5_mimetic_description("Adenosine") is False
+
+    def test_empty_not_matched(self) -> None:
+        assert is_alpha5_mimetic_description("") is False
 
 
 # ===================================================================

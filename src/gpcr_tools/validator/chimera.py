@@ -50,6 +50,31 @@ from gpcr_tools.validator.cache import SequenceCache
 logger = logging.getLogger(__name__)
 
 
+# The conserved C-terminus of the G-alpha alpha5 helix -- the receptor-coupling
+# determinant. A synthetic peptide reproducing this tail (an "alpha5 mimetic") is a
+# G-protein-derived fragment, not a receptor agonist, but it is sometimes deposited
+# under a BARE SEQUENCE name (e.g. "ILENLKDVGLF peptide CT2") that carries no
+# G-protein wording for the name-based tiers to catch. These motifs are the highly
+# conserved alpha5 C-terminal tips of the Gi/Gt (transducin) family; they are long
+# and specific enough that a genuine peptide-hormone or small-molecule ligand name
+# will not contain them, so anchoring on them does not create false positives.
+_G_ALPHA_A5_C_TERMINAL_MOTIFS: tuple[str, ...] = ("kdvglf", "kdcglf")
+
+
+def is_alpha5_mimetic_description(desc: str) -> bool:
+    """Detect a G-alpha alpha5 C-terminal mimetic peptide from its description.
+
+    Catches the at-risk class that ``is_g_alpha_description`` misses: a G-alpha
+    C-terminal ("alpha5") mimetic peptide deposited under a bare-sequence name with
+    no G-protein wording (e.g. "ILENLKDVGLF peptide CT2"). Recognition is anchored
+    solely on the conserved alpha5 C-terminal motif itself; it is long and specific
+    enough that a genuine small-molecule or peptide-hormone ligand name will not
+    contain it, so anchoring on it does not create false positives.
+    """
+    desc = desc.lower()
+    return any(motif in desc for motif in _G_ALPHA_A5_C_TERMINAL_MOTIFS)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -59,8 +84,12 @@ def is_g_alpha_description(desc: str) -> bool:
     """Detect whether *desc* describes a G-alpha subunit.
 
     Uses a multi-tier heuristic covering standard names, family abbreviations,
-    fusion constructs, and common OCR errors.
+    fusion constructs, common OCR errors, and a G-alpha alpha5 C-terminal mimetic
+    peptide deposited under a bare-sequence name (its conserved alpha5 motif).
     """
+    if is_alpha5_mimetic_description(desc):
+        return True
+
     desc = desc.lower()
 
     # Exclude non-G proteins and beta/gamma subunits

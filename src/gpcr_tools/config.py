@@ -708,8 +708,10 @@ G_ALPHA_EXCLUDE_KEYWORDS: tuple[str, ...] = (
 
 # GPCRdb slug prefixes that mark a heterotrimeric G-protein subunit (alpha, beta,
 # or gamma). A transducer-derived / G-protein-mimetic peptide whose chain carries
-# one of these slugs is a signaling partner, not a receptor ligand.
-G_PROTEIN_SUBUNIT_SLUG_PREFIXES: tuple[str, ...] = ("gna", "gnat", "gbb", "gbg")
+# one of these slugs is a signaling partner, not a receptor ligand. "gnb" covers
+# G-beta-5 (curated slug gnb5_*), which "gbb" does not. ("gnat" stays for clarity
+# though it is redundant under "gna" for str.startswith.)
+G_PROTEIN_SUBUNIT_SLUG_PREFIXES: tuple[str, ...] = ("gna", "gnat", "gnb", "gbb", "gbg")
 
 # ---------------------------------------------------------------------------
 # Oligomer classifications
