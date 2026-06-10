@@ -27,6 +27,7 @@ from gpcr_tools.annotator.schema import (
 from gpcr_tools.detector.signals import (
     SEVERITY_ADVISORY,
     SIGNAL_CHIMERIC_GPROTEIN,
+    SIGNAL_CLASS_C_MULTI_PROTOMER,
     SIGNAL_COUPLING_PROTOMER,
     SIGNAL_DUAL_ROLE_LIGAND,
     SIGNAL_INCIDENTAL_CANDIDATE,
@@ -45,11 +46,19 @@ _MAX_POCKET_RESIDUES_SHOWN = 12
 _MODEL_FACING_KINDS = frozenset(
     {
         SIGNAL_CHIMERIC_GPROTEIN,
+        SIGNAL_CLASS_C_MULTI_PROTOMER,
         SIGNAL_COUPLING_PROTOMER,
         SIGNAL_INCIDENTAL_CANDIDATE,
         SIGNAL_DUAL_ROLE_LIGAND,
         SIGNAL_SITE_REF,
     }
+)
+
+# The Class C multi-protomer advisory text is owner-locked: a single, general
+# statement of the structural fact (Class C + more than one GPCR protomer), so the
+# model treats both protomers as receptors. Rendered verbatim; do not embellish.
+_CLASS_C_MULTI_PROTOMER_ADVISORY = (
+    "This is a Class C receptor structure with more than one GPCR protomer."
 )
 
 # Header for the model-facing detector-evidence block (wording locked by a snapshot test).
@@ -70,6 +79,9 @@ def _format_signal(signal: DetectSignal) -> str | None:
     if signal.kind not in _MODEL_FACING_KINDS:
         return None
     payload = signal.payload or {}
+    if signal.kind == SIGNAL_CLASS_C_MULTI_PROTOMER:
+        # Owner-locked verbatim one-liner: a simple, general statement of the fact.
+        return _CLASS_C_MULTI_PROTOMER_ADVISORY
     if signal.kind == SIGNAL_CHIMERIC_GPROTEIN:
         tail = payload.get("a5_tail") or "?"
         family = payload.get("family") or "?"

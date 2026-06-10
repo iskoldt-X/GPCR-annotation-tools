@@ -23,6 +23,7 @@ SIGNAL_INCIDENTAL_CANDIDATE: str = "incidental_candidate"
 SIGNAL_DUAL_ROLE_LIGAND: str = "dual_role_ligand"
 SIGNAL_SITE_REF: str = "site_ref"
 SIGNAL_COUPLING_PROTOMER: str = "coupling_protomer"
+SIGNAL_CLASS_C_MULTI_PROTOMER: str = "class_c_multi_protomer"
 
 SEVERITY_ADVISORY: str = "advisory"
 SEVERITY_REVIEW: str = "review"
