@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 from gpcr_tools.config import (
     ALERT_7TM_UPGRADE,
+    ALERT_ASSEMBLY_MISMATCH,
     ALERT_CHAIN_ID_OVERRIDDEN,
     ALERT_CONFIRMED_OLIGOMER,
     ALERT_HALLUCINATION,
@@ -40,6 +41,8 @@ from gpcr_tools.validator.oligomer import (
     _build_label_asym_id_map,
     _generate_alerts,
     _get_assembly_cross_check,
+    _parse_oligomeric_count,
+    _reconcile_assembly_consistency,
     _suggest_primary_protomer,
     analyze_oligomer,
     build_nonpolymer_instance_index,
@@ -1263,3 +1266,295 @@ class TestReconcileGpcrInAuxiliary:
         partner_uniprot, partner_chains = resolve_partner_protomer(analysis, "A")
         assert partner_uniprot == "grm7_human"
         assert partner_chains == "B"
+
+
+# ===================================================================
+# _get_assembly_cross_check — candidate-assembly preference
+# ===================================================================
+
+
+class TestAssemblyCrossCheckCandidatePreference:
+    """The cross-check prefers the assembly RCSB flags as the biological
+    candidate and surfaces the candidate flag + modeled-monomer count."""
+
+    def test_prefers_candidate_assembly(self) -> None:
+        # First assembly is NOT the candidate; the second one is. The candidate's
+        # symmetry block must win even though it is not first.
+        enriched: dict[str, Any] = {
+            "assemblies": [
+                {
+                    "pdbx_struct_assembly": {"rcsb_candidate_assembly": "N"},
+                    "rcsb_assembly_info": {"modeled_polymer_monomer_count": 100},
+                    "rcsb_struct_symmetry": [
+                        {"oligomeric_state": "Monomer", "stoichiometry": ["A1"]}
+                    ],
+                },
+                {
+                    "pdbx_struct_assembly": {"rcsb_candidate_assembly": "Y"},
+                    "rcsb_assembly_info": {"modeled_polymer_monomer_count": 600},
+                    "rcsb_struct_symmetry": [
+                        {
+                            "oligomeric_state": "Hetero 6-mer",
+                            "stoichiometry": ["A2", "B2", "C1", "D1"],
+                        }
+                    ],
+                },
+            ]
+        }
+        result = _get_assembly_cross_check(enriched)
+        assert result["oligomeric_state"] == "Hetero 6-mer"
+        assert result["rcsb_candidate_assembly"] == "Y"
+        assert result["modeled_polymer_monomer_count"] == 600
+
+    def test_falls_back_to_first_when_none_flagged(self) -> None:
+        enriched: dict[str, Any] = {
+            "assemblies": [
+                {
+                    "pdbx_struct_assembly": {"rcsb_candidate_assembly": "N"},
+                    "rcsb_struct_symmetry": [
+                        {"oligomeric_state": "Monomer", "stoichiometry": ["A1"]}
+                    ],
+                },
+                {
+                    "pdbx_struct_assembly": {"rcsb_candidate_assembly": "N"},
+                    "rcsb_struct_symmetry": [
+                        {"oligomeric_state": "Homo 2-mer", "stoichiometry": ["A2"]}
+                    ],
+                },
+            ]
+        }
+        result = _get_assembly_cross_check(enriched)
+        assert result["oligomeric_state"] == "Monomer"
+
+    def test_none_safe_on_missing_struct_assembly(self) -> None:
+        # No pdbx_struct_assembly key at all -> falls back to first, no crash.
+        enriched: dict[str, Any] = {
+            "assemblies": [
+                {"rcsb_struct_symmetry": [{"oligomeric_state": "Monomer", "stoichiometry": ["A1"]}]}
+            ]
+        }
+        result = _get_assembly_cross_check(enriched)
+        assert result["oligomeric_state"] == "Monomer"
+        assert result["rcsb_candidate_assembly"] is None
+        assert result["modeled_polymer_monomer_count"] is None
+
+    def test_real_fixture_8xfs_prefers_candidate(self) -> None:
+        result = _get_assembly_cross_check(_load_enriched_entry("8XFS"))
+        assert result["oligomeric_state"] == "Hetero 6-mer"
+        assert result["rcsb_candidate_assembly"] == "Y"
+
+    def test_real_fixture_5g53(self) -> None:
+        result = _get_assembly_cross_check(_load_enriched_entry("5G53"))
+        assert result["oligomeric_state"] == "Hetero 2-mer"
+        assert result["rcsb_candidate_assembly"] == "Y"
+
+    def test_empty_assemblies(self) -> None:
+        assert _get_assembly_cross_check({"assemblies": []}) == {}
+        assert _get_assembly_cross_check({"assemblies": None}) == {}
+        assert _get_assembly_cross_check({}) == {}
+
+
+# ===================================================================
+# _parse_oligomeric_count
+# ===================================================================
+
+
+class TestParseOligomericCount:
+    def test_monomer(self) -> None:
+        assert _parse_oligomeric_count("Monomer") == 1
+
+    def test_homo_mer(self) -> None:
+        assert _parse_oligomeric_count("Homo 2-mer") == 2
+
+    def test_hetero_mer(self) -> None:
+        assert _parse_oligomeric_count("Hetero 6-mer") == 6
+
+    def test_double_digit(self) -> None:
+        assert _parse_oligomeric_count("Hetero 12-mer") == 12
+
+    def test_none(self) -> None:
+        assert _parse_oligomeric_count(None) is None
+
+    def test_empty(self) -> None:
+        assert _parse_oligomeric_count("") is None
+
+    def test_unparseable(self) -> None:
+        assert _parse_oligomeric_count("garbage") is None
+
+    def test_non_string(self) -> None:
+        assert _parse_oligomeric_count(2) is None
+
+
+# ===================================================================
+# _reconcile_assembly_consistency — parallel advisory (classification untouched)
+# ===================================================================
+
+
+class TestReconcileAssemblyConsistency:
+    """Pure, None-safe reconcile of the GPCR-centric classification against the
+    biological assembly. Fires only on the two clear contradictions; silent (and
+    byte-identical to before) in every ordinary case."""
+
+    def test_monomer_higher_order_complex_fires(self) -> None:
+        consistency, alert = _reconcile_assembly_consistency(
+            OLIGOMER_MONOMER,
+            {"oligomeric_state": "Hetero 6-mer", "stoichiometry": ["A2", "B2", "C1", "D1"]},
+        )
+        assert consistency["agrees"] is False
+        assert "higher-order" in consistency["note"]
+        assert alert is not None
+        assert alert["type"] == ALERT_ASSEMBLY_MISMATCH
+
+    def test_monomer_homo_assembly_fires(self) -> None:
+        # MONOMER but the biological assembly is a homo-oligomer of the receptor
+        # (rare, but a real contradiction: two copies in the biological unit while
+        # the GPCR-only count read MONOMER) -> the higher-order branch fires.
+        consistency, alert = _reconcile_assembly_consistency(
+            OLIGOMER_MONOMER,
+            {"oligomeric_state": "Homo 2-mer", "stoichiometry": ["A2"]},
+        )
+        assert consistency["agrees"] is False
+        assert "higher-order" in consistency["note"]
+        assert alert is not None
+        assert alert["type"] == ALERT_ASSEMBLY_MISMATCH
+
+    def test_homomer_not_corroborated_fires(self) -> None:
+        consistency, alert = _reconcile_assembly_consistency(
+            OLIGOMER_HOMOMER,
+            {"oligomeric_state": "Hetero 2-mer", "stoichiometry": ["A1", "B1"]},
+        )
+        assert consistency["agrees"] is False
+        assert "crystallographic copies" in consistency["note"]
+        assert alert is not None
+        assert alert["type"] == ALERT_ASSEMBLY_MISMATCH
+
+    def test_homomer_monomer_assembly_fires(self) -> None:
+        # HOMOMER but the biological assembly is a monomer -> not corroborated.
+        consistency, alert = _reconcile_assembly_consistency(
+            OLIGOMER_HOMOMER,
+            {"oligomeric_state": "Monomer", "stoichiometry": ["A1"]},
+        )
+        assert consistency["agrees"] is False
+        assert alert is not None
+
+    def test_monomer_monomer_assembly_silent(self) -> None:
+        consistency, alert = _reconcile_assembly_consistency(
+            OLIGOMER_MONOMER, {"oligomeric_state": "Monomer", "stoichiometry": ["A1"]}
+        )
+        assert consistency["agrees"] is True
+        assert alert is None
+
+    def test_homomer_homodimer_corroborated_silent(self) -> None:
+        consistency, alert = _reconcile_assembly_consistency(
+            OLIGOMER_HOMOMER, {"oligomeric_state": "Homo 2-mer", "stoichiometry": ["A2"]}
+        )
+        assert consistency["agrees"] is True
+        assert alert is None
+
+    def test_absent_assembly_silent(self) -> None:
+        consistency, alert = _reconcile_assembly_consistency(OLIGOMER_MONOMER, {})
+        assert consistency["agrees"] is True
+        assert alert is None
+
+    def test_none_state_silent(self) -> None:
+        consistency, alert = _reconcile_assembly_consistency(
+            OLIGOMER_MONOMER, {"oligomeric_state": None}
+        )
+        assert consistency["agrees"] is True
+        assert alert is None
+
+    def test_heteromer_never_fires(self) -> None:
+        # The advisory only watches MONOMER and HOMOMER; a HETEROMER is left alone.
+        consistency, alert = _reconcile_assembly_consistency(
+            OLIGOMER_HETEROMER, {"oligomeric_state": "Hetero 6-mer", "stoichiometry": ["A2", "B2"]}
+        )
+        assert consistency["agrees"] is True
+        assert alert is None
+
+
+# ===================================================================
+# analyze_oligomer — assembly-consistency advisory end-to-end
+# ===================================================================
+
+
+class TestAnalyzeOligomerAssemblyConsistency:
+    """End-to-end: the advisory rides alongside the classification (never changing
+    it) on the two real edge-case fixtures, and stays silent on a clean monomer."""
+
+    def _mismatch_alerts(self, oligo: dict[str, Any]) -> list[dict[str, Any]]:
+        return [a for a in oligo["alerts"] if a["type"] == ALERT_ASSEMBLY_MISMATCH]
+
+    def test_8xfs_monomer_flags_higher_order_complex(self) -> None:
+        # 8XFS is a 2:2:2 hetero-6-mer, but only LGR4 (chain A) is a 7TM GPCR;
+        # the other roster chains (R-spondin-2, ZNRF3) carry no 7TM annotation and
+        # are TM-gated out, so the GPCR-centric classification is MONOMER. The
+        # biological assembly contradicts that -> advisory fires, label unchanged.
+        enriched = _load_enriched_entry("8XFS")
+        tm_roster = {
+            "A": {"resolved_tms": 7, "total_tms": 7, "status": TM_STATUS_COMPLETE},
+            "B": {"resolved_tms": 0, "total_tms": 0, "status": TM_STATUS_UNKNOWN},
+            "C": {"resolved_tms": 0, "total_tms": 0, "status": TM_STATUS_UNKNOWN},
+            "D": {"resolved_tms": 0, "total_tms": 0, "status": TM_STATUS_UNKNOWN},
+            "E": {"resolved_tms": 0, "total_tms": 0, "status": TM_STATUS_UNKNOWN},
+        }
+        data: dict[str, Any] = {"receptor_info": {"chain_id": "A"}}
+        with patch(
+            "gpcr_tools.validator.oligomer.scan_all_chains_7tm",
+            return_value=(tm_roster, None),
+        ):
+            analyze_oligomer("8XFS", data, enriched)
+        oligo = data["oligomer_analysis"]
+        assert oligo["classification"] == OLIGOMER_MONOMER
+        assert oligo["assembly_consistency"]["agrees"] is False
+        alerts = self._mismatch_alerts(oligo)
+        assert len(alerts) == 1
+        assert "higher-order" in alerts[0]["message"]
+
+    def test_5g53_homomer_flags_crystallographic_copies(self) -> None:
+        # 5G53 has two crystallographic copies of A2A (chains A, B -> HOMOMER), but
+        # the biological assembly has the receptor only once (Hetero 2-mer). The
+        # advisory flags possible crystallographic copies; classification stays HOMOMER.
+        enriched = _load_enriched_entry("5G53")
+        data: dict[str, Any] = {"receptor_info": {"chain_id": "A"}}
+        with patch(
+            "gpcr_tools.validator.oligomer.scan_all_chains_7tm",
+            return_value=({}, None),
+        ):
+            analyze_oligomer("5G53", data, enriched)
+        oligo = data["oligomer_analysis"]
+        assert oligo["classification"] == OLIGOMER_HOMOMER
+        assert oligo["assembly_consistency"]["agrees"] is False
+        alerts = self._mismatch_alerts(oligo)
+        assert len(alerts) == 1
+        assert "crystallographic copies" in alerts[0]["message"]
+
+    def test_clean_monomer_no_advisory(self) -> None:
+        # A single-GPCR structure whose biological assembly is a monomer: the
+        # overwhelming normal case. No advisory alert, classification unchanged.
+        enriched = _load_enriched_entry("9AS1")
+        data: dict[str, Any] = {"receptor_info": {"chain_id": "A"}}
+        with patch(
+            "gpcr_tools.validator.oligomer.scan_all_chains_7tm",
+            return_value=({}, None),
+        ):
+            analyze_oligomer("9AS1", data, enriched)
+        oligo = data["oligomer_analysis"]
+        assert oligo["classification"] == OLIGOMER_MONOMER
+        assert oligo["assembly_consistency"]["agrees"] is True
+        assert self._mismatch_alerts(oligo) == []
+
+    def test_no_assembly_no_alert_no_crash(self) -> None:
+        # None / empty assemblies -> None-safe, no advisory, no crash.
+        enriched = _make_enriched_with_entities([_make_entity("drd2_human", "A")])
+        enriched["assemblies"] = None
+        data: dict[str, Any] = {"receptor_info": {"chain_id": "A"}}
+        with patch(
+            "gpcr_tools.validator.oligomer.scan_all_chains_7tm",
+            return_value=({}, None),
+        ):
+            analyze_oligomer("TEST", data, enriched)
+        oligo = data["oligomer_analysis"]
+        assert oligo["classification"] == OLIGOMER_MONOMER
+        assert oligo["assembly_cross_check"] == {}
+        assert oligo["assembly_consistency"]["agrees"] is True
+        assert self._mismatch_alerts(oligo) == []
