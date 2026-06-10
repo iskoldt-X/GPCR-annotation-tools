@@ -13,10 +13,12 @@ Conventions:
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from gpcr_tools.config import (
     ALERT_7TM_UPGRADE,
+    ALERT_ASSEMBLY_MISMATCH,
     ALERT_CHAIN_ID_OVERRIDDEN,
     ALERT_CONFIRMED_OLIGOMER,
     ALERT_HALLUCINATION,
@@ -608,20 +610,143 @@ def find_multi_copy_components(
 def _get_assembly_cross_check(
     enriched_entry: dict[str, Any],
 ) -> dict[str, Any]:
-    """Extract oligomeric_state from first assembly for informational annotation."""
-    for asm in enriched_entry.get("assemblies") or []:
-        if not isinstance(asm, dict):
+    """Extract the biological-assembly oligomeric state for informational annotation.
+
+    RCSB can deposit several assemblies per entry (e.g. the author-provided one
+    plus software-predicted alternatives).  The assembly RCSB marks as the
+    representative biological unit carries ``pdbx_struct_assembly.rcsb_candidate_assembly
+    == "Y"``; that one is preferred here, falling back to the first assembly only
+    when none is flagged.  The first global-symmetry block of the chosen assembly
+    supplies ``oligomeric_state`` / ``stoichiometry`` / ``kind`` / ``type``; the
+    candidate flag and modeled-monomer count are surfaced alongside so a caller can
+    reconcile the GPCR-centric classification against the biological assembly.
+    All data is already in the enriched entry -- no network call.  Returns ``{}``
+    when no assembly carries a symmetry block.
+    """
+    assemblies = [a for a in (enriched_entry.get("assemblies") or []) if isinstance(a, dict)]
+    if not assemblies:
+        return {}
+
+    # Prefer the assembly RCSB flags as the biological candidate; fall back to the
+    # first assembly when none is flagged (None-safe on a missing struct-assembly).
+    chosen = next(
+        (
+            a
+            for a in assemblies
+            if (a.get("pdbx_struct_assembly") or {}).get("rcsb_candidate_assembly") == "Y"
+        ),
+        assemblies[0],
+    )
+
+    for sym in chosen.get("rcsb_struct_symmetry") or []:
+        if not isinstance(sym, dict):
             continue
-        for sym in asm.get("rcsb_struct_symmetry") or []:
-            if not isinstance(sym, dict):
-                continue
-            return {
-                "oligomeric_state": sym.get("oligomeric_state"),
-                "stoichiometry": sym.get("stoichiometry"),
-                "kind": sym.get("kind"),
-                "type": sym.get("type"),
-            }
+        return {
+            "oligomeric_state": sym.get("oligomeric_state"),
+            "stoichiometry": sym.get("stoichiometry"),
+            "kind": sym.get("kind"),
+            "type": sym.get("type"),
+            "rcsb_candidate_assembly": (chosen.get("pdbx_struct_assembly") or {}).get(
+                "rcsb_candidate_assembly"
+            ),
+            "modeled_polymer_monomer_count": (chosen.get("rcsb_assembly_info") or {}).get(
+                "modeled_polymer_monomer_count"
+            ),
+        }
     return {}
+
+
+# ---------------------------------------------------------------------------
+# Assembly-consistency advisory
+# ---------------------------------------------------------------------------
+
+
+_OLIGOMERIC_MER_RE = re.compile(r"(\d+)-mer")
+
+
+def _parse_oligomeric_count(oligomeric_state: Any) -> int | None:
+    """Parse the subunit count from an RCSB oligomeric_state string.
+
+    The value space is ``"Monomer"`` / ``"Homo N-mer"`` / ``"Hetero N-mer"`` /
+    ``None``.  ``"Monomer"`` maps to ``1``; an ``N-mer`` maps to ``N``; anything
+    unparseable (including ``None``) returns ``None`` so the caller treats it as
+    no signal rather than a contradiction.
+    """
+    if not isinstance(oligomeric_state, str):
+        return None
+    text = oligomeric_state.strip()
+    if text.lower() == "monomer":
+        return 1
+    match = _OLIGOMERIC_MER_RE.search(text)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _reconcile_assembly_consistency(
+    classification: str,
+    assembly_info: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Compare the GPCR-centric classification against the biological assembly.
+
+    The top-line classification counts GPCR-slug chains only, so it can disagree
+    with the RCSB biological assembly in two clear ways.  This pure, None-safe
+    check surfaces that contradiction as a parallel advisory; it never changes the
+    classification.  Returns ``(consistency, alert_or_None)`` where *consistency*
+    is ``{"agrees": bool, "note": str}`` (note empty when they agree) and the
+    alert is appended only when a contradiction fires.
+
+    Fires on exactly two contradictions, and is silent otherwise (the normal case,
+    including monomer-with-monomer-assembly and an absent assembly):
+
+    - ``MONOMER`` while the biological assembly is a higher-order complex
+      (oligomeric_state parses to N >= 2) -- the receptor may be one chain of a
+      larger hetero-complex the GPCR-only count cannot see.
+    - ``HOMOMER`` while the biological assembly does not corroborate a
+      receptor homo-oligomer (state is a monomer or a hetero-complex, not a
+      ``Homo N-mer``) -- the two same-slug chains may be crystallographic copies
+      rather than a biological homodimer.
+    """
+    state = assembly_info.get("oligomeric_state") if isinstance(assembly_info, dict) else None
+    if not isinstance(state, str) or not state.strip():
+        return {"agrees": True, "note": ""}, None
+
+    count = _parse_oligomeric_count(state)
+    stoich = assembly_info.get("stoichiometry")
+    state_lower = state.strip().lower()
+
+    # MONOMER vs higher-order biological assembly (e.g. a 2:2:2 hetero-complex
+    # whose single GPCR chain makes the GPCR-only count read MONOMER).
+    if classification == OLIGOMER_MONOMER and count is not None and count >= 2:
+        note = (
+            f"GPCR-centric MONOMER but RCSB biological assembly is a higher-order "
+            f"complex ({state}, {stoich}); verify the oligomer label."
+        )
+        return (
+            {"agrees": False, "note": note},
+            {
+                "type": ALERT_ASSEMBLY_MISMATCH,
+                "message": f"[{ALERT_ASSEMBLY_MISMATCH}] at 'oligomer_analysis': {note}",
+            },
+        )
+
+    # HOMOMER vs a biological assembly that does not corroborate a receptor
+    # homo-oligomer: the state is a monomer or a hetero-complex (it does not start
+    # with "homo"). Same-slug chains may be crystallographic copies, not a dimer.
+    if classification == OLIGOMER_HOMOMER and not state_lower.startswith("homo"):
+        note = (
+            f"two same-slug chains may be crystallographic copies, not a biological "
+            f"homodimer ({state}, {stoich}); confirm."
+        )
+        return (
+            {"agrees": False, "note": note},
+            {
+                "type": ALERT_ASSEMBLY_MISMATCH,
+                "message": f"[{ALERT_ASSEMBLY_MISMATCH}] at 'oligomer_analysis': {note}",
+            },
+        )
+
+    return {"agrees": True, "note": ""}, None
 
 
 # ---------------------------------------------------------------------------
@@ -1131,12 +1256,27 @@ def analyze_oligomer(
     # 9. Assembly cross-check (informational only)
     assembly_info = _get_assembly_cross_check(enriched_entry)
 
+    # 9b. Reconcile the GPCR-centric classification against the RCSB biological
+    # assembly. The classification counts GPCR-slug chains only, so it can miss a
+    # larger hetero-complex (MONOMER but the assembly is higher-order) or read a
+    # homodimer into two crystallographic copies (HOMOMER but the assembly is a
+    # monomer / hetero-complex). This surfaces that contradiction as a parallel
+    # advisory + alert; it never changes the classification, and stays silent in
+    # the overwhelming normal case (ordinary monomers are byte-identical to before).
+    assembly_consistency, assembly_alert = _reconcile_assembly_consistency(
+        classification,
+        assembly_info,
+    )
+    if assembly_alert:
+        alerts.append(assembly_alert)
+
     # 10. Write output
     best_run_data["oligomer_analysis"] = {
         "classification": classification,
         "all_gpcr_chains": all_gpcr_chains,
         "primary_protomer_suggestion": suggestion,
         "assembly_cross_check": assembly_info,
+        "assembly_consistency": assembly_consistency,
         "alerts": alerts,
         "chain_id_override": override_info,
         "label_asym_id_map": label_map,
