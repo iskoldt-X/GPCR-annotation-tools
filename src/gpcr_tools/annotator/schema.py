@@ -111,7 +111,7 @@ ANNOTATION_TOOL = types.Tool(
                         },
                         "ligands": {
                             "type": "array",
-                            "description": "A list of ALL ligands. Must include an 'Apo' entry if no ligand is present. A G-protein-derived or transducer-mimetic peptide is not a ligand",
+                            "description": "A list of ALL ligands. Must include an 'Apo' entry if no ligand is present. A ligand is any entity — small molecule, peptide, or protein — that binds the receptor and acts on its function (agonist / antagonist / PAM / NAM / allosteric modulator); this includes a functional protein or peptide binder (e.g. a protein agonist such as R-spondin, or an activating antibody/nanobody). A G-protein-derived or transducer-mimetic peptide is not a ligand.",
                             "items": {
                                 "type": "object",
                                 "properties": {
@@ -129,7 +129,22 @@ ANNOTATION_TOOL = types.Tool(
                                         "properties": {
                                             "value": {
                                                 "type": "string",
-                                                "description": "The role value. Must be one of the specified enum values.",
+                                                "description": (
+                                                    "The ligand's pharmacological role. Must be one of the specified enum values. Decide by site and mechanism, not by wording habit.\n"
+                                                    "Orthosteric site: activates → 'Agonist' (partial → 'Agonist (partial)';\n"
+                                                    "requires a second obligate agonist → 'Co-agonist');\n"
+                                                    "blocks the agonist → 'Antagonist';\n"
+                                                    "lowers constitutive activity → 'Inverse agonist'.\n"
+                                                    "Non-orthosteric site (allosteric / intracellular / outer surface):\n"
+                                                    "activates from there → 'Allosteric agonist';\n"
+                                                    "activates and also potentiates the orthosteric agonist (the paper shows both) → 'Ago-PAM';\n"
+                                                    "only potentiates or only inhibits the orthosteric response with no intrinsic activation → 'PAM' / 'NAM';\n"
+                                                    "blocks from an allosteric site → 'Allosteric antagonist'.\n"
+                                                    "Default to 'Allosteric agonist' over 'Ago-PAM' unless the paper explicitly shows both standalone activation and potentiation.\n"
+                                                    "Not a pharmacological ligand (a structural lipid, detergent, or cofactor) → 'Cofactor';\n"
+                                                    "truly undetermined → 'unknown'.\n"
+                                                    "An endogenous peptide or protein hormone binding the extracellular domain (e.g. FSH) is an 'Agonist', not 'Allosteric agonist'."
+                                                ),
                                                 "enum": [
                                                     "Antagonist",
                                                     "PAM",
@@ -210,16 +225,15 @@ ANNOTATION_TOOL = types.Tool(
                                     "site_ref": {
                                         "type": "string",
                                         "description": (
-                                            "The binding site of this ligand on the receptor. Infer it from the geometric facts in the "
-                                            "DETECTOR EVIDENCE block plus the paper; use 'unknown' if neither settles it — do not guess. "
-                                            "If one ligand is modelled at more than one distinct site, emit a separate entry per site. "
-                                            "Boundaries of each value: "
-                                            "'orthosteric' = the classic agonist core pocket where the endogenous/primary ligand binds. "
-                                            "'extracellular_vestibule' = the vestibule just above the orthosteric pocket toward the extracellular end of the 7TM bundle, often adjacent to or overlapping the orthosteric site. "
-                                            "'allosteric_7tm' = a non-orthosteric pocket embedded WITHIN the 7TM helical bundle / mid-bilayer (between helices, mid-membrane), NOT at either membrane end; keep this tight — a mid-bilayer positive allosteric modulator (e.g. an inter-helical TM3/4/5 pocket) is allosteric_7tm, not intracellular. "
-                                            "'intracellular' = on the receptor cytoplasmic face / the receptor-transducer (G protein / arrestin) interface / around the DRY-Arg (3.50), helix 8, and the intracellular ends of TM3/5/6/7. EVEN IF the ligand is pharmacologically allosteric, if it sits on the cytoplasmic side it is intracellular, NOT allosteric_7tm. "
-                                            "'extracellular_domain' = the extracellular domain (ECD), Venus-flytrap (VFT), or N-terminal domain, outside the 7TM bundle. "
-                                            "'lipidic' = a structural lipid or detergent sitting against the membrane-facing (lipid-exposed) surface of the bundle."
+                                            "The binding site of this molecule. site_ref records WHERE this molecule sits — a pure POSITION, never what it does. Any role (agonist, modulator, or other) can occur at any position, pharmacology is recorded only in 'role'. Infer the position from the DETECTOR EVIDENCE geometry plus the paper. If neither settles it, mark 'unknown'. If one molecule is modelled at more than one distinct site, emit a separate entry per site.\n"
+                                            "\n"
+                                            "Boundaries and Tie-breaks of each value (all are positions):\n"
+                                            "* 'orthosteric' = the canonical core pocket within the 7TM bundle. Any molecule found in this pocket is 'orthosteric'. (Note: Where a receptor's endogenous agonist binds the extracellular domain / VFT rather than a 7TM pocket, that site is 'extracellular_domain'; its agonism goes in 'role').\n"
+                                            "* 'extracellular_vestibule' = the vestibule just above the orthosteric pocket. Tie-break: if the molecule contacts the orthosteric core-anchor residues, choose 'orthosteric'.\n"
+                                            "* 'allosteric_7tm' = a discrete non-orthosteric pocket or groove on the 7TM bundle. Use the 'enclosure' and 'pocket-vs-lipid-facing' evidence to separate a defined groove (this value) from a flat exposed surface ('membrane_facing').\n"
+                                            "* 'intracellular' = on the receptor cytoplasmic face / transducer interface (around DRY-Arg 3.50, helix 8, intracellular TM ends). Tie-break: if the molecule sits on the cytoplasmic side, choose 'intracellular' over 'allosteric_7tm' even when its pharmacological action could be allosteric.\n"
+                                            "* 'extracellular_domain' = the extracellular domain (ECD), Venus-flytrap (VFT), or N-terminal domain, outside the 7TM bundle.\n"
+                                            "* 'membrane_facing' = the lipid-exposed outer wall of the 7TM bundle (the bulk-bilayer surface), where a molecule lies flat/exposed rather than in a defined pocket."
                                         ),
                                         "enum": [
                                             "orthosteric",
@@ -227,7 +241,7 @@ ANNOTATION_TOOL = types.Tool(
                                             "extracellular_vestibule",
                                             "intracellular",
                                             "extracellular_domain",
-                                            "lipidic",
+                                            "membrane_facing",
                                             "unknown",
                                         ],
                                     },
@@ -323,7 +337,7 @@ ANNOTATION_TOOL = types.Tool(
                         },
                         "auxiliary_proteins": {
                             "type": "array",
-                            "description": "List of other non-GPCR, non-signaling proteins. Can be an empty list.",
+                            "description": "List of proteins present for structural, stabilization, or expression reasons that do not themselves modulate receptor activity — crystallization fusions (BRIL / cytochrome b562, T4 lysozyme), stabilizing Fab / nanobody / scFv, and other non-functional, non-signaling proteins. Can be an empty list. Deciding test: if the protein binds the receptor to modulate its activity, put it in ligands; if it is only a structural/stabilization/expression aid, put it here. A stabilizing nanobody is auxiliary; an activating nanobody is a ligand. Read the paper; absent a functional claim, default to auxiliary. (Signaling proteins like G protein and arrestin belong in signaling_partners, not here.)",
                             "items": {
                                 "type": "object",
                                 "properties": {
