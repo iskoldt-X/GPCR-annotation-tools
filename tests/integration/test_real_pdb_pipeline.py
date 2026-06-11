@@ -112,8 +112,8 @@ class TestLoaderSidecarPrecision:
 
         _, controversies, _ = load_pdb_data("9BLW")
         assert set(controversies.keys()) == {
-            "auxiliary_proteins[Nanobody-35].type.evidence.source",
-            "ligands[None].name",
+            "auxiliary_proteins[nanobody 35|ch:n].type.evidence.source",
+            "ligands[__keyless__:cagrilintide backbone].name",
         }
 
     def test_9iqs_controversy_keys(self, real_pdb_workspace: Path) -> None:
@@ -121,8 +121,8 @@ class TestLoaderSidecarPrecision:
 
         _, controversies, _ = load_pdb_data("9IQS")
         assert set(controversies.keys()) == {
-            "auxiliary_proteins[Soluble cytochrome b562].type.value",
-            "ligands[None].type",
+            "auxiliary_proteins[soluble cytochrome b562|ch:b].type.value",
+            "ligands[__keyless__:muscarinic toxin 3].type",
         }
 
     def test_9o38_controversy_keys(self, real_pdb_workspace: Path) -> None:
@@ -130,8 +130,8 @@ class TestLoaderSidecarPrecision:
 
         _, controversies, _ = load_pdb_data("9O38")
         assert set(controversies.keys()) == {
-            "ligands[None].role.value",
-            "ligands[None].type",
+            "ligands[__keyless__:apo].role.value",
+            "ligands[__keyless__:apo].type",
         }
 
     def test_9nor_ghost_ligand_warnings(self, real_pdb_workspace: Path) -> None:

@@ -302,6 +302,61 @@ class TestSoftFieldExclusion:
         discs = find_discrepancies(runs[0], majority, {})
         assert all(not d["path"].endswith("_provenance") for d in discs)
 
+    def test_justification_and_evidence_excluded(self) -> None:
+        # Per-run free-text justification prose (why a site was called, the
+        # evidence cited) is phrased differently every run; it must not drive
+        # voting or surface as a discrepancy.
+        runs = [
+            {
+                "site_ref": "orthosteric",
+                "site_ref_justification": "contacts the canonical pocket residues",
+                "evidence": "Fig 2 of the paper shows the bound pose",
+            },
+            {
+                "site_ref": "orthosteric",
+                "site_ref_justification": "sits in the conserved binding cleft",
+                "evidence": "described in the results section",
+            },
+        ]
+        majority, _ = get_majority_votes(runs)
+        assert majority["site_ref"] == "orthosteric"
+        assert majority["site_ref_justification"] is None
+        assert majority["evidence"] is None
+        discs = find_discrepancies(runs[0], majority, {})
+        assert all(not d["path"].endswith(("site_ref_justification", "evidence")) for d in discs)
+
+    def test_structured_evidence_subtree_fully_excluded(self) -> None:
+        # The structured evidence object ({source, quote_or_path, reasoning})
+        # is the justification block on an inference. Its children are all
+        # explanatory: source is a provenance label, the other two are prose.
+        # None of them is an ingested decision value, so the whole subtree is
+        # excluded from voting and never surfaces a discrepancy — even when the
+        # runs disagree on every sub-field. The decided value lives in `value`.
+        runs = [
+            {
+                "value": "active",
+                "evidence": {
+                    "source": "Paper",
+                    "quote_or_path": "stabilised by the bound agonist",
+                    "reasoning": "agonist-bound is the active conformation",
+                },
+            },
+            {
+                "value": "active",
+                "evidence": {
+                    "source": "PDB Metadata",
+                    "quote_or_path": "annotated active in the entry",
+                    "reasoning": "metadata records an active state",
+                },
+            },
+        ]
+        majority, _ = get_majority_votes(runs)
+        assert majority["value"] == "active"
+        assert majority["evidence"] is None
+        discs = find_discrepancies(runs[0], majority, {})
+        # The disagreeing source/quote/reasoning must NOT produce discrepancies.
+        assert all(".evidence" not in d["path"] for d in discs)
+
 
 # ===================================================================
 # Truthiness — Blood Lesson 5
@@ -615,8 +670,9 @@ class TestKeylessDiscrepancyDetection:
         votes = {"ligands": [{}, {}]}
         discs = find_discrepancies(best, majority, votes)
         paths = [d["path"] for d in discs]
-        # Alpha's role disagreement surfaces on Alpha's own path, never ligands[None]
-        assert any("Alpha" in p and p.endswith(".role") for p in paths)
+        # Alpha's role disagreement surfaces on Alpha's own (normalized) path,
+        # never collapsed under ligands[None].
+        assert any("alpha" in p.lower() and p.endswith(".role") for p in paths)
         assert not any(p == "ligands[None].role" for p in paths)
 
 
@@ -650,11 +706,16 @@ class TestLowConfidenceConsensus:
 
         best = {
             "auxiliary_proteins": [
-                {"name": "Nb35", "type": {"value": "nanobody", "confidence": "Low"}}
+                {
+                    "name": "Nb35",
+                    "chain_id": "B",
+                    "type": {"value": "nanobody", "confidence": "Low"},
+                }
             ]
         }
         flags = flag_low_confidence_consensus(best, frozenset({"Low"}))
-        assert any(f["path"] == "auxiliary_proteins[Nb35].type.value" for f in flags)
+        # Identity is the normalized name plus the chain-set suffix.
+        assert any(f["path"] == "auxiliary_proteins[nb35|ch:b].type.value" for f in flags)
 
 
 class TestObjectListScoring:

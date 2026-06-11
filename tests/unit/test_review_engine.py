@@ -48,7 +48,9 @@ class TestListItemPathMatchesAggregatorIdentity:
         review_path = _list_item_path("ligands", item, "chem_comp_id", 0)
         agg_path = f"ligands[{config.list_item_identity(item, 'chem_comp_id', 0)}]"
         assert review_path == agg_path
-        assert review_path == "ligands[__keyless__:GLP-1]"
+        # The keyless name is SAFE-normalized (casefold + separator collapse), so
+        # review navigation and aggregation share the same normalized identity.
+        assert review_path == "ligands[__keyless__:glp 1]"
 
     def test_real_key_path_unchanged(self):
         item = {"chem_comp_id": "ATP", "name": "x"}

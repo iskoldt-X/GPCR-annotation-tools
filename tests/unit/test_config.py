@@ -5,11 +5,13 @@ from pathlib import Path
 import pytest
 
 from gpcr_tools.config import (
+    SOFT_FIELD_KEYS,
     WorkspaceConfig,
     ensure_alert_prefix,
     get_config,
     list_item_identity,
     reset_config,
+    safe_name_normalize,
 )
 
 
@@ -62,6 +64,123 @@ class TestListItemIdentity:
             list_item_identity({"chem_comp_id": "CLR", "site_ref": "unknown"}, "chem_comp_id", 0)
             == "CLR"
         )
+
+    def test_keyless_ligand_name_variants_merge(self) -> None:
+        # A keyless ligand (no component id) keyed by name: a trailing
+        # parenthetical annotation on one entity must not split it into a
+        # second group.
+        plain = list_item_identity(
+            {"chem_comp_id": "None", "name": "Stalk peptide"}, "chem_comp_id", 0
+        )
+        annotated = list_item_identity(
+            {"chem_comp_id": "None", "name": "Stalk peptide (tethered agonist)"},
+            "chem_comp_id",
+            1,
+        )
+        assert plain == annotated
+
+    def test_keyless_ligand_trailing_digits_stay_distinct(self) -> None:
+        # Trailing digits are load-bearing: two different numbered compounds
+        # must key apart even after normalization.
+        a = list_item_identity({"chem_comp_id": "None", "name": "Compound 28"}, "chem_comp_id", 0)
+        b = list_item_identity({"chem_comp_id": "None", "name": "Compound 29"}, "chem_comp_id", 1)
+        assert a != b
+
+
+class TestSafeNameNormalize:
+    """The SAFE (rule-based, no fuzzy) name normalizer for grouping keys."""
+
+    def test_case_insensitive(self) -> None:
+        assert safe_name_normalize("BRIL") == safe_name_normalize("bril")
+
+    def test_strips_one_trailing_parenthetical(self) -> None:
+        assert safe_name_normalize("Stalk peptide (tethered agonist)") == "stalk peptide"
+
+    def test_collapses_hyphen_underscore_asterisk_whitespace(self) -> None:
+        assert (
+            safe_name_normalize("anti-Fab")
+            == safe_name_normalize("anti Fab")
+            == safe_name_normalize("anti_fab")
+            == safe_name_normalize("anti**Fab")
+            == "anti fab"
+        )
+
+    def test_greek_letters_folded_to_words(self) -> None:
+        assert safe_name_normalize("Gα") == "galpha"
+        assert safe_name_normalize("Gβ") == "gbeta"
+        assert safe_name_normalize("Gγ") == "ggamma"
+
+    def test_trailing_digits_preserved(self) -> None:
+        # The receptor subtype digit is load-bearing and must survive.
+        assert safe_name_normalize("mGlu2") != safe_name_normalize("mGlu7")
+        assert safe_name_normalize("mGlu2") == "mglu2"
+
+
+class TestAuxiliaryProteinIdentity:
+    """Auxiliary proteins key on normalized name PLUS a chain-set suffix, so a
+    reused label never over-merges entities on disjoint chains."""
+
+    def test_name_variants_same_chain_merge(self) -> None:
+        # Case + asterisk + trailing parenthetical noise on one entity, same
+        # chain -> one identity. (Separators — hyphen, underscore, whitespace,
+        # asterisk — all collapse to a single space, so punctuation/spacing
+        # noise around the same words folds to one stem.)
+        a = list_item_identity({"name": "anti-Fab Nanobody", "chain_id": "K"}, "name", 0)
+        b = list_item_identity({"name": "Anti-Fab  nanobody", "chain_id": "K"}, "name", 1)
+        c = list_item_identity({"name": "anti-Fab nanobody (Nb)", "chain_id": "K"}, "name", 2)
+        d = list_item_identity({"name": "anti_Fab*nanobody", "chain_id": "K"}, "name", 3)
+        assert a == b == c == d
+
+    def test_disjoint_chains_do_not_merge(self) -> None:
+        # Same normalized name on disjoint chains -> distinct identities (a
+        # model reusing one label, e.g. "BRIL", for a fusion / Fab / nanobody).
+        fusion = list_item_identity({"name": "BRIL", "chain_id": "A"}, "name", 0)
+        fab = list_item_identity({"name": "BRIL", "chain_id": "H, L"}, "name", 1)
+        nanobody = list_item_identity({"name": "BRIL", "chain_id": "K"}, "name", 2)
+        assert len({fusion, fab, nanobody}) == 3
+
+    def test_no_chain_id_falls_back_to_name_only(self) -> None:
+        # With no chain recorded, the identity is the normalized name alone (no
+        # "|ch:" suffix), so two same-named entries that both omit a chain do
+        # merge into one vote group.
+        a = list_item_identity({"name": "BRIL"}, "name", 0)
+        b = list_item_identity({"name": "bril"}, "name", 1)
+        assert a == b == "bril"
+
+    def test_chain_id_and_no_chain_id_do_not_merge(self) -> None:
+        # A run that records a chain and a run that omits it produce different
+        # identities — an accepted under-merge (separate vote groups), never an
+        # over-merge.
+        with_chain = list_item_identity({"name": "BRIL", "chain_id": "A"}, "name", 0)
+        without_chain = list_item_identity({"name": "BRIL"}, "name", 1)
+        assert with_chain != without_chain
+
+    def test_chain_set_order_and_spacing_invariant(self) -> None:
+        # The chain string varies in order/spacing across runs; the same chain
+        # SET must yield the same identity.
+        assert (
+            list_item_identity({"name": "BRIL", "chain_id": "H, L"}, "name", 0)
+            == list_item_identity({"name": "BRIL", "chain_id": "L,H"}, "name", 1)
+            == list_item_identity({"name": "BRIL", "chain_id": " L , H "}, "name", 2)
+        )
+
+    def test_distinct_names_same_chain_stay_distinct(self) -> None:
+        # Trailing-digit receptors and unrelated soluble partners must never
+        # collapse even when modelled on the same chain.
+        assert list_item_identity(
+            {"name": "mGlu2", "chain_id": "A"}, "name", 0
+        ) != list_item_identity({"name": "mGlu7", "chain_id": "A"}, "name", 1)
+        assert list_item_identity(
+            {"name": "FKBP", "chain_id": "A"}, "name", 0
+        ) != list_item_identity({"name": "FRB", "chain_id": "A"}, "name", 1)
+
+
+class TestSoftFieldKeys:
+    """Free-text justification prose is excluded from cross-run voting."""
+
+    def test_justification_and_evidence_are_soft(self) -> None:
+        assert "site_ref_justification" in SOFT_FIELD_KEYS
+        assert "evidence" in SOFT_FIELD_KEYS
 
 
 @pytest.fixture(autouse=True)
