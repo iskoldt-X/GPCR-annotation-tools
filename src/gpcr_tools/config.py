@@ -851,6 +851,14 @@ CRYSTALLIZATION_FUSION_KEYWORDS: tuple[str, ...] = (
     "cytochrome b562",
     "lysozyme",
     "endolysin",
+    # Green fluorescent protein, fused into a receptor as a folding/expression
+    # reporter rather than part of the receptor. Matched on the full entity name
+    # (the form PDB/UniProt records) so a real protomer whose display name merely
+    # contains the token "gfp" is not mistaken for a fusion.
+    "green fluorescent protein",
+    # Glycogen synthase, a soluble globular domain that has been used as a
+    # fusion aid. Requires both words to match, so the false-keep surface is small.
+    "glycogen synthase",
 )
 
 # ---------------------------------------------------------------------------
