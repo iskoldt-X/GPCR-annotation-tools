@@ -13,6 +13,8 @@ workspace resolution.
 from __future__ import annotations
 
 import os
+import re
+import unicodedata
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -282,6 +284,12 @@ SOFT_FIELD_KEYS: frozenset[str] = frozenset(
         "key_findings",
         "synonyms",
         "confidence",
+        # Free-text justification prose. These hold per-run explanatory writing
+        # (why a binding site was called, what evidence was cited), not a decision
+        # value. Each run phrases them differently, so voting on them produces
+        # only churn and the discrepancy walker should not recurse into them.
+        "site_ref_justification",
+        "evidence",
         # Provenance label (paper vs PDB metadata): explanatory, never an
         # ingested decision value — excluded from cross-run voting like its
         # sibling evidence fields above so it produces no vote churn.
@@ -312,6 +320,11 @@ GROUND_TRUTH_PATHS: frozenset[str] = frozenset(
 LIST_ITEM_KEY_FIELDS: MappingProxyType[str, str] = MappingProxyType(
     {
         "ligands": "chem_comp_id",
+        # Auxiliary proteins have no stable component id, so their grouping key is
+        # the free-text name. The name alone over-merges: a model reuses one label
+        # (e.g. "BRIL") for several physically distinct chains, so the identity is
+        # built from the normalized name PLUS a chain-set suffix — see
+        # ``list_item_identity``.
         "auxiliary_proteins": "name",
     }
 )
@@ -375,6 +388,80 @@ def ensure_alert_prefix(alert_type: str, message: str | None) -> str:
     return f"{prefix} {text}"
 
 
+# Greek letters models interchange with their spelled-out names. Folding the
+# bare letter to its word lets "Gα" share one grouping identity with the
+# adjacent spelled form "Galpha". Note the substitution happens BEFORE separator
+# collapse, so a separated spelling like "G-alpha" (which collapses to "g alpha")
+# is NOT unified with "Gα"/"Galpha" — that residual is an accepted under-merge
+# (separate vote groups), never an over-merge.
+_GREEK_LETTER_NAMES: MappingProxyType[str, str] = MappingProxyType(
+    {"α": "alpha", "β": "beta", "γ": "gamma"}
+)
+
+# One trailing parenthetical, e.g. "Stalk peptide (tethered agonist)" -> the
+# bracket is a per-run annotation on the same entity, so it is dropped from the
+# grouping key. Only a *trailing* group is stripped; a mid-string parenthetical
+# (rare, and more likely load-bearing) is left in place.
+_TRAILING_PAREN_RE = re.compile(r"\s*\([^()]*\)\s*$")
+
+# Runs of separators (whitespace, hyphen, underscore, asterisk — the markdown
+# emphasis the model sometimes leaks into a name) collapse to a single space so
+# "anti-Fab", "anti Fab" and "anti_fab" share one key.
+_NAME_SEPARATOR_RE = re.compile(r"[\s\-_*]+")
+
+
+def safe_name_normalize(name: Any) -> str:
+    """Deterministically normalize a free-text entity name for grouping.
+
+    SAFE means purely rule-based — there is no fuzzy matching, edit distance,
+    token-subset, embedding, or model call. The steps only erase formatting
+    noise that the same entity is written with from run to run:
+
+    1. Unicode NFKC normalize, then casefold (case-insensitive).
+    2. Map Greek alpha/beta/gamma to their spelled-out word forms.
+    3. Strip ONE trailing parenthetical ``(...)``.
+    4. Collapse runs of whitespace / hyphen / underscore / asterisk to a
+       single space, then trim.
+
+    Trailing digits are LOAD-BEARING and never stripped: bare "mGlu2" and
+    "mGlu7" are different receptors and must key apart, as must "Compound 28"
+    vs "Compound 29".
+
+    Two intentional consequences of step 3 to keep in mind:
+
+    * A *trailing* parenthetical is folded even when it reads load-bearing
+      (e.g. "peptide (agonist)" and "peptide (antagonist)" both collapse to
+      "peptide"). This is deliberate: for these entities the pharmacological
+      distinction lives in the separate ``role`` field, so the parenthetical
+      is a per-run annotation on the same entity, not a different one.
+    * The trailing-digit guarantee covers bare digits only. A digit *inside* a
+      trailing parenthetical is dropped with the bracket, so "Compound (28)"
+      and "Compound (29)" would collapse — preserve a load-bearing index
+      outside parentheses ("Compound 28") to keep it.
+    """
+    text = unicodedata.normalize("NFKC", str(name)).casefold()
+    for greek, word in _GREEK_LETTER_NAMES.items():
+        text = text.replace(greek, word)
+    text = _TRAILING_PAREN_RE.sub("", text)
+    text = _NAME_SEPARATOR_RE.sub(" ", text)
+    return text.strip()
+
+
+def _chain_bucket(item: dict[str, Any]) -> str:
+    """Sorted, de-duplicated chain-id set for an item, as a stable suffix token.
+
+    The chain string a model emits varies in order and spacing ("H, L" / "L,H"
+    / "H,L"), so it is split on commas/whitespace, lowercased, de-duplicated and
+    sorted. Returns e.g. ``"h,l"`` or ``"a"``; empty string when no chain is
+    recorded.
+    """
+    raw = item.get("chain_id")
+    if is_empty_key(raw):
+        return ""
+    parts = {p for p in re.split(r"[,\s]+", str(raw).casefold()) if p}
+    return ",".join(sorted(parts))
+
+
 def list_item_identity(item: dict[str, Any], key_field: str, idx: int) -> str:
     """Stable grouping identity for a list item — the key field when usable,
     else a namespaced fallback (name -> type -> index).
@@ -382,8 +469,38 @@ def list_item_identity(item: dict[str, Any], key_field: str, idx: int) -> str:
     Used everywhere a list item needs a path-addressable identity (vote
     grouping, discrepancy detection, and curator-review navigation) so the
     same item resolves to the same string in every stage.
+
+    Identity by list type:
+
+    * Ligands (``key_field == "chem_comp_id"``) are keyed on the unchanged
+      component id (plus ``site_ref`` when present), so the same compound
+      modelled at two distinct sites stays two entries and never over-merges.
+    * Keyless ligands (no component id — protein / peptide / Apo entries) fall
+      back to a SAFE-normalized name so spelling/formatting variants of one
+      entity ("Stalk peptide" / "Stalk peptide (tethered agonist)") collapse
+      into a single vote group.
+    * Auxiliary proteins (``key_field == "name"``) are keyed on the
+      SAFE-normalized name PLUS a chain-set suffix. Two entries merge only when
+      they share both a normalized name and a chain set; entries on disjoint
+      chains never merge (so a reused label like "BRIL" splits into the distinct
+      fusion / Fab / nanobody entities the model put on different chains).
+
+    Chain-set membership is part of the key, so a run that records a chain
+    ("BRIL" on chain A -> ``bril|ch:a``) and a run that omits it (``bril``)
+    produce different identities and are voted separately. That is an accepted
+    under-merge (never an over-merge); two entries that BOTH omit a chain and
+    share a normalized name do merge, as intended.
     """
     group_key = item.get(key_field)
+
+    # Auxiliary proteins: the name is the group key, but the name alone
+    # over-merges distinct chains. Normalize the name and append a chain-set
+    # suffix so disjoint-chain entities never collapse together.
+    if key_field == "name":
+        normalized = safe_name_normalize(group_key) if not is_empty_key(group_key) else f"idx{idx}"
+        chains = _chain_bucket(item)
+        return f"{normalized}|ch:{chains}" if chains else normalized
+
     if not is_empty_key(group_key):
         # A ligand modelled at two distinct sites is emitted as two entries with
         # the same component id but different site_ref; without the site in the
@@ -396,7 +513,12 @@ def list_item_identity(item: dict[str, Any], key_field: str, idx: int) -> str:
         if site_ref and not is_empty_key(site_ref) and str(site_ref).lower() != SITE_REF_UNKNOWN:
             return f"{group_key}:{site_ref}"
         return str(group_key)
-    fallback_id = item.get("name") or item.get("type") or f"idx{idx}"
+    # Keyless ligand (no component id): SAFE-normalize the fallback name so
+    # spelling/formatting variants of one keyless entity share a group.
+    fallback_raw = item.get("name") or item.get("type")
+    fallback_id = (
+        safe_name_normalize(fallback_raw) if not is_empty_key(fallback_raw) else f"idx{idx}"
+    )
     return f"__keyless__:{fallback_id}"
 
 
