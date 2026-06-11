@@ -536,9 +536,16 @@ VALIDATION_UNIPROT_CLASH: str = "UNIPROT_CLASH"
 VALIDATION_RECEPTOR_NO_API_DATA: str = "RECEPTOR_NO_API_DATA"
 
 # ---------------------------------------------------------------------------
-# Ligand exclude list (common buffers, ions, artifacts)
+# Ligand exclude list (common buffers, ions, artifacts, detergents, matrix lipids)
 # ---------------------------------------------------------------------------
 
+# Codes here are stripped from the metadata the model sees, so a code is only
+# safe to add if it is NEVER a functional GPCR ligand. The list keys on the PDB
+# three-letter chem_comp id (what the enriched data carries), so a chemical's
+# human name (e.g. "DMSO", "HEPES") never matches and must be given as its code
+# (DMS, EPE). Any molecule that can EVER be an agonist — notably free fatty
+# acids and other biological lipids — belongs in INCIDENTAL_CANDIDATES, never
+# here.
 LIGAND_EXCLUDE_LIST: frozenset[str] = frozenset(
     {
         "HOH",
@@ -554,11 +561,11 @@ LIGAND_EXCLUDE_LIST: frozenset[str] = frozenset(
         "BME",
         "TRS",
         "MES",
-        "HEPES",
         "CIT",
         "ACE",
         "FMT",
-        "DMSO",
+        "DMS",  # dimethyl sulfoxide cosolvent (the PDB code; the name "DMSO" never matched)
+        "EPE",  # HEPES buffer (the PDB code; the name "HEPES" never matched)
         "NA",
         "K",
         "CL",
@@ -577,6 +584,34 @@ LIGAND_EXCLUDE_LIST: frozenset[str] = frozenset(
         "GAL",
         "FUC",
         "PLM",
+        # Lipidic-cubic-phase host / matrix lipids (monoacylglycerols). Synthetic
+        # crystallization matrix, never a functional ligand.
+        "OLC",  # monoolein (glyceryl monooleate)
+        "OLB",  # monoolein stereoisomer
+        # Cholesterol hemisuccinate: a solubilization additive (cholesterol
+        # surrogate). Distinct from free cholesterol (CLR), which is incidental.
+        "Y01",
+        # Non-ionic detergents (alkyl glucosides / thioglucosides, maltosides,
+        # HEGA, amine oxide). Solubilization agents, not receptor ligands.
+        "BOG",  # octyl beta-D-glucoside
+        "BNG",  # nonyl beta-D-glucoside
+        "SOG",  # octyl 1-thio-beta-D-glucoside
+        "HTG",  # heptyl 1-thio-beta-D-glucoside
+        "2CV",  # HEGA-10
+        "LMN",  # lauryl maltose neopentyl glycol
+        "AV0",  # lauryl maltose neopentyl glycol (alternate code)
+        "LMT",  # dodecyl beta-D-maltoside
+        "LDA",  # lauryl dimethylamine-N-oxide
+        # Polyethylene-glycol oligomers (cryoprotectant / precipitant family,
+        # alongside the PEG/PGE/PG4 already listed).
+        "1PE",  # pentaethylene glycol
+        "12P",  # dodecaethylene glycol
+        "P6G",  # hexaethylene glycol
+        # Other crystallization buffers / cryo-additives.
+        "HTO",  # heptane-1,2,3-triol
+        "D10",  # decane
+        "TAR",  # D-tartaric acid
+        "TLA",  # L-tartaric acid
     }
 )
 
@@ -585,7 +620,24 @@ LIGAND_EXCLUDE_LIST: frozenset[str] = frozenset(
 # them to the model (any member on LIGAND_EXCLUDE_LIST, e.g. PLM, is un-stripped
 # from the simplified metadata so the model can see it) and guides it to judge
 # the role, recording a dedicated pharmacological_role_check. ~CLR 22% / PLM 5% of corpus.
-INCIDENTAL_CANDIDATES: frozenset[str] = frozenset({"CLR", "PLM"})
+#
+# The additions below are biological lipids / metabolites that flood structures as
+# membrane or matrix components yet are the endogenous agonist at their cognate
+# receptors (free-fatty-acid, sphingosine-1-phosphate, lysophosphatidic-acid and
+# succinate receptors). They must reach the model for a role judgement, never be
+# hard-excluded, because copy count alone cannot tell agonist from membrane filler.
+INCIDENTAL_CANDIDATES: frozenset[str] = frozenset(
+    {
+        "CLR",  # cholesterol
+        "PLM",  # palmitic acid
+        "OLA",  # oleic acid (free fatty-acid agonist at FFA receptors)
+        "S1P",  # sphingosine-1-phosphate (S1P-receptor agonist)
+        "HXA",  # docosahexaenoic acid / DHA (FFA-receptor agonist)
+        "NKP",  # lysophosphatidic acid (LPA-receptor agonist)
+        "ACT",  # acetate (short-chain fatty-acid agonist at FFA receptors)
+        "SIN",  # succinic acid (succinate-receptor agonist)
+    }
+)
 
 # ---------------------------------------------------------------------------
 # Chimera statuses
