@@ -1039,12 +1039,29 @@ def _apply_chain_override(
 # ---------------------------------------------------------------------------
 
 
+def _is_crystallization_fusion_aux(aux: dict[str, Any]) -> bool:
+    """Is this ``auxiliary_proteins`` entry a crystallization fusion, not a protomer?
+
+    A crystallization fusion (BRIL / cytochrome b562, T4 lysozyme, GFP, glycogen
+    synthase, …) is an engineering aid spliced into the receptor chain, not a
+    separate biological protomer. The model marks it either by typing it
+    "Fusion protein" or by naming a known fusion partner. Either signal keeps the
+    entry from being evicted when it sits on a chain that is also a real protomer.
+    """
+    type_value = (aux.get("type") or {}).get("value") if isinstance(aux.get("type"), dict) else None
+    if isinstance(type_value, str) and "fusion" in type_value.lower():
+        return True
+    name_lower = (aux.get("name") or "").lower()
+    return any(kw in name_lower for kw in CRYSTALLIZATION_FUSION_KEYWORDS)
+
+
 def reconcile_gpcr_in_auxiliary(
     best_run_data: dict[str, Any],
-    gpcr_roster: dict[str, dict[str, Any]],
+    validated_roster: dict[str, dict[str, Any]],
+    classification: str,
     alerts: list[dict[str, str]],
 ) -> None:
-    """Evict any GPCR protomer mis-filed under ``auxiliary_proteins`` (mutates in-place).
+    """Evict a GPCR protomer mis-filed under ``auxiliary_proteins`` (mutates in-place).
 
     A Class C receptor is an obligate dimer; its partner protomer is a real GPCR
     chain. When the model files that partner under ``auxiliary_proteins`` (often as
@@ -1053,15 +1070,29 @@ def reconcile_gpcr_in_auxiliary(
     :func:`resolve_partner_protomer` over ``all_gpcr_chains``), so removing the
     auxiliary entry loses no data.
 
-    For each ``auxiliary_proteins`` entry, the chain_id is parsed and tested
-    against the FULL *gpcr_roster* (not the 7TM-narrowed classify roster) so a
-    truncated or under-annotated but genuine protomer is still rescued. An entry
-    whose chain_id matches a roster chain is removed and a domain-language alert is
-    appended. An entry with an empty/garbled/missing chain_id is left untouched
-    (fail-safe to current behaviour).
+    Two guards keep this from deleting legitimate auxiliary entries:
+
+    * *validated_roster* is the transmembrane-gated roster (a chain is a protomer
+      only if its UniProt annotation carries enough transmembrane helices). A
+      soluble partner mis-mapped to a receptor slug — an E3 ligase, an R-spondin
+      ectodomain — is not in this roster, so its chain never matches and it stays.
+    * *classification* decides whether eviction is even possible. A single-protomer
+      structure has no second protomer to recover, so anything sharing the receptor
+      chain is a fusion or sub-domain and is always kept. Only a homo-/heteromer
+      (two or more real protomers, e.g. a Class C dimer) can hide a mis-filed
+      partner — and even then a crystallization fusion sitting on a protomer chain
+      (typed "Fusion protein" or named BRIL / T4 lysozyme / GFP / …) is kept.
+
+    An evicted entry yields a domain-language alert. An entry with an
+    empty/garbled/missing chain_id is left untouched (fail-safe).
     """
     aux_list = best_run_data.get("auxiliary_proteins")
-    if not isinstance(aux_list, list) or not gpcr_roster:
+    if not isinstance(aux_list, list) or not validated_roster:
+        return
+
+    # A single-protomer structure cannot hide a mis-filed second protomer; every
+    # auxiliary entry is a fusion or sub-domain of the lone receptor chain. Keep all.
+    if classification == OLIGOMER_MONOMER:
         return
 
     kept: list[Any] = []
@@ -1070,12 +1101,19 @@ def reconcile_gpcr_in_auxiliary(
             kept.append(aux)
             continue
         aux_chains = _split_chain_ids(aux.get("chain_id"))
-        roster_hits = sorted(aux_chains & set(gpcr_roster.keys()))
+        roster_hits = sorted(aux_chains & set(validated_roster.keys()))
+        # Keep the entry when its chain is not a validated protomer (nothing to
+        # recover) or when it is a crystallization fusion sitting on a protomer
+        # chain. The two keep-reasons are split so a future edit cannot silently
+        # swap them into an evict.
         if not roster_hits:
             kept.append(aux)
             continue
+        if _is_crystallization_fusion_aux(aux):
+            kept.append(aux)
+            continue
         name = aux.get("name") or "unknown"
-        slug = gpcr_roster[roster_hits[0]].get("slug") or "unknown"
+        slug = validated_roster[roster_hits[0]].get("slug") or "unknown"
         chains_text = ", ".join(roster_hits)
         alerts.append(
             {
@@ -1207,12 +1245,15 @@ def analyze_oligomer(
             }
         )
 
-    # 6b. Evict any GPCR protomer mis-filed under auxiliary_proteins (the obligate
-    # dimer partner of a Class C receptor). Tested against the full roster so a
-    # truncated/under-annotated real protomer is still rescued. The partner is
+    # 6b. Evict a GPCR protomer mis-filed under auxiliary_proteins (the obligate
+    # dimer partner of a Class C receptor). Tested against the transmembrane-gated
+    # validated roster so a soluble partner mis-mapped to a receptor slug (an E3
+    # ligase, an R-spondin ectodomain) is never deleted, and only a homo-/heteromer
+    # can lose an entry — a single-protomer structure keeps every entry, and a
+    # crystallization fusion on a protomer chain is kept. The recovered partner is
     # already in the structures.csv Partner columns via resolve_partner_protomer,
     # so eviction loses no data; an alert flags the move for review.
-    reconcile_gpcr_in_auxiliary(best_run_data, gpcr_roster, alerts)
+    reconcile_gpcr_in_auxiliary(best_run_data, classify_roster, classification, alerts)
 
     # 7. Smart override: correct chain_id when AI is objectively wrong
     override_info = _apply_chain_override(

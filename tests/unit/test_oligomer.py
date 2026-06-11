@@ -1151,7 +1151,7 @@ class TestReconcileGpcrInAuxiliary:
             "auxiliary_proteins": [_aux("Metabotropic glutamate receptor 7", "B")],
         }
         alerts: list[dict[str, str]] = []
-        reconcile_gpcr_in_auxiliary(data, roster, alerts)
+        reconcile_gpcr_in_auxiliary(data, roster, OLIGOMER_HETEROMER, alerts)
 
         assert data["auxiliary_proteins"] == []
         assert len(alerts) == 1
@@ -1173,7 +1173,7 @@ class TestReconcileGpcrInAuxiliary:
         data: dict[str, Any] = {
             "auxiliary_proteins": [_aux("mGlu7 partner", "B")],
         }
-        reconcile_gpcr_in_auxiliary(data, roster, [])
+        reconcile_gpcr_in_auxiliary(data, roster, OLIGOMER_HETEROMER, [])
         assert data["auxiliary_proteins"] == []
 
         oligo = {
@@ -1184,13 +1184,16 @@ class TestReconcileGpcrInAuxiliary:
         assert partner_chains == "B"
 
     def test_non_gpcr_auxiliary_not_evicted(self) -> None:
-        # A genuine non-GPCR auxiliary (nanobody chain not in the GPCR roster)
-        # must survive — no false eviction.
-        roster = {"A": {"slug": "grm2_human", "length": 800, "asym_id": "A"}}
+        # A genuine non-GPCR auxiliary (nanobody chain not in the validated
+        # roster) must survive — no false eviction, even in a dimer.
+        roster = {
+            "A": {"slug": "grm2_human", "length": 800, "asym_id": "A"},
+            "B": {"slug": "grm7_human", "length": 850, "asym_id": "B"},
+        }
         nanobody = _aux("Nanobody-35", "N", type_value="Nanobody")
         data: dict[str, Any] = {"auxiliary_proteins": [nanobody]}
         alerts: list[dict[str, str]] = []
-        reconcile_gpcr_in_auxiliary(data, roster, alerts)
+        reconcile_gpcr_in_auxiliary(data, roster, OLIGOMER_HETEROMER, alerts)
 
         assert data["auxiliary_proteins"] == [nanobody]
         assert alerts == []
@@ -1198,12 +1201,15 @@ class TestReconcileGpcrInAuxiliary:
     def test_empty_chain_id_not_evicted(self) -> None:
         # An entry with empty/missing chain_id parses to no chains and is left
         # untouched (fail-safe to current behaviour).
-        roster = {"A": {"slug": "grm2_human", "length": 800, "asym_id": "A"}}
+        roster = {
+            "A": {"slug": "grm2_human", "length": 800, "asym_id": "A"},
+            "B": {"slug": "grm7_human", "length": 850, "asym_id": "B"},
+        }
         empty = _aux("T4-Lysozyme", "")
         missing = _aux("BRIL", None)
         data: dict[str, Any] = {"auxiliary_proteins": [empty, missing]}
         alerts: list[dict[str, str]] = []
-        reconcile_gpcr_in_auxiliary(data, roster, alerts)
+        reconcile_gpcr_in_auxiliary(data, roster, OLIGOMER_HETEROMER, alerts)
 
         assert data["auxiliary_proteins"] == [empty, missing]
         assert alerts == []
@@ -1217,7 +1223,7 @@ class TestReconcileGpcrInAuxiliary:
         partner = _aux("mGlu7 partner", "B")
         data: dict[str, Any] = {"auxiliary_proteins": [nanobody, partner]}
         alerts: list[dict[str, str]] = []
-        reconcile_gpcr_in_auxiliary(data, roster, alerts)
+        reconcile_gpcr_in_auxiliary(data, roster, OLIGOMER_HETEROMER, alerts)
 
         assert data["auxiliary_proteins"] == [nanobody]
         assert len(alerts) == 1
@@ -1227,7 +1233,7 @@ class TestReconcileGpcrInAuxiliary:
         partner = _aux("mGlu7 partner", "B")
         data: dict[str, Any] = {"auxiliary_proteins": [partner]}
         alerts: list[dict[str, str]] = []
-        reconcile_gpcr_in_auxiliary(data, {}, alerts)
+        reconcile_gpcr_in_auxiliary(data, {}, OLIGOMER_HETEROMER, alerts)
         assert data["auxiliary_proteins"] == [partner]
         assert alerts == []
 
@@ -1235,8 +1241,160 @@ class TestReconcileGpcrInAuxiliary:
         roster = {"A": {"slug": "grm2_human", "length": 800, "asym_id": "A"}}
         data: dict[str, Any] = {}
         alerts: list[dict[str, str]] = []
-        reconcile_gpcr_in_auxiliary(data, roster, alerts)
+        reconcile_gpcr_in_auxiliary(data, roster, OLIGOMER_MONOMER, alerts)
         assert alerts == []
+
+    def test_monomer_fusion_on_receptor_chain_not_evicted(self) -> None:
+        # A single-receptor structure has no second protomer to recover: a
+        # crystallization fusion (BRIL / cytochrome b562) modelled on the lone
+        # receptor chain is a sub-domain of that chain and must be kept.
+        roster = {"A": {"slug": "drd2_human", "length": 400, "asym_id": "A"}}
+        bril = _aux("BRIL", "A", type_value="Fusion protein")
+        data: dict[str, Any] = {"auxiliary_proteins": [bril]}
+        alerts: list[dict[str, str]] = []
+        reconcile_gpcr_in_auxiliary(data, roster, OLIGOMER_MONOMER, alerts)
+
+        assert data["auxiliary_proteins"] == [bril]
+        assert alerts == []
+
+    def test_non_transmembrane_partner_not_evicted(self) -> None:
+        # An E3 ligase / R-spondin ectodomain mis-mapped to a receptor slug is
+        # filtered out of the transmembrane-gated validated roster, so its chain
+        # never matches and the entry survives even in a heteromer.
+        validated_roster = {"A": {"slug": "lgr4_human", "length": 900, "asym_id": "A"}}
+        znrf3 = _aux("E3 ubiquitin-protein ligase ZNRF3", "C, E", type_value="Other")
+        data: dict[str, Any] = {"auxiliary_proteins": [znrf3]}
+        alerts: list[dict[str, str]] = []
+        reconcile_gpcr_in_auxiliary(data, validated_roster, OLIGOMER_HETEROMER, alerts)
+
+        assert data["auxiliary_proteins"] == [znrf3]
+        assert alerts == []
+
+    def test_fusion_typed_aux_on_protomer_chain_not_evicted(self) -> None:
+        # In a dimer, a chain that is itself a protomer can also carry a fusion
+        # sub-domain (e.g. an FRB / mTOR fragment fused onto a protomer chain). An
+        # entry typed "Fusion protein" on that chain is the model's own claim of a
+        # fusion, so it is kept rather than evicted as a mis-filed protomer.
+        roster = {
+            "A": {"slug": "grm2_human", "length": 800, "asym_id": "A"},
+            "B": {"slug": "grm7_human", "length": 850, "asym_id": "B"},
+        }
+        frb = _aux("FRB fragment of mTOR", "B", type_value="Fusion protein")
+        data: dict[str, Any] = {"auxiliary_proteins": [frb]}
+        alerts: list[dict[str, str]] = []
+        reconcile_gpcr_in_auxiliary(data, roster, OLIGOMER_HETEROMER, alerts)
+
+        assert data["auxiliary_proteins"] == [frb]
+        assert alerts == []
+
+    def test_fusion_named_aux_on_protomer_chain_not_evicted(self) -> None:
+        # Same protection by name when the type is generic: a green fluorescent
+        # protein / T4 lysozyme on a protomer chain is a fusion partner, kept.
+        roster = {
+            "A": {"slug": "grm2_human", "length": 800, "asym_id": "A"},
+            "B": {"slug": "grm7_human", "length": 850, "asym_id": "B"},
+        }
+        gfp = _aux("Green fluorescent protein", "B", type_value="Other")
+        data: dict[str, Any] = {"auxiliary_proteins": [gfp]}
+        alerts: list[dict[str, str]] = []
+        reconcile_gpcr_in_auxiliary(data, roster, OLIGOMER_HETEROMER, alerts)
+
+        assert data["auxiliary_proteins"] == [gfp]
+        assert alerts == []
+
+    def test_class_c_partner_typed_other_still_evicted(self) -> None:
+        # The case that must still fire: in a Class C dimer the partner protomer
+        # is mis-filed as a receptor-named "Other" auxiliary on the partner chain.
+        roster = {
+            "A": {"slug": "grm2_human", "length": 800, "asym_id": "A"},
+            "B": {"slug": "grm7_human", "length": 850, "asym_id": "B"},
+        }
+        partner = _aux("Metabotropic glutamate receptor 7", "B", type_value="Other")
+        data: dict[str, Any] = {"auxiliary_proteins": [partner]}
+        alerts: list[dict[str, str]] = []
+        reconcile_gpcr_in_auxiliary(data, roster, OLIGOMER_HETEROMER, alerts)
+
+        assert data["auxiliary_proteins"] == []
+        assert len(alerts) == 1
+        assert alerts[0]["type"] == ALERT_PROTOMER_IN_AUXILIARY
+
+    def test_homomer_protomer_in_aux_evicted(self) -> None:
+        # A symmetric homodimer (two copies of the same receptor) can also hide a
+        # mis-filed second protomer: the model files the chain-B copy as a
+        # receptor-named "Other" auxiliary. Eviction must fire here just as for a
+        # heteromer — both protomers are real GPCR chains.
+        roster = {
+            "A": {"slug": "drd2_human", "length": 400, "asym_id": "A"},
+            "B": {"slug": "drd2_human", "length": 400, "asym_id": "B"},
+        }
+        partner = _aux("Dopamine receptor D2", "B", type_value="Other")
+        data: dict[str, Any] = {"auxiliary_proteins": [partner]}
+        alerts: list[dict[str, str]] = []
+        reconcile_gpcr_in_auxiliary(data, roster, OLIGOMER_HOMOMER, alerts)
+
+        assert data["auxiliary_proteins"] == []
+        assert len(alerts) == 1
+        assert alerts[0]["type"] == ALERT_PROTOMER_IN_AUXILIARY
+
+    def test_monomer_fusion_kept_end_to_end(self) -> None:
+        # Through analyze_oligomer: a single 7TM receptor (chain A) carrying a
+        # cytochrome b562 fusion the model filed under auxiliary_proteins. Being a
+        # monomer, the fusion is kept and no eviction alert is raised.
+        enriched = _make_enriched_with_entities([_make_entity("drd2_human", "A")])
+        bril = _aux("Soluble cytochrome b562", "A", type_value="Fusion protein")
+        data: dict[str, Any] = {
+            "receptor_info": {"chain_id": "A"},
+            "auxiliary_proteins": [bril],
+        }
+        with patch(
+            "gpcr_tools.validator.oligomer.scan_all_chains_7tm",
+            return_value=({}, None),
+        ):
+            analyze_oligomer("TEST", data, enriched)
+
+        assert data["auxiliary_proteins"] == [bril]
+        analysis = data["oligomer_analysis"]
+        assert analysis["classification"] == OLIGOMER_MONOMER
+        assert not any(
+            a["type"] == ALERT_PROTOMER_IN_AUXILIARY for a in analysis.get("alerts") or []
+        )
+
+    def test_non_transmembrane_partner_kept_end_to_end(self) -> None:
+        # Through analyze_oligomer: a 7TM receptor (chain A) plus a chain B that
+        # carries a receptor slug but whose annotation is not transmembrane (a
+        # single-pass / soluble partner). The transmembrane gate drops B from the
+        # validated roster, leaving a single validated protomer, so the structure
+        # is classified as a monomer; the monomer guard then returns early and the
+        # auxiliary entry on chain B is kept. (The roster-membership guard on its
+        # own, with a genuine second protomer present, is isolated in the unit
+        # test test_non_transmembrane_partner_not_evicted.)
+        enriched = _make_enriched_with_entities(
+            [
+                _make_entity("lgr4_human", "A"),
+                _make_entity("grm7_human", "B"),
+            ]
+        )
+        partner = _aux("E3 ubiquitin-protein ligase ZNRF3", "B", type_value="Other")
+        data: dict[str, Any] = {
+            "receptor_info": {"chain_id": "A"},
+            "auxiliary_proteins": [partner],
+        }
+        tm_roster = {
+            "A": {"resolved_tms": 7, "total_tms": 7, "status": TM_STATUS_COMPLETE},
+            "B": {"resolved_tms": 1, "total_tms": 1, "status": TM_STATUS_INCOMPLETE},
+        }
+        with patch(
+            "gpcr_tools.validator.oligomer.scan_all_chains_7tm",
+            return_value=(tm_roster, None),
+        ):
+            analyze_oligomer("TEST", data, enriched)
+
+        assert data["auxiliary_proteins"] == [partner]
+        analysis = data["oligomer_analysis"]
+        assert analysis["classification"] == OLIGOMER_MONOMER
+        assert not any(
+            a["type"] == ALERT_PROTOMER_IN_AUXILIARY for a in analysis.get("alerts") or []
+        )
 
     def test_end_to_end_via_analyze_oligomer(self) -> None:
         # Through analyze_oligomer: a heterodimer (grm2 chain A + grm7 chain B)
