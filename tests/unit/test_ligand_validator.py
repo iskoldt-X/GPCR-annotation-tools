@@ -319,8 +319,11 @@ class TestRoleSiteMismatch:
         assert self._mismatch_warnings(_lig(role="PAM", site="orthosteric"))
         assert self._mismatch_warnings(_lig(role="Allosteric agonist", site="orthosteric"))
 
-    def test_functional_role_at_lipidic_warns(self) -> None:
-        assert self._mismatch_warnings(_lig(role="Agonist", site="lipidic"))
+    def test_functional_role_at_membrane_facing_ok(self) -> None:
+        # Any role can occur at any position: a functional role at the
+        # membrane_facing surface (e.g. a lipid-facing positive allosteric modulator) is
+        # legitimate, not a contradiction -> must not be flagged.
+        assert not self._mismatch_warnings(_lig(role="Agonist", site="membrane_facing"))
 
     def test_agonist_at_orthosteric_ok(self) -> None:
         assert not self._mismatch_warnings(_lig(role="Agonist", site="orthosteric"))
@@ -336,8 +339,8 @@ class TestRoleSiteMismatch:
     def test_pam_at_allosteric_ok(self) -> None:
         assert not self._mismatch_warnings(_lig(role="PAM", site="allosteric_7tm"))
 
-    def test_lipid_at_lipidic_ok(self) -> None:
-        assert not self._mismatch_warnings(_lig(type_="lipid", site="lipidic"))
+    def test_lipid_at_membrane_facing_ok(self) -> None:
+        assert not self._mismatch_warnings(_lig(type_="lipid", site="membrane_facing"))
 
     def test_warning_matches_regex(self) -> None:
         warnings = self._mismatch_warnings(_lig(role="PAM", site="orthosteric"))

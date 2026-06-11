@@ -772,8 +772,8 @@ SITE_REF_ALLOSTERIC_7TM: str = "allosteric_7tm"
 SITE_REF_EXTRACELLULAR_VESTIBULE: str = "extracellular_vestibule"
 SITE_REF_INTRACELLULAR: str = "intracellular"
 SITE_REF_EXTRACELLULAR_DOMAIN: str = "extracellular_domain"
-SITE_REF_LIPIDIC: str = (
-    "lipidic"  # membrane/lipid-facing surface site (structural lipids, detergents)
+SITE_REF_MEMBRANE_FACING: str = (
+    "membrane_facing"  # lipid-exposed outer wall of the 7TM bundle (bulk-bilayer surface)
 )
 SITE_REF_UNKNOWN: str = "unknown"
 SITE_REF_VALUES: tuple[str, ...] = (
@@ -782,7 +782,7 @@ SITE_REF_VALUES: tuple[str, ...] = (
     SITE_REF_EXTRACELLULAR_VESTIBULE,
     SITE_REF_INTRACELLULAR,
     SITE_REF_EXTRACELLULAR_DOMAIN,
-    SITE_REF_LIPIDIC,
+    SITE_REF_MEMBRANE_FACING,
     SITE_REF_UNKNOWN,
 )
 

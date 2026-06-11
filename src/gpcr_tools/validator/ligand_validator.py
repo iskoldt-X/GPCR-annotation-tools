@@ -22,7 +22,6 @@ from gpcr_tools.config import (
     LIGAND_TYPE_LIPID,
     LIGAND_TYPE_PEPTIDE,
     LIGAND_TYPE_PROTEIN,
-    SITE_REF_LIPIDIC,
     SITE_REF_ORTHOSTERIC,
     VALIDATION_EXCLUDED_BUFFER,
     VALIDATION_GHOST_LIGAND,
@@ -216,8 +215,6 @@ def _warn_on_role_site_mismatch(ligands: list[Any], warnings: list[str]) -> None
             reason = "type 'lipid' with no functional role at the orthosteric site"
         elif role in _ALLOSTERIC_ROLES and site == SITE_REF_ORTHOSTERIC:
             reason = f"allosteric role '{role}' at the orthosteric site"
-        elif role in _FUNCTIONAL_POCKET_ROLES and site == SITE_REF_LIPIDIC:
-            reason = f"functional role '{role}' at the lipidic (membrane-surface) site"
         if reason:
             warnings.append(
                 f"ROLE_SITE_MISMATCH at 'ligands': '{name}' has {reason} "
