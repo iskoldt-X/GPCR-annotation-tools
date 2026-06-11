@@ -105,7 +105,7 @@ PDF_COMPRESSION_THRESHOLD_BYTES: int = 19 * 1024 * 1024
 # Gemini / annotation configuration
 # ---------------------------------------------------------------------------
 
-GEMINI_MODEL_NAME_DEFAULT: str = "gemini-2.5-pro"
+GEMINI_MODEL_NAME_DEFAULT: str = "gemini-3-flash-preview"
 
 
 def get_gemini_model_name() -> str:
