@@ -378,9 +378,13 @@ def display_oligomer_analysis_panel(main_data: dict) -> None:
         elements.append(sug_text)
 
     # ── Alerts ──
-    if alerts:
+    # ASSEMBLY_MISMATCH is a chain-count vs functional-oligomer note that fires on
+    # most receptor + transducer complexes; it is informational, not actionable, so
+    # it is surfaced below with the assembly cross-check rather than as an alert.
+    actionable_alerts = [a for a in alerts if (a.get("type") or "") != ALERT_ASSEMBLY_MISMATCH]
+    if actionable_alerts:
         alert_text = Text()
-        for alert in alerts:
+        for alert in actionable_alerts:
             atype = alert.get("type") or ""
             style = {
                 ALERT_HALLUCINATION: "bold red",
@@ -390,7 +394,6 @@ def display_oligomer_analysis_panel(main_data: dict) -> None:
                 ALERT_SUSPICIOUS_7TM: "bold yellow on red",
                 ALERT_MULTI_COPY_LIGAND: "bold yellow",
                 ALERT_PROTOMER_IN_AUXILIARY: "bold yellow",
-                ALERT_ASSEMBLY_MISMATCH: "bold yellow",
             }.get(atype) or "white"
             # Keep the "[TYPE]" label present exactly once and use the type
             # only to pick a style. Current validator messages already carry the
@@ -416,6 +419,19 @@ def display_oligomer_analysis_panel(main_data: dict) -> None:
         )
         elements.append(Text())
         elements.append(asm_text)
+
+    # Assembly-vs-GPCR-centric mismatch: informational, shown dim alongside the
+    # cross-check above (the difference between the chain-count assembly and the
+    # functional GPCR-centric oligomer label), not an actionable alert.
+    for alert in alerts:
+        if (alert.get("type") or "") == ALERT_ASSEMBLY_MISMATCH:
+            note = Text()
+            note.append("  ", style="dim")
+            note.append(
+                ensure_alert_prefix(ALERT_ASSEMBLY_MISMATCH, alert.get("message")),
+                style="dim",
+            )
+            elements.append(note)
 
     # ── Panel styling ──
     if override.get("applied"):
