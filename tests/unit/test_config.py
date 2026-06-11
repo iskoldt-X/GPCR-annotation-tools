@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 
 from gpcr_tools.config import (
+    INCIDENTAL_CANDIDATES,
+    LIGAND_EXCLUDE_LIST,
     SOFT_FIELD_KEYS,
     WorkspaceConfig,
     ensure_alert_prefix,
@@ -181,6 +183,38 @@ class TestSoftFieldKeys:
     def test_justification_and_evidence_are_soft(self) -> None:
         assert "site_ref_justification" in SOFT_FIELD_KEYS
         assert "evidence" in SOFT_FIELD_KEYS
+
+
+class TestLigandLists:
+    """Invariants on the curated exclude / incidental lists."""
+
+    def test_exclude_list_keys_on_pdb_codes_not_chemical_names(self) -> None:
+        # The lists key on the PDB three-letter chem_comp id, so a chemical's
+        # human name never matches the enriched data. DMSO and HEPES must be
+        # carried by their actual PDB codes (DMS, EPE), not their names.
+        assert "DMSO" not in LIGAND_EXCLUDE_LIST
+        assert "HEPES" not in LIGAND_EXCLUDE_LIST
+        assert "DMS" in LIGAND_EXCLUDE_LIST
+        assert "EPE" in LIGAND_EXCLUDE_LIST
+
+    def test_detergents_and_matrix_lipids_excluded(self) -> None:
+        # Detergents, LCP matrix lipids and PEG oligomers are never functional
+        # ligands and must be stripped before the model sees them.
+        for code in ("OLC", "OLB", "Y01", "BOG", "SOG", "1PE", "P6G"):
+            assert code in LIGAND_EXCLUDE_LIST
+
+    def test_functional_lipids_are_incidental_never_excluded(self) -> None:
+        # Free fatty acids and other biological lipids can be the endogenous
+        # agonist, so they are model-judged (incidental), never hard-excluded.
+        for code in ("OLA", "S1P", "HXA", "NKP", "ACT", "SIN"):
+            assert code in INCIDENTAL_CANDIDATES
+            assert code not in LIGAND_EXCLUDE_LIST
+
+    def test_incidental_override_member_present(self) -> None:
+        # The incidental fork un-strips a member that is also on the exclude
+        # list (PLM); that override must keep at least one such member so the
+        # bypass path stays exercised.
+        assert "PLM" in (INCIDENTAL_CANDIDATES & LIGAND_EXCLUDE_LIST)
 
 
 @pytest.fixture(autouse=True)
