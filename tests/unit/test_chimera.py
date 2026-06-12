@@ -399,6 +399,34 @@ class TestGetChimeraAnalysis:
             result = get_chimera_analysis("TEST", enriched, cache)
         assert result["status"] == CHIMERA_STATUS_NO_VALID_COMPARISONS
 
+    def test_total_transient_outage_surfaces_transient_abstained(self, tmp_path: Path) -> None:
+        # Every reference times out: no comparison is possible AND the gap is
+        # transient, so transient_abstained is populated -- this is what drives
+        # the detect stage to mark the output for a later re-run.
+        cache = SequenceCache(tmp_path / "seq.json")
+        enriched = _make_enriched(sequence="MMMMMMMMMM" + TRANSDUCIN_A5)
+        with (
+            patch("gpcr_tools.validator.chimera.requests.get", return_value=_resp(503)),
+            patch("gpcr_tools.validator.chimera.time.sleep"),
+        ):
+            result = get_chimera_analysis("TEST", enriched, cache)
+        assert result["status"] == CHIMERA_STATUS_NO_VALID_COMPARISONS
+        assert result["transient_abstained"]  # non-empty: recoverable on re-run
+
+    def test_all_404_references_not_transient_abstained(self, tmp_path: Path) -> None:
+        # A definitive-404 roster is genuinely unresolvable, not a transient gap:
+        # no comparison, but transient_abstained stays empty so the detect output
+        # is NOT marked (it must not be re-run forever).
+        cache = SequenceCache(tmp_path / "seq.json")
+        enriched = _make_enriched(sequence="MMMMMMMMMM" + TRANSDUCIN_A5)
+        with (
+            patch("gpcr_tools.validator.chimera.requests.get", return_value=_resp(404)),
+            patch("gpcr_tools.validator.chimera.time.sleep"),
+        ):
+            result = get_chimera_analysis("TEST", enriched, cache)
+        assert result["status"] == CHIMERA_STATUS_NO_VALID_COMPARISONS
+        assert result["transient_abstained"] == []
+
     def test_null_pdbx_description(self, tmp_path: Path) -> None:
         """A null pdbx_description must not crash."""
         cache = SequenceCache(tmp_path / "seq.json")
@@ -673,3 +701,39 @@ class TestGetSequenceFromUniprot:
         assert seq is None
         assert mock_get.call_count == 1
         assert self._ACC not in cache
+
+    def test_transient_failure_marks_accession_unavailable(self, tmp_path: Path) -> None:
+        cache = SequenceCache(tmp_path / "seq.json")
+        with (
+            patch("gpcr_tools.validator.chimera.requests.get", return_value=_resp(503)),
+            patch("gpcr_tools.validator.chimera.time.sleep"),
+        ):
+            get_sequence_from_uniprot(self._ACC, cache)
+        assert cache.is_unavailable(self._ACC)  # remembered for this run
+        assert self._ACC not in cache  # but never frozen as a cached fact
+
+    def test_404_does_not_mark_unavailable(self, tmp_path: Path) -> None:
+        # A 404 is a definitive verdict, not a transient outage, so it must not
+        # join the per-run unavailable guard (which drives the detect "degraded"
+        # marker and the don't-re-request short-circuit).
+        cache = SequenceCache(tmp_path / "seq.json")
+        with (
+            patch("gpcr_tools.validator.chimera.requests.get", return_value=_resp(404)),
+            patch("gpcr_tools.validator.chimera.time.sleep"),
+        ):
+            get_sequence_from_uniprot(self._ACC, cache)
+        assert not cache.is_unavailable(self._ACC)
+
+    def test_unavailable_accession_short_circuits_without_request(self, tmp_path: Path) -> None:
+        # After a transient failure this run, a later call abstains immediately
+        # instead of re-hitting the dead endpoint once per PDB across the batch.
+        cache = SequenceCache(tmp_path / "seq.json")
+        with (
+            patch("gpcr_tools.validator.chimera.requests.get", return_value=_resp(503)) as mock_get,
+            patch("gpcr_tools.validator.chimera.time.sleep"),
+        ):
+            get_sequence_from_uniprot(self._ACC, cache)
+            count_after_first = mock_get.call_count
+            seq = get_sequence_from_uniprot(self._ACC, cache)
+        assert seq is None
+        assert mock_get.call_count == count_after_first  # no further requests

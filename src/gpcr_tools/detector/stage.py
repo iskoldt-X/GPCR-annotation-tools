@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from gpcr_tools.config import get_config
+from gpcr_tools.config import DETECT_INCOMPLETE_MARKER_KEY, get_config
 from gpcr_tools.detector.coupling import detect_coupling_protomer
 from gpcr_tools.detector.geometry import detect_dual_role_ligands
 from gpcr_tools.detector.gprotein import detect_g_protein_identity
@@ -47,10 +47,26 @@ def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
             os.remove(tmp)
 
 
+def _detect_is_incomplete(path: Path) -> bool:
+    """Whether the detect output at *path* must be recomputed on a resume.
+
+    True when the file is unreadable/corrupt (redo it) or carries the incomplete
+    marker (a transient reference-fetch failure degraded it). A clean, readable
+    record -- including one that legitimately produced no signal -- is complete
+    and skipped, so a healthy run is never needlessly recomputed.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return True
+    return bool(data.get(DETECT_INCOMPLETE_MARKER_KEY))
+
+
 def run_detect(
     pdb_id: str,
     *,
     skip_api_checks: bool = False,
+    force: bool = False,
     cache: SequenceCache | None = None,
 ) -> list[DetectSignal]:
     """Run the detectors on one PDB, persist ``detect/{pdb}.json``, return signals.
@@ -59,11 +75,22 @@ def run_detect(
     UniProt reference sequences). The detect file is written regardless, so the
     stage's output is always present and inspectable.
 
+    Top-up resume: a PDB whose detect output already exists and is complete is
+    skipped (its persisted signals are returned). One that is missing, unreadable,
+    or marked incomplete -- a transient reference-fetch failure degraded it -- is
+    recomputed. *force* recomputes regardless.
+
     A *cache* may be supplied by a caller running many PDBs so fetched sequences
     persist across them; the caller then owns saving it. When none is given (a
     single-PDB run) one is created and saved here.
     """
     cfg = get_config()
+    out_path = cfg.detect_dir / f"{pdb_id}.json"
+    prior_incomplete = out_path.is_file() and _detect_is_incomplete(out_path)
+    if not force and out_path.is_file() and not prior_incomplete:
+        logger.debug("[detect] %s: complete output exists; skipping.", pdb_id)
+        return load_detect_signals(pdb_id)
+
     enriched_path = cfg.enriched_dir / f"{pdb_id}.json"
     if not enriched_path.is_file():
         logger.warning("[detect] %s: no enriched data found; skipping.", pdb_id)
@@ -83,11 +110,19 @@ def run_detect(
     signals.extend(detect_class_c_multi_protomer(pdb_id, entry))
 
     # Detectors needing a network fetch (UniProt references, coordinate files).
+    detect_incomplete = False
     if not skip_api_checks:
         owns_cache = cache is None
         if cache is None:
             cache = SequenceCache(cfg.cache_dir / _SEQUENCE_CACHE_NAME)
-        signals.extend(detect_g_protein_identity(pdb_id, entry, cache))
+        gp_signals, gp_degraded = detect_g_protein_identity(pdb_id, entry, cache)
+        signals.extend(gp_signals)
+        detect_incomplete = gp_degraded
+        # The coordinate-file detectors below deliberately do NOT contribute to
+        # detect_incomplete: load_structure returns None indistinguishably for a
+        # transient fetch failure, a parse error, and a genuinely apo/absent
+        # structure, so marking on it would re-run apo structures forever. Only
+        # the UniProt-reference path above has a transient-vs-definitive signal.
         signals.extend(detect_dual_role_ligands(pdb_id, entry, cfg.cache_dir))
         signals.extend(detect_site_refs(pdb_id, entry, cfg.cache_dir))
         signals.extend(detect_coupling_protomer(pdb_id, entry, cfg.cache_dir))
@@ -95,17 +130,27 @@ def run_detect(
             cache.save()
     # Future detectors (entity reconciliation, ...) append here.
 
-    out_path = cfg.detect_dir / f"{pdb_id}.json"
-    _atomic_write_json(
-        out_path,
-        {"pdb_id": pdb_id, "signals": [s.to_dict() for s in signals]},
-    )
+    payload: dict[str, Any] = {"pdb_id": pdb_id, "signals": [s.to_dict() for s in signals]}
+    # Stamp the marker on a fresh transient failure, and preserve an existing one
+    # when API checks were skipped this pass -- a metadata-only run cannot resolve
+    # the sequence-fetch gap that set it, so it must not silently clear it. A clean
+    # full run omits the marker, which clears a stale one on rewrite.
+    if detect_incomplete or (skip_api_checks and prior_incomplete):
+        payload[DETECT_INCOMPLETE_MARKER_KEY] = True
+    _atomic_write_json(out_path, payload)
     logger.info("[detect] %s: %d signal(s) -> %s", pdb_id, len(signals), out_path)
     return signals
 
 
-def run_detect_stage(pdb_id: str | None = None, *, skip_api_checks: bool = False) -> dict[str, int]:
-    """Run detect on one PDB or every enriched PDB. Returns {pdb_id: signal count}."""
+def run_detect_stage(
+    pdb_id: str | None = None, *, skip_api_checks: bool = False, force: bool = False
+) -> dict[str, int]:
+    """Run detect on one PDB or every enriched PDB. Returns {pdb_id: signal count}.
+
+    By default this tops up: PDBs with a complete detect output are skipped and
+    only missing or transiently-degraded ones are (re)computed. *force* recomputes
+    every PDB.
+    """
     cfg = get_config()
 
     # Fail fast on a stale / missing storage contract before any detection work,
@@ -125,7 +170,8 @@ def run_detect_stage(pdb_id: str | None = None, *, skip_api_checks: bool = False
     # PDB are reused (and persisted) rather than refetched for each one.
     cache = None if skip_api_checks else SequenceCache(cfg.cache_dir / _SEQUENCE_CACHE_NAME)
     summary = {
-        pid: len(run_detect(pid, skip_api_checks=skip_api_checks, cache=cache)) for pid in targets
+        pid: len(run_detect(pid, skip_api_checks=skip_api_checks, force=force, cache=cache))
+        for pid in targets
     }
     if cache is not None:
         cache.save()

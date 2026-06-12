@@ -730,6 +730,14 @@ CHIMERA_A5_ANCHOR_MIN_SCORE: int = 8
 # that drifts upstream is eventually refetched instead of persisting forever.
 SEQUENCE_CACHE_TTL_DAYS: int = 30
 
+# Top-level marker stamped on a detect output that was written while a
+# sequence-based detector transiently failed to fetch a UniProt reference (a
+# timeout or 5xx -- NOT a definitive 404). The detect resume skip recomputes a
+# record carrying this marker (and only such records), so a G-protein identity call
+# degraded by an upstream outage self-heals on a later run, while a structure
+# that legitimately produced no signal carries no marker and is never re-run.
+DETECT_INCOMPLETE_MARKER_KEY: str = "_detect_incomplete"
+
 # Detect-stage locus anchors (a signal's target_ref). Shared so detectors that
 # anchor to the same top-level annotation block use one string, and the curate
 # validation bucketing routes them consistently.

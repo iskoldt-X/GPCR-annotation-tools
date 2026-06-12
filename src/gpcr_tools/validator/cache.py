@@ -76,6 +76,13 @@ class SequenceCache:
         self._path = path
         self._ttl_seconds = ttl_days * 86400
         self._data: dict[str, dict[str, Any]] = {}
+        # Accessions that transiently failed to fetch THIS run. In-memory only:
+        # never loaded or saved, so a transient outage is never frozen as a
+        # cached fact and a fresh run re-probes. Lets one run skip re-requesting
+        # a reference that already failed, instead of re-hitting the dead
+        # endpoint once per PDB across the whole batch. Assumes serial use (the
+        # detect stage runs PDBs sequentially); not thread/process-safe.
+        self._unavailable: set[str] = set()
         self._load()
 
     def _load(self) -> None:
@@ -116,8 +123,16 @@ class SequenceCache:
         """Store a sequence string, stamped with the fetch time."""
         self._data[key] = {"seq": value, "fetched_at": time.time() if now is None else now}
 
+    def mark_unavailable(self, key: str) -> None:
+        """Record that *key* transiently failed to fetch this run (in-memory)."""
+        self._unavailable.add(key)
+
+    def is_unavailable(self, key: str) -> bool:
+        """Whether *key* already transiently failed to fetch this run."""
+        return key in self._unavailable
+
     def save(self) -> None:
-        """Persist cache to disk using atomic write."""
+        """Persist cache to disk using atomic write (the unavailable set is not saved)."""
         _atomic_json_write(self._path, self._data)
 
 

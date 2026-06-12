@@ -183,6 +183,13 @@ def cli() -> None:
         default=False,
         help="Skip sequence-based detectors that need UniProt reference fetches.",
     )
+    detect_parser.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="Recompute every detect output, including ones already complete "
+        "(default tops up: skip complete outputs, redo only missing or degraded ones).",
+    )
 
     # aggregate --------------------------------------------------------
     agg_parser = subparsers.add_parser(
@@ -360,7 +367,9 @@ def cli() -> None:
     elif args.command == "detect":
         from gpcr_tools.detector.stage import run_detect_stage
 
-        summary = run_detect_stage(args.pdb_id, skip_api_checks=args.skip_api_checks)
+        summary = run_detect_stage(
+            args.pdb_id, skip_api_checks=args.skip_api_checks, force=args.force
+        )
         total = sum(summary.values())
         print(f"Detect complete: {len(summary)} PDB(s), {total} signal(s).")
 

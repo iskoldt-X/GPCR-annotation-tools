@@ -27,16 +27,22 @@ def detect_g_protein_identity(
     pdb_id: str,
     enriched_entry: dict[str, Any],
     cache: SequenceCache,
-) -> list[DetectSignal]:
+) -> tuple[list[DetectSignal], bool]:
     """Emit at most one G-protein identity signal for *enriched_entry*.
 
     A cleanly resolved subtype yields an advisory signal (evidence for the
     prompt). A family-only / indistinguishable / low-confidence result yields a
     review signal (routes the subtype to a human).
+
+    Returns ``(signals, degraded)`` where *degraded* is True when one or more
+    reference sequences transiently failed to fetch (timeout/5xx, not a 404), so
+    the result is weaker than the input warrants and a later run should recompute
+    it once UniProt recovers. A genuinely G-alpha-free structure is not degraded.
     """
     result = get_chimera_analysis(pdb_id, enriched_entry, cache)
+    degraded = bool(result.get("transient_abstained"))
     if result.get("status") != CHIMERA_STATUS_SUCCESS:
-        return []
+        return [], degraded
 
     family = result.get("family")
     subtype = result.get("subtype")
@@ -60,7 +66,7 @@ def detect_g_protein_identity(
                 payload=payload,
                 severity=SEVERITY_ADVISORY,
             )
-        ]
+        ], degraded
 
     members = ", ".join(candidates) or "no recognised subtype"
     if result.get("subtype_resolution") == CHIMERA_SUBTYPE_LOW_CONFIDENCE:
@@ -86,4 +92,4 @@ def detect_g_protein_identity(
             payload=payload,
             severity=SEVERITY_REVIEW,
         )
-    ]
+    ], degraded
