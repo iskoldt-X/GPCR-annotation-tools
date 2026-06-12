@@ -36,7 +36,18 @@ PUBCHEM_REST_URL: str = "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound"
 CROSSREF_API_URL: str = "https://api.crossref.org/works"
 UNPAYWALL_API_URL: str = "https://api.unpaywall.org/v2"
 
-NCBI_PMC_OA_URL: str = "https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi"
+# PMC open-access PDFs moved off the legacy FTP tree to an AWS S3 open-data
+# bucket (the old oa_pdf FTP/HTTPS paths now 404, and the web reader is behind a
+# bot challenge). The per-article metadata JSON at {base}/metadata/{PMCID}.1.json
+# gives the authoritative object path (an ``s3://`` URI) for the PDF.
+PMC_S3_BASE_URL: str = "https://pmc-oa-opendata.s3.amazonaws.com"
+# NCBI ID Converter: map a PMID to a PMCID, promoting a DOI-only paper into the
+# PMC open-access route when a free full text exists.
+NCBI_IDCONV_URL: str = "https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/"
+# A downloaded "PDF" smaller than this is rejected: too small to be a real paper,
+# so it is almost certainly an error stub or truncated stream, not a fed-to-model
+# article.
+PDF_MIN_VALID_BYTES: int = 2048
 
 # ---------------------------------------------------------------------------
 # HTTP User-Agent strings
