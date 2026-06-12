@@ -17,6 +17,7 @@ from gpcr_tools.fetcher.enricher import (
     _fetch_chem_comp_descriptors,
     _get_pubchem_cid,
     _get_pubchem_synonyms,
+    _tag_polymer_ligand_types,
     enrich_single_pdb,
 )
 
@@ -88,20 +89,106 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 class TestDetermineLigandType:
-    def test_small_molecule(self) -> None:
-        assert _determine_ligand_type(385.4) == "small-molecule"
+    def test_lipid_from_whitelist(self) -> None:
+        # Cholesterol, palmitic acid and myristic acid are genuine lipids on the
+        # curated whitelist regardless of CCD type.
+        for comp_id in ("CLR", "PLM", "MYR"):
+            assert _determine_ligand_type(comp_id, {"type": "non-polymer"}) == "lipid"
 
-    def test_peptide(self) -> None:
-        assert _determine_ligand_type(1200.0) == "peptide"
+    def test_non_lipid_acids_are_small_molecule(self) -> None:
+        # Short-chain acids and retinal are deliberately excluded from the lipid
+        # whitelist and stay small molecules.
+        for comp_id in ("ACT", "SIN", "RET"):
+            assert _determine_ligand_type(comp_id, {"type": "non-polymer"}) == "small-molecule"
 
-    def test_boundary(self) -> None:
-        assert _determine_ligand_type(900.0) == "peptide"
+    def test_heavy_nonpolymer_is_not_peptide(self) -> None:
+        # Heavy detergents (e.g. maltose-neopentyl-glycol surrogates) are small
+        # molecules; the old weight proxy wrongly called them peptides.
+        for comp_id in ("AV0", "BYI", "WB2"):
+            assert (
+                _determine_ligand_type(comp_id, {"type": "non-polymer", "formula_weight": 1050.0})
+                == "small-molecule"
+            )
 
-    def test_none(self) -> None:
-        assert _determine_ligand_type(None) == "unknown"
+    def test_saccharide_routes_to_small_molecule(self) -> None:
+        assert _determine_ligand_type("NAG", {"type": "D-saccharide"}) == "small-molecule"
 
-    def test_invalid_string(self) -> None:
-        assert _determine_ligand_type("not_a_number") == "unknown"
+    def test_free_amino_acid_is_small_molecule(self) -> None:
+        assert _determine_ligand_type("GLU", {"type": "L-peptide linking"}) == "small-molecule"
+
+    def test_nucleotide_monomer_is_na(self) -> None:
+        assert _determine_ligand_type("A", {"type": "RNA linking"}) == "na"
+        assert _determine_ligand_type("DA", {"type": "DNA linking"}) == "na"
+
+    def test_unknown_type_defaults_small_molecule(self) -> None:
+        assert _determine_ligand_type("ZMA", {}) == "small-molecule"
+
+    def test_missing_comp_id_defaults_small_molecule(self) -> None:
+        # A nonpolymer entity with no comp_id cannot hit the lipid whitelist and
+        # has no CCD type to route on; it falls through to small-molecule.
+        assert _determine_ligand_type(None, {}) == "small-molecule"
+
+    def test_lipid_whitelist_honored_without_ccd_type(self) -> None:
+        # Older fetches lack chem_comp.type; the lipid whitelist must still win.
+        assert _determine_ligand_type("CLR", {}) == "lipid"
+
+
+class TestTagPolymerLigandTypes:
+    @staticmethod
+    def _poly(
+        poly_type: str,
+        length: int | None,
+        uniprot_ids: list[str] | None = None,
+        uniprots: list[dict[str, Any]] | None = None,
+        reference_sequence_identifiers: list[Any] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "entity_poly": {"type": poly_type, "rcsb_sample_sequence_length": length},
+            "rcsb_polymer_entity_container_identifiers": {
+                "uniprot_ids": uniprot_ids,
+                "reference_sequence_identifiers": reference_sequence_identifiers,
+            },
+            "uniprots": uniprots or [],
+        }
+
+    def _run(self, polymers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        pdb_data = {"data": {"entry": {"polymer_entities": polymers}}}
+        _tag_polymer_ligand_types(pdb_data)
+        return polymers
+
+    def test_short_peptide_without_uniprot_is_peptide(self) -> None:
+        poly = self._poly("polypeptide(L)", 12)
+        self._run([poly])
+        assert poly["gpcrdb_determined_type"] == "peptide"
+
+    def test_polypeptide_with_uniprot_is_skipped(self) -> None:
+        poly = self._poly("polypeptide(L)", 12, uniprot_ids=["P12345"])
+        self._run([poly])
+        assert "gpcrdb_determined_type" not in poly
+
+    def test_polypeptide_with_uniprot_object_is_skipped(self) -> None:
+        poly = self._poly("polypeptide(L)", 12, uniprots=[{"rcsb_id": "P12345"}])
+        self._run([poly])
+        assert "gpcrdb_determined_type" not in poly
+
+    def test_polypeptide_with_reference_sequence_is_skipped(self) -> None:
+        # A non-UniProt cross-reference (PDB / EMBL / etc.) still marks a resolved
+        # entity, not a peptide ligand, so the hint must not be set.
+        poly = self._poly(
+            "polypeptide(L)", 12, reference_sequence_identifiers=[{"database_accession": "1ABC"}]
+        )
+        self._run([poly])
+        assert "gpcrdb_determined_type" not in poly
+
+    def test_long_polypeptide_is_skipped(self) -> None:
+        poly = self._poly("polypeptide(L)", 350)
+        self._run([poly])
+        assert "gpcrdb_determined_type" not in poly
+
+    def test_nucleotide_polymer_is_na(self) -> None:
+        poly = self._poly("polyribonucleotide", 20)
+        self._run([poly])
+        assert poly["gpcrdb_determined_type"] == "na"
 
 
 # ---------------------------------------------------------------------------

@@ -65,6 +65,8 @@ from gpcr_tools.detector.signals import (
     to_critical_warnings,
 )
 from gpcr_tools.detector.stage import load_detect_signals
+from gpcr_tools.fetcher.cache import JsonCache
+from gpcr_tools.validator.api_clients import SynonymCache
 from gpcr_tools.validator.cache import SequenceCache, ValidationCache
 from gpcr_tools.validator.chimera import get_chimera_analysis
 from gpcr_tools.validator.integrity_checker import validate_all
@@ -462,6 +464,7 @@ def aggregate_pdb(
     skip_api_checks: bool = False,
     validation_cache: ValidationCache | None = None,
     sequence_cache: SequenceCache | None = None,
+    synonym_cache: SynonymCache | None = None,
 ) -> AggregateResult:
     """Run the full aggregation + validation pipeline for a single PDB.
 
@@ -478,6 +481,11 @@ def aggregate_pdb(
         10. Chimera analysis
         11. Assemble validation report
         12. Atomic write block
+
+    The ``validation_cache`` / ``sequence_cache`` / ``synonym_cache`` are supplied by
+    the batch ``aggregate_all`` path. Single-PDB CLI invocations pass none, so the
+    cache-gated API steps (chimera analysis and the PubChem synonym gate) are skipped
+    there, consistent with the existing offline behaviour of the single-PDB path.
 
     Use ``if enriched is None:`` — NOT ``if not enriched:`` (an empty dict is valid).
     """
@@ -518,7 +526,12 @@ def aggregate_pdb(
 
         # 6. Ligand validation (mutates best_run_data, returns warnings)
         all_warnings: list[str] = []
-        ligand_warnings = validate_and_enrich_ligands(pdb_id, best_run_data, enriched)
+        ligand_warnings = validate_and_enrich_ligands(
+            pdb_id,
+            best_run_data,
+            enriched,
+            synonym_cache=synonym_cache if not skip_api_checks else None,
+        )
         all_warnings.extend(ligand_warnings)
 
         # 7. Receptor validation (mutates best_run_data, returns warnings)
@@ -599,6 +612,7 @@ def aggregate_all(
     try:
         validation_cache = ValidationCache(cfg.cache_dir / "id_validation_cache.json")
         sequence_cache = SequenceCache(cfg.cache_dir / "uniprot_sequence_cache.json")
+        synonym_cache = JsonCache(cfg.cache_dir / "pubchem_synonym_cache.json")
     except Exception as exc:
         logger.error("Failed to initialize caches: %s", exc)
         return []
@@ -622,6 +636,7 @@ def aggregate_all(
                 skip_api_checks=skip_api_checks,
                 validation_cache=validation_cache,
                 sequence_cache=sequence_cache,
+                synonym_cache=synonym_cache,
             )
             results.append(result)
             status = AGG_STATUS_COMPLETED if result.success else AGG_STATUS_FAILED
@@ -640,5 +655,9 @@ def aggregate_all(
         sequence_cache.save()
     except OSError as exc:
         logger.warning("Failed to save sequence cache: %s", exc)
+    try:
+        synonym_cache.save()
+    except OSError as exc:
+        logger.warning("Failed to save synonym cache: %s", exc)
 
     return results

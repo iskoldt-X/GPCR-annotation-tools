@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 from gpcr_tools.config import (
     VALIDATION_EXCLUDED_BUFFER,
@@ -16,7 +17,37 @@ from gpcr_tools.config import (
     VALIDATION_MATCHED_SMALL_MOLECULE,
     VALIDATION_SKIPPED_APO,
 )
+from gpcr_tools.validator import api_clients
+from gpcr_tools.validator.api_clients import check_pubchem_synonym_match
 from gpcr_tools.validator.ligand_validator import validate_and_enrich_ligands
+
+
+class _FakeSynonymCache:
+    """In-memory stand-in for the enrichment JsonCache (CID -> synonym list)."""
+
+    def __init__(self, initial: dict[str, list[str]] | None = None) -> None:
+        self._data: dict[str, Any] = dict(initial or {})
+
+    def has(self, key: str) -> bool:
+        return key in self._data
+
+    def get(self, key: str) -> Any | None:
+        return self._data.get(key)
+
+    def set(self, key: str, value: Any) -> None:
+        self._data[key] = value
+
+
+def _mock_synonym_response(status: int, synonyms: list[str] | None = None) -> MagicMock:
+    """Build a mocked PubChem synonyms HTTP response."""
+    resp = MagicMock()
+    resp.status_code = status
+    if synonyms is not None:
+        resp.json.return_value = {"InformationList": {"Information": [{"Synonym": synonyms}]}}
+    else:
+        resp.json.return_value = {}
+    return resp
+
 
 # Regex contract from Blood Lesson 3
 _WARNING_REGEX = re.compile(r"at ['\"]([^'\"]+)['\"]")
@@ -607,3 +638,236 @@ class TestMultipleAgonists:
             _lig(name="L-glutamate", comp="GLU", role="Agonist"),
         ]
         assert not self._agonist_warnings(ligands)
+
+
+class TestCheckPubChemSynonymMatch:
+    """The synonym gate confirms a CID actually names the reported molecule.
+
+    A real-but-unrelated CID (one that an existence check would wave through) is
+    caught because its own synonym list does not include the molecule's name.
+    """
+
+    def test_name_in_synonyms_returns_true(self) -> None:
+        cache = _FakeSynonymCache()
+        with patch.object(
+            api_clients.requests,
+            "get",
+            return_value=_mock_synonym_response(200, ["Foo Acid", "ExampleDrug", "12345-67-8"]),
+        ):
+            assert check_pubchem_synonym_match("111", ["ExampleDrug"], cache) is True
+
+    def test_synonym_match_via_reported_synonyms_union(self) -> None:
+        # The bare name misses, but a reported synonym is in the CID's list:
+        # matching the UNION rescues a correct CID whose canonical name is an
+        # IUPAC string the short name never matches.
+        cache = _FakeSynonymCache()
+        with patch.object(
+            api_clients.requests,
+            "get",
+            return_value=_mock_synonym_response(200, ["N-acetyl-example-amide"]),
+        ):
+            verdict = check_pubchem_synonym_match(
+                "111", ["ShortName", "N-acetyl-example-amide"], cache
+            )
+        assert verdict is True
+
+    def test_normalization_ignores_case_and_punctuation(self) -> None:
+        cache = _FakeSynonymCache()
+        with patch.object(
+            api_clients.requests,
+            "get",
+            return_value=_mock_synonym_response(200, ["Example-Drug (free base)"]),
+        ):
+            # Candidate differs only by case/spacing/punctuation -> still matches.
+            assert check_pubchem_synonym_match("111", ["example drug free base"], cache) is True
+
+    def test_no_overlap_returns_false(self) -> None:
+        cache = _FakeSynonymCache()
+        with patch.object(
+            api_clients.requests,
+            "get",
+            return_value=_mock_synonym_response(200, ["Unrelated compound", "C11H16N3O8"]),
+        ):
+            assert check_pubchem_synonym_match("222", ["ExampleDrug"], cache) is False
+
+    def test_http_404_returns_false(self) -> None:
+        cache = _FakeSynonymCache()
+        with patch.object(api_clients.requests, "get", return_value=_mock_synonym_response(404)):
+            assert check_pubchem_synonym_match("333", ["ExampleDrug"], cache) is False
+        # 404 is a definitive answer and is cached as an empty list.
+        assert cache.get("333") == []
+
+    def test_network_error_returns_none_and_not_cached(self) -> None:
+        cache = _FakeSynonymCache()
+        with patch.object(
+            api_clients.requests,
+            "get",
+            side_effect=api_clients.requests.RequestException("boom"),
+        ):
+            assert check_pubchem_synonym_match("444", ["ExampleDrug"], cache) is None
+        # A network failure must never poison the cache with a false negative.
+        assert not cache.has("444")
+
+    def test_unexpected_status_returns_none_and_not_cached(self) -> None:
+        cache = _FakeSynonymCache()
+        with patch.object(api_clients.requests, "get", return_value=_mock_synonym_response(503)):
+            assert check_pubchem_synonym_match("555", ["ExampleDrug"], cache) is None
+        assert not cache.has("555")
+
+    def test_empty_candidates_returns_none_without_call(self) -> None:
+        cache = _FakeSynonymCache()
+        with patch.object(api_clients.requests, "get") as mock_get:
+            assert check_pubchem_synonym_match("666", [], cache) is None
+            assert check_pubchem_synonym_match("666", ["", "  "], cache) is None
+            mock_get.assert_not_called()
+
+    def test_non_numeric_cid_returns_false(self) -> None:
+        cache = _FakeSynonymCache()
+        with patch.object(api_clients.requests, "get") as mock_get:
+            assert check_pubchem_synonym_match("not-a-cid", ["ExampleDrug"], cache) is False
+            mock_get.assert_not_called()
+
+    def test_cached_list_reused_without_network(self) -> None:
+        cache = _FakeSynonymCache({"777": ["ExampleDrug"]})
+        with patch.object(api_clients.requests, "get") as mock_get:
+            assert check_pubchem_synonym_match("777", ["ExampleDrug"], cache) is True
+            assert check_pubchem_synonym_match("777", ["Other"], cache) is False
+            mock_get.assert_not_called()
+
+    def test_200_result_cached_for_reuse(self) -> None:
+        cache = _FakeSynonymCache()
+        with patch.object(
+            api_clients.requests,
+            "get",
+            return_value=_mock_synonym_response(200, ["ExampleDrug"]),
+        ) as mock_get:
+            check_pubchem_synonym_match("888", ["ExampleDrug"], cache)
+            check_pubchem_synonym_match("888", ["ExampleDrug"], cache)
+            assert mock_get.call_count == 1
+        assert cache.get("888") == ["ExampleDrug"]
+
+
+class TestKeylessPubChemGate:
+    """The validator gates a model-supplied CID only for keyless ligands (no matched
+    chemical component), blanking a wrong CID and abstaining on network failure; a
+    matched small molecule's authoritative CID is never touched.
+    """
+
+    def _gate_warnings(self, ligands: list[dict[str, Any]], cache: _FakeSynonymCache) -> list[str]:
+        return validate_and_enrich_ligands(
+            "TEST", {"ligands": ligands}, _make_enriched(), synonym_cache=cache
+        )
+
+    def test_correct_cid_kept(self) -> None:
+        # A keyless peptide with a CID whose synonyms include its name -> kept.
+        cache = _FakeSynonymCache({"111": ["ExampleDrug", "some-iupac-name"]})
+        lig = {
+            "name": "ExampleDrug",
+            "chem_comp_id": "None",
+            "type": "peptide",
+            "pubchem_id": "111",
+        }
+        warnings = self._gate_warnings([lig], cache)
+        assert lig["pubchem_id"] == "111"
+        assert not any("Mismatch" in w for w in warnings)
+
+    def test_correct_cid_kept_via_reported_synonym(self) -> None:
+        cache = _FakeSynonymCache({"111": ["n-acetyl-example-amide"]})
+        lig = {
+            "name": "example peptide",
+            "chem_comp_id": "None",
+            "type": "peptide",
+            "pubchem_id": "111",
+            "synonyms": ["n-acetyl-example-amide"],
+        }
+        warnings = self._gate_warnings([lig], cache)
+        assert lig["pubchem_id"] == "111"
+        assert not any("Mismatch" in w for w in warnings)
+
+    def test_wrong_cid_blanked_and_warned(self) -> None:
+        # A real-but-unrelated CID: synonyms do not include the molecule's name.
+        cache = _FakeSynonymCache({"222": ["Unrelated compound"]})
+        lig = {
+            "name": "ExampleDrug",
+            "chem_comp_id": "None",
+            "type": "peptide",
+            "pubchem_id": "222",
+        }
+        warnings = self._gate_warnings([lig], cache)
+        assert lig["pubchem_id"] is None
+        assert any("Mismatch" in w and "'222'" in w and "ExampleDrug" in w for w in warnings)
+        assert any(_WARNING_REGEX.search(w) for w in warnings if "Mismatch" in w)
+
+    def test_network_abstention_leaves_value_unchanged(self) -> None:
+        cache = _FakeSynonymCache()
+        lig = {
+            "name": "ExampleDrug",
+            "chem_comp_id": "None",
+            "type": "peptide",
+            "pubchem_id": "111",
+        }
+        with patch.object(
+            api_clients.requests,
+            "get",
+            side_effect=api_clients.requests.RequestException("offline"),
+        ):
+            warnings = self._gate_warnings([lig], cache)
+        assert lig["pubchem_id"] == "111"  # never blanked on a network error
+        assert any("API_UNAVAILABLE" in w and "'111'" in w for w in warnings)
+
+    def test_matched_small_molecule_cid_never_gated(self) -> None:
+        # A small molecule that matched enriched metadata carries api_pubchem_cid;
+        # its authoritative CID must never be synonym-checked or blanked.
+        data: dict[str, Any] = {
+            "ligands": [{"chem_comp_id": "ATP", "name": "Adenosine", "pubchem_id": "999"}]
+        }
+        enriched = _make_enriched(nonpolymer=[_np_entity("ATP", pubchem_cid="12345")])
+        cache = _FakeSynonymCache()
+        with patch.object(api_clients.requests, "get") as mock_get:
+            warnings = validate_and_enrich_ligands("TEST", data, enriched, synonym_cache=cache)
+            mock_get.assert_not_called()
+        lig = data["ligands"][0]
+        assert "api_pubchem_cid" in lig
+        assert not any("Mismatch" in w for w in warnings)
+
+    def test_no_cache_keeps_offline_no_gate(self) -> None:
+        # Without a cache the gate is skipped entirely (no network), preserving the
+        # offline contract for callers that do not opt in.
+        lig = {
+            "name": "ExampleDrug",
+            "chem_comp_id": "None",
+            "type": "peptide",
+            "pubchem_id": "222",
+        }
+        with patch.object(api_clients.requests, "get") as mock_get:
+            warnings = validate_and_enrich_ligands("TEST", {"ligands": [lig]}, _make_enriched())
+            mock_get.assert_not_called()
+        assert lig["pubchem_id"] == "222"  # untouched
+        assert not any("Mismatch" in w for w in warnings)
+
+    def test_none_pubchem_id_skipped(self) -> None:
+        # A keyless ligand whose model pubchem_id is the 'None' sentinel has nothing
+        # to gate and must not trigger a network call.
+        cache = _FakeSynonymCache()
+        lig = {
+            "name": "example peptide",
+            "chem_comp_id": "None",
+            "type": "peptide",
+            "pubchem_id": "None",
+        }
+        with patch.object(api_clients.requests, "get") as mock_get:
+            warnings = self._gate_warnings([lig], cache)
+            mock_get.assert_not_called()
+        assert not any("Mismatch" in w or "API_UNAVAILABLE" in w for w in warnings)
+
+    def test_no_candidate_names_makes_no_call_and_no_warning(self) -> None:
+        # A keyless ligand with a CID but no name and no usable synonyms cannot be
+        # verified, makes no network call, and must NOT emit an [API_UNAVAILABLE]
+        # note (which would wrongly imply a network failure that never happened).
+        cache = _FakeSynonymCache()
+        lig = {"name": "", "chem_comp_id": "None", "type": "peptide", "pubchem_id": "222"}
+        with patch.object(api_clients.requests, "get") as mock_get:
+            warnings = self._gate_warnings([lig], cache)
+            mock_get.assert_not_called()
+        assert lig["pubchem_id"] == "222"  # untouched
+        assert not any("Mismatch" in w or "API_UNAVAILABLE" in w for w in warnings)

@@ -718,6 +718,132 @@ class TestLowConfidenceConsensus:
         assert any(f["path"] == "auxiliary_proteins[nb35|ch:b].type.value" for f in flags)
 
 
+class TestNameCaseFolding:
+    """A name field whose values differ only by letter case is one entity the
+    runs agree on; a pure-case split must not be surfaced for review. Genuine
+    spelling differences, and any non-name field, must still surface.
+    """
+
+    def test_pure_case_split_collapses_to_single_candidate(self) -> None:
+        # Five "Nanobody Nb52" vs five "nanobody Nb52" differ only by case:
+        # the vote collapses to one canonical candidate so the margin logic
+        # never sees a near-tie.
+        runs = [{"name": "Nanobody Nb52"}] * 5 + [{"name": "nanobody Nb52"}] * 5
+        majority, votes = get_majority_votes(runs)
+        assert isinstance(majority["name"], str)
+        assert majority["name"].casefold() == "nanobody nb52"
+        # Collapsed to a single candidate carrying the full vote count.
+        assert votes["name"] == {majority["name"]: 10}
+
+    def test_collapsed_pure_case_vote_not_flagged_as_near_tie(self) -> None:
+        # End to end: the pure-case 5:5 split must not produce a needs_review
+        # near-tie discrepancy once the vote is collapsed.
+        runs = [{"name": "Palmitic Acid"}] * 5 + [{"name": "Palmitic acid"}] * 5
+        majority, votes = get_majority_votes(runs)
+        best = runs[0]
+        discs = find_discrepancies(best, majority, votes)
+        assert discs == []
+
+    def test_canonical_casing_is_deterministic(self) -> None:
+        # Most-common original spelling wins; an even split breaks to fewest
+        # uppercase then lexicographic — stable across reorderings of the input.
+        forward = [{"name": "CHOLESTEROL"}] * 5 + [{"name": "Cholesterol"}] * 5
+        reverse = [{"name": "Cholesterol"}] * 5 + [{"name": "CHOLESTEROL"}] * 5
+        maj_f, _ = get_majority_votes(forward)
+        maj_r, _ = get_majority_votes(reverse)
+        # Tie on count -> fewest uppercase letters -> "Cholesterol".
+        assert maj_f["name"] == "Cholesterol"
+        assert maj_r["name"] == "Cholesterol"
+
+    def test_canonical_prefers_most_common(self) -> None:
+        runs = [{"name": "Cholesterol"}] * 7 + [{"name": "CHOLESTEROL"}] * 3
+        majority, _ = get_majority_votes(runs)
+        assert majority["name"] == "Cholesterol"
+
+    def test_selected_value_differs_only_by_case_suppressed(self) -> None:
+        # Regression guard for the second blocking path: the best run carries a
+        # minority capitalisation while the majority value is the canonical one.
+        # The vote collapse cannot catch this (it is about which run was chosen,
+        # not the vote shape), so the discrepancy stage must skip it directly.
+        best = {"name": "CALCIUM ION"}
+        majority = {"name": "Calcium Ion"}
+        votes = {"name": {"Calcium Ion": 10}}
+        discs = find_discrepancies(best, majority, votes)
+        assert discs == []
+
+    def test_name_near_tie_still_flagged_when_best_matches_majority(self) -> None:
+        # The case-only skip must stay confined to the selected-value-differs
+        # path. When the best run carries the majority value but the votes are a
+        # genuine multi-bucket near-tie between distinct name wordings, the
+        # near-tie must still surface for review (regression guard: an earlier
+        # version short-circuited any case-equal name leaf, swallowing this).
+        best = {"name": "mTOR fragment"}
+        majority = {"name": "mTOR fragment"}
+        votes = {"name": {"mTOR fragment": 5, "Rapamycin binding fragment": 5}}
+        discs = find_discrepancies(best, majority, votes)
+        flagged = [d for d in discs if d["path"] == "name"]
+        assert flagged and flagged[0].get("needs_review") is True
+        assert flagged[0].get("vote_margin") == 0
+
+    def test_mixed_spelling_singleton_still_flagged(self) -> None:
+        # A lone genuine spelling variant ("CholesterolBase") against a
+        # case-only cluster does NOT fold to one bucket, so it votes normally
+        # and the best run carrying it surfaces as a real disagreement.
+        runs = (
+            [{"name": "Cholesterol"}] * 5
+            + [{"name": "CHOLESTEROL"}] * 4
+            + [{"name": "CholesterolBase"}]
+        )
+        majority, votes = get_majority_votes(runs)
+        # Multi-bucket: the strict single-bucket gate does not fire, so the
+        # name still votes normally and the majority is the cholesterol cluster.
+        assert majority["name"].casefold() == "cholesterol"
+        best = {"name": "CholesterolBase"}
+        discs = find_discrepancies(best, majority, votes)
+        assert any(d["path"] == "name" for d in discs)
+
+    def test_true_wording_difference_still_flagged(self) -> None:
+        # Different wording (not a case variant) must still vote and surface.
+        runs = [{"name": "mTOR fragment"}] * 5 + [{"name": "Rapamycin binding fragment"}] * 5
+        majority, votes = get_majority_votes(runs)
+        best = {"name": "Rapamycin binding fragment"}
+        discs = find_discrepancies(best, majority, votes)
+        # The best run's value differs from the majority in more than case.
+        assert any(d["path"] == "name" for d in discs)
+
+    def test_chain_id_case_not_folded(self) -> None:
+        # Scope guard: chain_id is case-sensitive (A and a can be distinct
+        # chains), so a pure-case split there must NOT collapse.
+        runs = [{"chain_id": "A"}] * 5 + [{"chain_id": "a"}] * 5
+        _majority, votes = get_majority_votes(runs)
+        # Two competing candidates remain — not collapsed to one.
+        assert len(votes["chain_id"]) == 2
+        # And a chain_id whose selected value differs is still a discrepancy.
+        best = {"chain_id": "a"}
+        discs = find_discrepancies(best, {"chain_id": "A"}, {"chain_id": {"A": 5, "a": 5}})
+        assert any(d["path"] == "chain_id" for d in discs)
+
+    def test_non_name_scalar_field_not_folded(self) -> None:
+        # A non-name scalar leaf (here a role value) keeps case-sensitive
+        # voting and reports when the selected value differs from the majority.
+        best = {"role": "Agonist"}
+        majority = {"role": "agonist"}
+        votes = {"role": {"agonist": 6, "Agonist": 4}}
+        discs = find_discrepancies(best, majority, votes)
+        assert any(d["path"] == "role" for d in discs)
+
+    def test_name_with_none_value_votes_normally(self) -> None:
+        # A run reporting None for the name alongside string values is not a
+        # pure-case variation: the non-string guard leaves the votes to be
+        # counted normally rather than collapsed to one casing candidate.
+        runs = [{"name": "Cholesterol"}] * 5 + [{"name": "CHOLESTEROL"}] * 4 + [{"name": None}]
+        majority, votes = get_majority_votes(runs)
+        assert majority["name"] == "Cholesterol"
+        # Not collapsed: the None run keeps a distinct, separately counted vote.
+        assert votes["name"].get(None) == 1
+        assert votes["name"].get("Cholesterol") == 5
+
+
 class TestObjectListScoring:
     def test_object_list_scored_by_structured_match(self) -> None:
         # An object list (ligands) must contribute to the score via per-item

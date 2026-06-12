@@ -446,6 +446,7 @@ query structure($id: String!) {
           formula_weight
           name
           formula
+          type
         }
         pdbx_reference_molecule {
           prd_id

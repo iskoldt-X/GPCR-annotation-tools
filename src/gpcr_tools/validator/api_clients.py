@@ -7,9 +7,10 @@ timeout/connection failure.  Callers translate ``None`` into an
 
 from __future__ import annotations
 
+import html
 import logging
 import time
-from typing import Any
+from typing import Any, Protocol
 
 import requests
 
@@ -18,12 +19,30 @@ from gpcr_tools.config import (
     PUBCHEM_REST_URL,
     RCSB_GRAPHQL_URL,
     SLEEP_VALIDATION_RETRY,
+    TIMEOUT_PUBCHEM_SYNONYMS,
     TIMEOUT_PUBCHEM_VALIDATION,
     TIMEOUT_RCSB_GRAPHQL_VALIDATION,
     TIMEOUT_UNIPROT_VALIDATION,
     UNIPROT_REST_URL,
 )
 from gpcr_tools.validator.cache import ValidationCache
+
+
+class SynonymCache(Protocol):
+    """Structural cache contract for the PubChem synonym list.
+
+    A CID maps to its list of synonym strings.  Any cache exposing
+    ``has``/``get``/``set`` (the enrichment ``JsonCache``) satisfies this; only
+    definitive (HTTP 200/404) results are ever stored, so a network failure
+    never poisons the cache with a false negative.
+    """
+
+    def has(self, key: str) -> bool: ...
+
+    def get(self, key: str) -> Any | None: ...
+
+    def set(self, key: str, value: Any) -> None: ...
+
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +104,88 @@ def check_pubchem_existence(
     except (requests.RequestException, OSError) as exc:
         logger.warning("PubChem API error for '%s': %s", cid, exc)
         return None
+
+
+def _normalize_synonym(value: str) -> str:
+    """Collapse a name to its comparison key: unescaped, lowercase, alnum-only.
+
+    HTML entities are decoded and every non-alphanumeric character is dropped so
+    that punctuation, spacing, and case differences between a PDB short name and
+    a PubChem synonym do not cause a spurious mismatch.
+    """
+    unescaped = html.unescape(value)
+    return "".join(ch for ch in unescaped.lower() if ch.isalnum())
+
+
+def check_pubchem_synonym_match(
+    cid: str,
+    candidate_names: list[str],
+    cache: SynonymCache,
+) -> bool | None:
+    """Check whether a PubChem CID's synonym list contains any candidate name.
+
+    Confirms that a model-supplied CID actually denotes the reported molecule:
+    an existence check alone passes a real-but-unrelated compound, so this asks
+    whether the CID's own synonyms include the molecule's name (or one of its
+    reported synonyms).
+
+    Args:
+        cid: The PubChem CID to verify.
+        candidate_names: Names that should appear among the CID's synonyms --
+            the union of the reported name and any reported synonyms.  Matching
+            against this union (not the bare name) keeps the false-reject rate
+            low, since many correct CIDs list only an IUPAC or lab-code name.
+        cache: Synonym-list cache keyed by CID.
+
+    Returns:
+        ``True`` if any candidate matches a synonym; ``False`` if the CID's
+        synonyms contain none of them (HTTP 200 with no overlap, or HTTP 404 /
+        no synonyms on record); ``None`` when the question cannot be answered --
+        empty candidate list, or a network/parse failure (network abstention,
+        never treated as a mismatch).  Only definitive (HTTP 200/404) synonym
+        lists are cached; a network failure is never cached.
+    """
+    clean_cid = "".join(filter(str.isdigit, str(cid)))
+    if not clean_cid:
+        return False  # Format error (non-numeric)
+
+    candidate_keys = {norm for name in candidate_names if (norm := _normalize_synonym(str(name)))}
+    if not candidate_keys:
+        return None  # Nothing to compare against -> abstain, never reject.
+
+    cached = cache.get(clean_cid) if cache.has(clean_cid) else None
+    if cached is not None:
+        # A cached miss is stored as ``[]`` (e.g. a 404), never ``None``; ``[] is not
+        # None`` is True, so the empty intersection below correctly yields ``False``.
+        synonym_keys = {_normalize_synonym(str(s)) for s in cached}
+        return bool(candidate_keys & synonym_keys)
+
+    url = f"{PUBCHEM_REST_URL}/cid/{clean_cid}/synonyms/JSON"
+    try:
+        resp = requests.get(url, timeout=TIMEOUT_PUBCHEM_SYNONYMS)
+    except (requests.RequestException, OSError) as exc:
+        logger.warning("PubChem synonym API error for '%s': %s", cid, exc)
+        return None  # Network abstention -- not a mismatch, not cached.
+
+    if resp.status_code == 404:
+        # CID has no synonyms on record: definitive miss, safe to cache.
+        cache.set(clean_cid, [])
+        return False
+    if resp.status_code != 200:
+        logger.warning("PubChem synonym API status %d for '%s'", resp.status_code, cid)
+        return None  # Transient/unexpected status -- abstain, do not cache.
+
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        logger.warning("PubChem synonym parse error for '%s': %s", cid, exc)
+        return None
+
+    info_list = (data.get("InformationList") or {}).get("Information") or []
+    synonyms: list[str] = info_list[0].get("Synonym") or [] if info_list else []
+    cache.set(clean_cid, synonyms)  # Cache the confirmed (HTTP 200) list only.
+    synonym_keys = {_normalize_synonym(str(s)) for s in synonyms}
+    return bool(candidate_keys & synonym_keys)
 
 
 # ---------------------------------------------------------------------------

@@ -30,7 +30,7 @@ from gpcr_tools.config import (
     HTTP_RETRY_STATUS_FORCELIST,
     HTTP_RETRY_TOTAL,
     LIGAND_EXCLUDE_LIST,
-    LIGAND_WEIGHT_THRESHOLD,
+    LIPID_COMP_IDS,
     PUBCHEM_REST_URL,
     RCSB_GRAPHQL_URL,
     RCSB_SEARCH_URL,
@@ -46,6 +46,13 @@ from gpcr_tools.config import (
 from gpcr_tools.fetcher.cache import JsonCache
 
 logger = logging.getLogger(__name__)
+
+# A resolved polypeptide entity with no reference sequence is treated as a
+# peptide ligand only up to this length; longer chains are receptors, fusion
+# partners, antibodies or crystallization scaffolds rather than ligands. Sized
+# to clear typical peptide agonists while staying below short antibody fragments
+# and structural domains.
+PEPTIDE_LIGAND_MAX_LENGTH = 50
 
 _CHEM_COMP_QUERY = """\
 query($id: String!) {
@@ -131,6 +138,9 @@ def enrich_single_pdb(
 
     # 1. UniProt enrichment
     _enrich_uniprot(pdb_data, sess, uniprot_cache, stats=stats)
+
+    # 1b. Polymer ligand-type hints (peptide / nucleic-acid ligands)
+    _tag_polymer_ligand_types(pdb_data)
 
     # 2. Ligand type + PubChem enrichment
     _enrich_ligands(pdb_data, sess, pubchem_cache, synonyms_cache, smiles_cache, stats=stats)
@@ -264,6 +274,51 @@ def _resolve_uniprot_slugs(
     return result
 
 
+def _tag_polymer_ligand_types(pdb_data: dict[str, Any]) -> None:
+    """Set ``gpcrdb_determined_type`` on polymer entities that are ligands.
+
+    Peptide and nucleic-acid ligands are polymer entities, so they never reach
+    the nonpolymer classifier and previously carried no type hint. A short
+    polypeptide with no reference sequence (no UniProt / cross-reference) is a
+    peptide ligand; a nucleotide polymer is a nucleic acid. Receptors, fusion
+    partners and antibody fragments are excluded by the reference-sequence and
+    length checks, so their hint is left unset and they fall through to the
+    polymer ``type`` already shown to the model.
+
+    The hint is persisted on the enriched record here. Surfacing it to the
+    model prompt is a separate concern: the prompt's polymer block does not yet
+    carry ``gpcrdb_determined_type`` (only the nonpolymer block does), so this
+    write is currently persist-only and not consumed downstream. Wiring the
+    polymer hint into the prompt belongs to the prompt-building layer and is
+    intentionally left out of the enrichment step.
+    """
+    polymers = ((pdb_data.get("data") or {}).get("entry") or {}).get("polymer_entities") or []
+    for poly in polymers:
+        entity_poly = poly.get("entity_poly") or {}
+        poly_type = (entity_poly.get("type") or "").lower()
+
+        if "ribonucleotide" in poly_type or "deoxyribonucleotide" in poly_type:
+            poly["gpcrdb_determined_type"] = "na"
+            continue
+
+        if "polypeptide" not in poly_type:
+            continue
+
+        # A reference sequence (UniProt accession) marks a receptor or fusion
+        # partner, never a peptide ligand.
+        identifiers = poly.get("rcsb_polymer_entity_container_identifiers") or {}
+        if identifiers.get("uniprot_ids"):
+            continue
+        if identifiers.get("reference_sequence_identifiers"):
+            continue
+        if any(u.get("rcsb_id") for u in (poly.get("uniprots") or [])):
+            continue
+
+        length = entity_poly.get("rcsb_sample_sequence_length")
+        if isinstance(length, int | float) and length <= PEPTIDE_LIGAND_MAX_LENGTH:
+            poly["gpcrdb_determined_type"] = "peptide"
+
+
 # ---------------------------------------------------------------------------
 # Step 2: Ligand type + PubChem + SMILES
 # ---------------------------------------------------------------------------
@@ -288,8 +343,8 @@ def _enrich_ligands(
         descriptor = comp.get("rcsb_chem_comp_descriptor") or {}
 
         # Determined type
-        formula_weight = chem_comp.get("formula_weight")
-        comp["gpcrdb_determined_type"] = _determine_ligand_type(formula_weight)
+        comp_id = chem_comp.get("id")
+        comp["gpcrdb_determined_type"] = _determine_ligand_type(comp_id, chem_comp)
 
         # PubChem CID from InChIKey
         inchikey = descriptor.get("InChIKey")
@@ -304,7 +359,6 @@ def _enrich_ligands(
             comp["gpcrdb_pubchem_synonyms"] = []
 
         # SMILES/InChIKey for non-excluded ligands
-        comp_id = chem_comp.get("id")
         if comp_id and comp_id not in LIGAND_EXCLUDE_LIST:
             smiles_data = _fetch_chem_comp_descriptors(comp_id, session, smiles_cache, stats=stats)
             if smiles_data:
@@ -314,14 +368,39 @@ def _enrich_ligands(
                     descriptor["InChIKey"] = smiles_data.get("InChIKey")
 
 
-def _determine_ligand_type(formula_weight: Any) -> str:
-    """Classify ligand as small-molecule, peptide, or unknown."""
-    if formula_weight is None:
-        return "unknown"
-    try:
-        return "small-molecule" if float(formula_weight) < LIGAND_WEIGHT_THRESHOLD else "peptide"
-    except (ValueError, TypeError):
-        return "unknown"
+def _determine_ligand_type(comp_id: str | None, chem_comp: dict[str, Any]) -> str:
+    """Classify a nonpolymer ligand by chemical identity, not molecular weight.
+
+    The hint is a deterministic cascade over the comp_id and the CCD
+    ``_chem_comp.type``:
+
+    1. A comp_id on the curated lipid whitelist resolves to ``lipid`` directly.
+       This is checked first so the answer is stable even for older fetches that
+       predate the ``type`` field.
+    2. Otherwise the CCD type routes the classes it can name: saccharides and
+       free amino acids (peptide-linking monomers) are small molecules, while
+       nucleotide-linking monomers are nucleic acids.
+    3. Anything else is a small molecule.
+
+    Peptide and protein ligands are polymer entities and never reach this
+    function; their hint is set on the polymer path instead. The previous
+    weight-proxy never produced ``lipid`` and mislabelled heavy small molecules
+    as peptides, so it is gone.
+    """
+    if comp_id and comp_id in LIPID_COMP_IDS:
+        return "lipid"
+
+    ccd_type = (chem_comp.get("type") or "").lower()
+    if "saccharide" in ccd_type:
+        return "small-molecule"
+    if "peptide linking" in ccd_type:
+        # A single free amino acid; treated as a small molecule until the schema
+        # gains a dedicated amino-acid value.
+        return "small-molecule"
+    if "rna linking" in ccd_type or "dna linking" in ccd_type:
+        return "na"
+
+    return "small-molecule"
 
 
 def _get_pubchem_cid(
