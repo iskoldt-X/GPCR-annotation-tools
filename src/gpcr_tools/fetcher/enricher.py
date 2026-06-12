@@ -269,6 +269,45 @@ def _enrich_uniprot(
                 uni["gpcrdb_entry_name_slug"] = slug_map[acc]
 
 
+def _resolve_secondary_accession(acc: str, session: requests.Session) -> tuple[str | None, bool]:
+    """Resolve an accession the batch endpoint did not match (a secondary one).
+
+    The ``/accessions`` batch endpoint matches PRIMARY accessions only -- a
+    secondary (merged/retired) accession returns nothing. UniProt merges
+    accessions over time, so an RCSB polymer entity can legitimately carry a
+    secondary accession; without this fallback that receptor would silently lose
+    its ``gpcrdb_entry_name_slug``. The search endpoint maps a secondary accession
+    to its current entry via ``sec_acc:``.
+
+    Returns ``(slug, confirmed)``:
+      * ``(slug, True)``  -- resolved to a single current entry.
+      * ``(None, True)``  -- a definitive HTTP-200 answer with no single match
+        (genuinely absent, or an ambiguous demerge); the caller may negative-cache.
+      * ``(None, False)`` -- a TRANSIENT failure (non-200 / timeout / parse error);
+        the caller must abstain and NOT freeze it as a permanent negative.
+    """
+    try:
+        response = session.get(
+            f"{UNIPROT_REST_URL}/search",
+            params={"query": f"sec_acc:{acc}", "fields": "accession,id", "format": "json"},
+            timeout=TIMEOUT_UNIPROT_BATCH,
+        )
+        if response.status_code == 200:
+            results = response.json().get("results") or []
+            # Exactly one current entry = an unambiguous merge. A rare demerge
+            # (one old accession -> several entries) is left unresolved rather
+            # than guessing which one this PDB meant -- a confirmed non-match.
+            if len(results) == 1:
+                entry_name = results[0].get("uniProtkbId")
+                if entry_name:
+                    return str(entry_name).lower(), True
+            return None, True  # confirmed: genuinely absent or ambiguous demerge
+        return None, False  # non-200: transient/unexpected -> abstain, do not cache
+    except (requests.exceptions.RequestException, ValueError) as exc:
+        logger.warning("[UniProt sec_acc] Lookup failed for %s: %s", acc, exc)
+        return None, False  # transient -> abstain, do not cache
+
+
 def _resolve_uniprot_slugs(
     accessions: list[str],
     session: requests.Session,
@@ -310,10 +349,31 @@ def _resolve_uniprot_slugs(
                     cache.set(accession, slug)
                 found.add(accession)
 
-        # Cache misses as None so we don't re-query. This is a confirmed
-        # negative: the accession was absent from a SUCCESSFUL (200) batch
-        # response, so opt into None-caching explicitly.
+        # Accessions the batch did not match are likely SECONDARY (merged/retired)
+        # -- the batch endpoint matches primary accessions only. Resolve each via a
+        # sec_acc search so a real GPCR carrying a secondary accession is not
+        # silently left slug-less.
+        confirmed_missing: set[str] = set()
         for acc in to_fetch - found:
+            if stats is not None:
+                stats["attempted"] += 1
+            slug, confirmed = _resolve_secondary_accession(acc, session)
+            if slug is not None:
+                result[acc] = slug
+                if cache:
+                    cache.set(acc, slug)
+            elif confirmed:
+                confirmed_missing.add(acc)
+            elif stats is not None:
+                # Transient sec_acc-search failure: abstain -- do NOT negative-cache
+                # (so it is retried), and count it so the record is marked
+                # incomplete and re-enriched on resume. Never freeze a transient
+                # outage as a permanent negative (mirrors the primary path).
+                stats["hard_failed"] += 1
+
+        # Negative-cache ONLY confirmed misses (a definitive 200 "not in UniProt"),
+        # never a transient failure. (Opt into None-caching explicitly.)
+        for acc in confirmed_missing:
             if cache:
                 cache.set(acc, None, allow_none=True)
 

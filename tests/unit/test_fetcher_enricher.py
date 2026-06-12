@@ -18,6 +18,7 @@ from gpcr_tools.fetcher.enricher import (
     _fetch_chem_comp_descriptors,
     _get_pubchem_cid,
     _get_pubchem_synonyms,
+    _resolve_secondary_accession,
     _tag_polymer_ligand_types,
     enrich_single_pdb,
 )
@@ -233,6 +234,112 @@ class TestEnrichUniprot:
         mock_session.post.assert_not_called()
         uni = pdb_data["data"]["entry"]["polymer_entities"][0]["uniprots"][0]
         assert uni["gpcrdb_entry_name_slug"] == "aa2ar_human"
+
+    def test_secondary_accession_resolved_via_search(self) -> None:
+        # A secondary (merged) accession returns nothing from the batch endpoint;
+        # the sec_acc search resolves it to the current entry, so the receptor
+        # still gets its slug (instead of being silently lost + negative-cached).
+        pdb_data: dict[str, Any] = {
+            "data": {"entry": {"polymer_entities": [{"uniprots": [{"rcsb_id": "O14823"}]}]}}
+        }
+        mock_session = MagicMock()
+        batch = MagicMock(status_code=200)
+        batch.json.return_value = {"results": []}  # secondary -> no batch match
+        mock_session.post.return_value = batch
+        search = MagicMock(status_code=200)
+        search.json.return_value = {
+            "results": [{"primaryAccession": "P07550", "uniProtkbId": "ADRB2_HUMAN"}]
+        }
+        mock_session.get.return_value = search
+
+        _enrich_uniprot(pdb_data, mock_session, cache=None)
+
+        uni = pdb_data["data"]["entry"]["polymer_entities"][0]["uniprots"][0]
+        assert uni["gpcrdb_entry_name_slug"] == "adrb2_human"
+
+    def test_unknown_accession_is_negative_cached_not_recovered(self) -> None:
+        # Neither the batch nor the sec_acc search resolves it -> genuine miss:
+        # no slug, and it is negative-cached so it is not re-queried.
+        pdb_data: dict[str, Any] = {
+            "data": {"entry": {"polymer_entities": [{"uniprots": [{"rcsb_id": "X99999"}]}]}}
+        }
+        mock_session = MagicMock()
+        empty = MagicMock(status_code=200)
+        empty.json.return_value = {"results": []}
+        mock_session.post.return_value = empty
+        mock_session.get.return_value = empty
+        cache = MagicMock()
+        cache.has.return_value = False
+
+        _enrich_uniprot(pdb_data, mock_session, cache=cache)
+
+        uni = pdb_data["data"]["entry"]["polymer_entities"][0]["uniprots"][0]
+        assert "gpcrdb_entry_name_slug" not in uni
+        cache.set.assert_any_call("X99999", None, allow_none=True)
+
+    def test_transient_secondary_failure_is_not_negative_cached(self) -> None:
+        # A TRANSIENT sec_acc-search failure must NOT freeze the accession as a
+        # permanent negative -- it abstains so a later run retries it. (Guards the
+        # very anti-poisoning rule this whole fix series is about.)
+        pdb_data: dict[str, Any] = {
+            "data": {"entry": {"polymer_entities": [{"uniprots": [{"rcsb_id": "O14823"}]}]}}
+        }
+        mock_session = MagicMock()
+        batch = MagicMock(status_code=200)
+        batch.json.return_value = {"results": []}  # not matched by the batch
+        mock_session.post.return_value = batch
+        mock_session.get.side_effect = requests.exceptions.Timeout("search down")
+        cache = MagicMock()
+        cache.has.return_value = False
+
+        _enrich_uniprot(pdb_data, mock_session, cache=cache)
+
+        uni = pdb_data["data"]["entry"]["polymer_entities"][0]["uniprots"][0]
+        assert "gpcrdb_entry_name_slug" not in uni  # unresolved this run
+        # The accession was NOT negative-cached (so it will be retried next run).
+        for call in cache.set.call_args_list:
+            assert call.args[:2] != ("O14823", None)
+
+
+class TestResolveSecondaryAccession:
+    # Returns (slug, confirmed): confirmed=True is a definitive HTTP-200 answer;
+    # confirmed=False is a transient failure the caller must abstain on.
+    def test_single_result_returns_slug_confirmed(self) -> None:
+        mock_session = MagicMock()
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {
+            "results": [{"primaryAccession": "P07550", "uniProtkbId": "ADRB2_HUMAN"}]
+        }
+        mock_session.get.return_value = resp
+        assert _resolve_secondary_accession("O14823", mock_session) == ("adrb2_human", True)
+
+    def test_no_result_is_confirmed_miss(self) -> None:
+        mock_session = MagicMock()
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {"results": []}
+        mock_session.get.return_value = resp
+        assert _resolve_secondary_accession("X99999", mock_session) == (None, True)
+
+    def test_ambiguous_demerge_is_confirmed_miss(self) -> None:
+        # More than one current entry = ambiguous demerge -> do not guess.
+        mock_session = MagicMock()
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {
+            "results": [{"uniProtkbId": "A_HUMAN"}, {"uniProtkbId": "B_HUMAN"}]
+        }
+        mock_session.get.return_value = resp
+        assert _resolve_secondary_accession("O14823", mock_session) == (None, True)
+
+    def test_non_200_is_transient_not_confirmed(self) -> None:
+        mock_session = MagicMock()
+        resp = MagicMock(status_code=503)
+        mock_session.get.return_value = resp
+        assert _resolve_secondary_accession("O14823", mock_session) == (None, False)
+
+    def test_exception_is_transient_not_confirmed(self) -> None:
+        mock_session = MagicMock()
+        mock_session.get.side_effect = requests.exceptions.Timeout("boom")
+        assert _resolve_secondary_accession("O14823", mock_session) == (None, False)
 
 
 # ---------------------------------------------------------------------------
