@@ -45,6 +45,7 @@ from gpcr_tools.config import (
     AGG_STATUS_FAILED,
     ALERT_PREFIX_ALGO_WARNING,
     ALERT_PREFIX_ALPHA5_GRAFT,
+    ALERT_PREFIX_API_UNAVAILABLE,
     ALERT_PREFIX_CHIMERIC_REVIEW,
     ALERT_PREFIX_HALLUCINATION,
     ALERT_PREFIX_TIE_BREAKER_ALIGNED,
@@ -584,19 +585,57 @@ def aggregate_pdb(
         )
 
 
+def _pdbs_with_api_unavailable(cfg: Any) -> list[str]:
+    """PDB ids whose last validation report recorded a transient API abstention.
+
+    A report carrying an ``[API_UNAVAILABLE]`` warning means a UniProt/PubChem
+    lookup abstained (the result was not cached), so re-aggregating that PDB
+    retries only those lookups -- the definitive results stay cached.
+    """
+    validation_dir = cfg.aggregated_dir / "validation_logs"
+    if not validation_dir.is_dir():
+        return []
+    suffix = "_validation.json"
+    pdb_ids: list[str] = []
+    for path in sorted(validation_dir.glob(f"*{suffix}")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        warnings = data.get("critical_warnings") or []
+        if any(ALERT_PREFIX_API_UNAVAILABLE in str(w) for w in warnings):
+            pdb_ids.append(path.name[: -len(suffix)])
+    return pdb_ids
+
+
 def aggregate_all(
     *,
     skip_api_checks: bool = False,
     force: bool = False,
+    retry_unavailable: bool = False,
 ) -> list[AggregateResult]:
     """Aggregate all pending PDBs with per-PDB error isolation.
 
     Args:
         skip_api_checks: Skip UniProt/PubChem/chimera API calls.
         force: Re-process PDBs already in the aggregate log.
+        retry_unavailable: Re-process only PDBs whose last validation report
+            recorded a transient API abstention (``[API_UNAVAILABLE]``).
+            Definitive results are cached, so only the failed lookups are retried.
+            Cannot be combined with ``skip_api_checks`` (which would skip the very
+            checks the retry exists to re-run). It also cannot recover a cache that
+            an older build poisoned with a transient failure stored as a definitive
+            result -- those read back as a verdict, not an abstention, and must be
+            evicted manually.
 
     Returns list of :class:`AggregateResult` for each processed PDB.
     """
+    if retry_unavailable and skip_api_checks:
+        raise ValueError(
+            "retry_unavailable cannot be combined with skip_api_checks: the retry "
+            "exists to re-run the API checks that skip_api_checks disables."
+        )
+
     try:
         cfg = get_config()
     except Exception as exc:
@@ -617,7 +656,21 @@ def aggregate_all(
         logger.error("Failed to initialize caches: %s", exc)
         return []
 
-    if force:
+    if retry_unavailable:
+        # Only re-run PDBs whose AI results are still present, so a stale
+        # validation report never downgrades a PDB that can no longer be rebuilt.
+        pending = [
+            pdb_id
+            for pdb_id in _pdbs_with_api_unavailable(cfg)
+            if pdb_has_runs(cfg.ai_results_dir / pdb_id)
+        ]
+        if not pending:
+            logger.info(
+                "[aggregate] --retry-unavailable: no PDB with AI results recorded a "
+                "transient API failure; nothing to retry."
+            )
+            return []
+    elif force:
         # Get ALL PDB IDs with AI results (bypass aggregate log)
         ai_dir = cfg.ai_results_dir
         if not ai_dir.is_dir():
@@ -645,6 +698,18 @@ def aggregate_all(
             logger.error("[%s] Critical failure: %s", pdb_id, exc)
             results.append(AggregateResult(pdb_id=pdb_id, success=False, error=str(exc)))
             _update_aggregate_log(pdb_id, AGG_STATUS_FAILED)
+
+    # Surface transient API abstentions so they can be retried in isolation.
+    unavailable = [
+        r.pdb_id for r in results if any(ALERT_PREFIX_API_UNAVAILABLE in str(w) for w in r.warnings)
+    ]
+    if unavailable:
+        logger.warning(
+            "[aggregate] %d PDB(s) hit a transient API failure (not cached): %s. "
+            "Re-run 'gpcr-tools aggregate --retry-unavailable' to retry only these.",
+            len(unavailable),
+            ", ".join(unavailable),
+        )
 
     # Save caches (best-effort, after output commit)
     try:

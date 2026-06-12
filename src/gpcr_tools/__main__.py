@@ -201,11 +201,24 @@ def cli() -> None:
         default=False,
         help="Skip UniProt/PubChem/chimera API validation calls.",
     )
-    agg_parser.add_argument(
+    # --force (reprocess everything) and --retry-unavailable (reprocess only the
+    # API-abstention subset) are mutually exclusive scopes.
+    agg_scope = agg_parser.add_mutually_exclusive_group()
+    agg_scope.add_argument(
         "--force",
         action="store_true",
         default=False,
         help="Re-process PDBs already in the aggregate log.",
+    )
+    agg_scope.add_argument(
+        "--retry-unavailable",
+        action="store_true",
+        default=False,
+        help=(
+            "Re-aggregate only PDBs whose last run recorded a transient API "
+            "failure ([API_UNAVAILABLE]); cached results are reused, so only the "
+            "failed lookups are retried. Incompatible with --skip-api-checks."
+        ),
     )
 
     # csv-generator (kept temporarily for backward compat) -------------
@@ -354,6 +367,14 @@ def cli() -> None:
     elif args.command == "aggregate":
         from gpcr_tools.aggregator.runner import aggregate_all, aggregate_pdb
 
+        if args.retry_unavailable and args.skip_api_checks:
+            print(
+                "Error: --retry-unavailable cannot be combined with --skip-api-checks "
+                "(the retry re-runs the API checks that --skip-api-checks disables).",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
         if args.pdb_id:
             result = aggregate_pdb(
                 args.pdb_id,
@@ -368,6 +389,7 @@ def cli() -> None:
             results = aggregate_all(
                 skip_api_checks=args.skip_api_checks,
                 force=args.force,
+                retry_unavailable=args.retry_unavailable,
             )
             ok = sum(1 for r in results if r.success)
             fail = sum(1 for r in results if not r.success)
