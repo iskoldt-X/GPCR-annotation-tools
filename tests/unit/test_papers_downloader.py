@@ -14,9 +14,9 @@ from gpcr_tools.papers.downloader import (
     _fetch_doi_from_title,
     _fetch_pmc_s3_pdf_url,
     _fetch_unpaywall_pdf_url,
-    _promote_pmid_to_pmcid,
     _read_download_log,
     _recover_missing_doi,
+    _resolve_pmcid,
     _update_download_log,
     download_paper_for_pdb,
 )
@@ -131,6 +131,24 @@ class TestCrossRefMetadata:
         result = _fetch_crossref_metadata("10.1038/x", mock_session)
         assert result["crossref_pdf_url"] == "https://www.nature.com/articles/x.pdf"
 
+    def test_does_not_extract_pmcid_from_link(self) -> None:
+        # Regression: a PMC URL in CrossRef link[] (often a *reference's* PMC
+        # article) must NOT be harvested as this paper's PMCID -- that injected a
+        # wrong PMCID that could fetch the WRONG paper. PMCID now comes only from
+        # the authoritative ID Converter.
+        mock_session = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "message": {
+                "PMID": "999",
+                "link": [{"URL": "https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5864293/"}],
+            }
+        }
+        mock_session.get.return_value = mock_resp
+        result = _fetch_crossref_metadata("10.1038/x", mock_session)
+        assert "pmcid" not in result  # no PMCID is harvested from links anymore
+
 
 class TestPmcS3PdfUrl:
     def test_returns_url_when_metadata_has_pdf(self) -> None:
@@ -158,40 +176,89 @@ class TestPmcS3PdfUrl:
         assert _fetch_pmc_s3_pdf_url("PMC404", mock_session) is None
 
 
-class TestPromotePmidToPmcid:
-    def test_returns_pmcid(self) -> None:
+class TestResolvePmcid:
+    def test_resolves_from_doi_first(self) -> None:
         mock_session = MagicMock()
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        mock_resp.json.return_value = {"records": [{"pmid": "12345", "pmcid": "PMC987"}]}
+        mock_resp.json.return_value = {"records": [{"requested-id": "10.1/x", "pmcid": "PMC987"}]}
         mock_session.get.return_value = mock_resp
         with patch("gpcr_tools.papers.downloader.time.sleep"):
-            assert _promote_pmid_to_pmcid("12345", mock_session) == "PMC987"
+            assert _resolve_pmcid("10.1/x", "12345", mock_session) == "PMC987"
+        # DOI is queried first; a hit means PMID is never tried.
+        assert mock_session.get.call_count == 1
 
-    def test_none_when_no_pmcid(self) -> None:
+    def test_falls_back_to_pmid(self) -> None:
         mock_session = MagicMock()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"records": [{"pmid": "12345"}]}
+        no_pmc = MagicMock(status_code=200)
+        no_pmc.json.return_value = {"records": [{"requested-id": "10.1/x"}]}  # no pmcid
+        hit = MagicMock(status_code=200)
+        hit.json.return_value = {"records": [{"requested-id": "12345", "pmcid": "PMC987"}]}
+        mock_session.get.side_effect = [no_pmc, hit]
+        with patch("gpcr_tools.papers.downloader.time.sleep"):
+            assert _resolve_pmcid("10.1/x", "12345", mock_session) == "PMC987"
+        assert mock_session.get.call_count == 2
+
+    def test_none_when_neither_resolves(self) -> None:
+        mock_session = MagicMock()
+        mock_resp = MagicMock(status_code=200)
+        mock_resp.json.return_value = {"records": [{"requested-id": "10.1/x"}]}
         mock_session.get.return_value = mock_resp
         with patch("gpcr_tools.papers.downloader.time.sleep"):
-            assert _promote_pmid_to_pmcid("12345", mock_session) is None
+            assert _resolve_pmcid("10.1/x", "12345", mock_session) is None
+
+    def test_ignores_pmcid_when_requested_id_mismatches(self) -> None:
+        # Echo guard: a record whose requested-id does NOT match the queried id is
+        # not trusted (defends against a future batched query cross-binding).
+        mock_session = MagicMock()
+        mock_resp = MagicMock(status_code=200)
+        mock_resp.json.return_value = {
+            "records": [{"requested-id": "10.9/other", "pmcid": "PMC987"}]
+        }
+        mock_session.get.return_value = mock_resp
+        with patch("gpcr_tools.papers.downloader.time.sleep"):
+            assert _resolve_pmcid("10.1/x", None, mock_session) is None
+
+    def test_none_when_no_identifiers(self) -> None:
+        mock_session = MagicMock()
+        assert _resolve_pmcid(None, None, mock_session) is None
+        mock_session.get.assert_not_called()
 
 
 class TestFetchDoiFromTitle:
-    def _session(self, title: str) -> MagicMock:
+    def _session(self, title: str, year: int | None = None) -> MagicMock:
         mock_session = MagicMock()
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        mock_resp.json.return_value = {
-            "message": {"items": [{"DOI": "10.1/found", "title": [title]}]}
-        }
+        item: dict[str, Any] = {"DOI": "10.1/found", "title": [title]}
+        if year is not None:
+            item["issued"] = {"date-parts": [[year]]}
+        mock_resp.json.return_value = {"message": {"items": [item]}}
         mock_session.get.return_value = mock_resp
         return mock_session
 
     def test_strong_match_returns_doi(self) -> None:
         title = "Structure of the human serotonin 5-HT2A receptor complex"
         assert _fetch_doi_from_title(title, self._session(title)) == "10.1/found"
+
+    def test_year_mismatch_rejected(self) -> None:
+        # Identical title but a publication year far from the expected one means a
+        # different paper (e.g. a re-determination / series) -- must be rejected.
+        title = "Structure of the human serotonin 5-HT2A receptor complex"
+        sess = self._session(title, year=2015)
+        assert _fetch_doi_from_title(title, sess, expected_year=2023) is None
+
+    def test_year_match_within_one_accepted(self) -> None:
+        title = "Structure of the human serotonin 5-HT2A receptor complex"
+        sess = self._session(title, year=2023)
+        assert _fetch_doi_from_title(title, sess, expected_year=2022) == "10.1/found"
+
+    def test_different_method_titles_do_not_collide(self) -> None:
+        # Domain words are no longer stopwords, so cryo-EM vs crystal of the same
+        # target are distinguished and the wrong one is rejected.
+        query = "Cryo-EM structure of the human GLP-1 receptor"
+        hit = "Crystal structure of the human GLP-1 receptor"
+        assert _fetch_doi_from_title(query, self._session(hit)) is None
 
     def test_weak_match_returns_none(self) -> None:
         query = "Structure of the human serotonin 5-HT2A receptor complex"
@@ -231,6 +298,19 @@ class TestRecoverMissingDoi:
     def test_no_citation_returns_none(self) -> None:
         doi, pmid = _recover_missing_doi({"citation": []}, 42, MagicMock())
         assert doi is None and pmid == 42
+
+    def test_non_primary_citation_is_not_used(self) -> None:
+        # Regression: a citation table with only CITED references (no row tagged
+        # "primary") must NOT yield a DOI -- those are other papers, and using one
+        # would attach the wrong paper. (Previously a citations[0] fallback did.)
+        entry = {
+            "citation": [
+                {"id": "1", "pdbx_database_id_DOI": "10.9/reference-not-ours"},
+                {"id": "2", "pdbx_database_id_DOI": "10.9/another-reference"},
+            ]
+        }
+        doi, _pmid = _recover_missing_doi(entry, None, MagicMock())
+        assert doi is None
 
 
 class TestUnpaywallPdfUrl:
@@ -278,7 +358,7 @@ class TestDownloadPaperForPdb:
     )
     @patch(
         "gpcr_tools.papers.downloader._fetch_crossref_metadata",
-        return_value={"pmid": "12345", "pmcid": "PMC789"},
+        return_value={"pmid": "12345", "crossref_pdf_url": None},
     )
     def test_success_downloads_pdf(
         self,
@@ -307,7 +387,6 @@ class TestDownloadPaperForPdb:
         "gpcr_tools.papers.downloader._fetch_crossref_metadata",
         return_value={
             "pmid": None,
-            "pmcid": None,
             "crossref_pdf_url": "https://publisher.example/challenge.pdf",
         },
     )
@@ -330,15 +409,15 @@ class TestDownloadPaperForPdb:
         assert result["source"] == "unpaywall_pdf"
 
     @patch("gpcr_tools.papers.downloader._fetch_unpaywall_pdf_url", return_value=None)
-    @patch("gpcr_tools.papers.downloader._fetch_pmc_s3_pdf_url", return_value=None)
+    @patch("gpcr_tools.papers.downloader._resolve_pmcid", return_value=None)
     @patch(
         "gpcr_tools.papers.downloader._fetch_crossref_metadata",
-        return_value={"pmid": None, "pmcid": None, "crossref_pdf_url": None},
+        return_value={"pmid": None, "crossref_pdf_url": None},
     )
     def test_fallback_paywalled(
         self,
         _mock_cr: MagicMock,
-        _mock_pmc: MagicMock,
+        _mock_resolve: MagicMock,
         _mock_up: MagicMock,
         papers_workspace: Path,
     ) -> None:
@@ -349,7 +428,6 @@ class TestDownloadPaperForPdb:
         "gpcr_tools.papers.downloader._fetch_crossref_metadata",
         return_value={
             "pmid": None,
-            "pmcid": None,
             "crossref_pdf_url": "https://www.nature.com/articles/x.pdf",
         },
     )
@@ -371,19 +449,22 @@ class TestDownloadPaperForPdb:
         "gpcr_tools.papers.downloader._fetch_pmc_s3_pdf_url",
         return_value="https://pmc-oa-opendata.s3.amazonaws.com/PMC789.1/PMC789.1.pdf",
     )
+    @patch("gpcr_tools.papers.downloader._resolve_pmcid", return_value="PMC789")
     @patch("gpcr_tools.papers.downloader._fetch_unpaywall_pdf_url", return_value=None)
     @patch(
         "gpcr_tools.papers.downloader._fetch_crossref_metadata",
-        return_value={"pmid": "12345", "pmcid": "PMC789", "crossref_pdf_url": None},
+        return_value={"pmid": "12345", "crossref_pdf_url": None},
     )
     def test_falls_through_to_pmc_s3(
         self,
         _mock_cr: MagicMock,
         _mock_up: MagicMock,
+        _mock_resolve: MagicMock,
         _mock_s3: MagicMock,
         papers_workspace: Path,
     ) -> None:
-        # crossref-pdf absent, Unpaywall empty -> the chain reaches the PMC S3 tier.
+        # crossref-pdf absent, Unpaywall empty -> the chain reaches the PMC S3 tier,
+        # whose PMCID is resolved authoritatively (not from an unverified field).
         def fake_download(url: str, output_path: Path, session: object) -> bool:
             output_path.write_bytes(b"%PDF-1.7 pmc")
             return True
@@ -392,6 +473,48 @@ class TestDownloadPaperForPdb:
             result = download_paper_for_pdb("7W55", email="test@example.com")
         assert result["status"] == "success_pdf_downloaded"
         assert result["source"] == "pmc_s3_pdf"
+        assert result["pmcid"] == "PMC789"  # the authoritative, resolved PMCID is logged
+
+    @patch(
+        "gpcr_tools.papers.downloader._fetch_pmc_s3_pdf_url",
+        return_value="https://pmc-oa-opendata.s3.amazonaws.com/PMC789.1/PMC789.1.pdf",
+    )
+    @patch("gpcr_tools.papers.downloader._resolve_pmcid", return_value="PMC789")
+    @patch("gpcr_tools.papers.downloader._fetch_unpaywall_pdf_url", return_value=None)
+    @patch(
+        "gpcr_tools.papers.downloader._fetch_crossref_metadata",
+        return_value={"pmid": "12345", "crossref_pdf_url": None},
+    )
+    def test_enriched_pmcid_is_ignored_only_resolved_one_used(
+        self,
+        _mock_cr: MagicMock,
+        _mock_up: MagicMock,
+        _mock_resolve: MagicMock,
+        _mock_s3: MagicMock,
+        papers_workspace: Path,
+    ) -> None:
+        # Regression: the (possibly WRONG) enriched rcsb_pubmed_central_id must NOT
+        # be used -- only the authoritatively-resolved PMCID. Here enriched carries
+        # a WRONG PMCID; the logged + used PMCID must be the resolved PMC789.
+        enriched = {
+            "data": {
+                "entry": {
+                    "rcsb_id": "9WRG",
+                    "rcsb_primary_citation": {"pdbx_database_id_DOI": "10.1038/real"},
+                    "pubmed": {"rcsb_pubmed_central_id": "PMC999999"},  # WRONG / stale
+                }
+            }
+        }
+        (papers_workspace / "enriched" / "9WRG.json").write_text(json.dumps(enriched))
+
+        def fake_download(url: str, output_path: Path, session: object) -> bool:
+            output_path.write_bytes(b"%PDF-1.7 right paper")
+            return True
+
+        with patch("gpcr_tools.papers.downloader._download_file", side_effect=fake_download):
+            result = download_paper_for_pdb("9WRG", email="test@example.com")
+        assert result["status"] == "success_pdf_downloaded"
+        assert result["pmcid"] == "PMC789"  # NOT PMC999999 from the enriched field
 
     def test_no_doi_recovered_from_citation_table(self, papers_workspace: Path) -> None:
         # No DOI on the primary citation, but the citation[] table carries one:
@@ -409,10 +532,10 @@ class TestDownloadPaperForPdb:
         with (
             patch(
                 "gpcr_tools.papers.downloader._fetch_crossref_metadata",
-                return_value={"pmid": None, "pmcid": None, "crossref_pdf_url": None},
+                return_value={"pmid": None, "crossref_pdf_url": None},
             ),
             patch("gpcr_tools.papers.downloader._fetch_unpaywall_pdf_url", return_value=None),
-            patch("gpcr_tools.papers.downloader._fetch_pmc_s3_pdf_url", return_value=None),
+            patch("gpcr_tools.papers.downloader._resolve_pmcid", return_value=None),
         ):
             result = download_paper_for_pdb("9NOD", email="test@example.com")
         # DOI was recovered, so it proceeds past failed_no_doi to paywalled.

@@ -41,9 +41,11 @@ UNPAYWALL_API_URL: str = "https://api.unpaywall.org/v2"
 # bot challenge). The per-article metadata JSON at {base}/metadata/{PMCID}.1.json
 # gives the authoritative object path (an ``s3://`` URI) for the PDF.
 PMC_S3_BASE_URL: str = "https://pmc-oa-opendata.s3.amazonaws.com"
-# NCBI ID Converter: map a PMID to a PMCID, promoting a DOI-only paper into the
-# PMC open-access route when a free full text exists.
-NCBI_IDCONV_URL: str = "https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/"
+# NCBI ID Converter: resolve a DOI/PMID to its PMCID, so the PMC open-access
+# download uses a PMCID that provably belongs to THIS paper (never one guessed
+# from a CrossRef reference link or an unverified metadata field). The legacy
+# /pmc/utils/idconv/v1.0/ path 301-redirects here; use the canonical URL.
+NCBI_IDCONV_URL: str = "https://pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles/"
 # A downloaded "PDF" smaller than this is rejected: too small to be a real paper,
 # so it is almost certainly an error stub or truncated stream, not a fed-to-model
 # article.
