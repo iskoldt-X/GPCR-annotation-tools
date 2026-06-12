@@ -53,7 +53,11 @@ def check_uniprot_existence(
 ) -> bool | None:
     """Validate whether a UniProt entry name exists.
 
-    Returns ``True``/``False`` on success, ``None`` on network error.
+    Returns ``True`` (HTTP 200) or ``False`` (definitive HTTP 404) on a verdict,
+    and ``None`` when the service is unavailable -- a transient status (5xx/429),
+    timeout, or network error. A transient failure is never cached and never
+    reported as "does not exist", so a real entry is not called fake during an
+    API outage.
     """
     clean_name = entry_name.split(".")[0].upper()
     key = f"uniprot:{clean_name.lower()}"
@@ -66,9 +70,20 @@ def check_uniprot_existence(
     for attempt in range(API_MAX_RETRIES):
         try:
             resp = requests.head(url, timeout=TIMEOUT_UNIPROT_VALIDATION, allow_redirects=True)
-            is_valid = bool(resp.status_code == 200)
-            cache.set(key, is_valid)
-            return is_valid
+            if resp.status_code == 200:
+                cache.set(key, True)
+                return True
+            if resp.status_code == 404:
+                cache.set(key, False)
+                return False
+            # 5xx / 429 / other: the service is unavailable, not a verdict that the
+            # entry is absent. Retry, then abstain -- never cache a transient status.
+            if attempt == API_MAX_RETRIES - 1:
+                logger.warning(
+                    "UniProt unavailable (HTTP %s) for '%s'", resp.status_code, entry_name
+                )
+                return None
+            time.sleep(SLEEP_VALIDATION_RETRY)
         except (requests.RequestException, OSError) as exc:
             if attempt == API_MAX_RETRIES - 1:
                 logger.warning("UniProt API error for '%s': %s", entry_name, exc)
@@ -83,7 +98,10 @@ def check_pubchem_existence(
 ) -> bool | None:
     """Validate whether a PubChem CID exists.
 
-    Returns ``True``/``False`` on success, ``None`` on network error.
+    Returns ``True`` (HTTP 200) or ``False`` (definitive HTTP 404, or a non-numeric
+    id) on a verdict, and ``None`` when the service is unavailable -- a transient
+    status (5xx/429), timeout, or network error. A transient failure is never
+    cached and never reported as "does not exist".
     """
     clean_cid = "".join(filter(str.isdigit, str(cid)))
     if not clean_cid:
@@ -98,9 +116,15 @@ def check_pubchem_existence(
     try:
         url = f"{PUBCHEM_REST_URL}/cid/{clean_cid}/description/JSON"
         resp = requests.get(url, timeout=TIMEOUT_PUBCHEM_VALIDATION)
-        is_valid = bool(resp.status_code == 200)
-        cache.set(key, is_valid)
-        return is_valid
+        if resp.status_code == 200:
+            cache.set(key, True)
+            return True
+        if resp.status_code == 404:
+            cache.set(key, False)
+            return False
+        # 5xx / 429 / other: service unavailable, not a verdict -> abstain, no cache.
+        logger.warning("PubChem unavailable (HTTP %s) for '%s'", resp.status_code, cid)
+        return None
     except (requests.RequestException, OSError) as exc:
         logger.warning("PubChem API error for '%s': %s", cid, exc)
         return None

@@ -771,6 +771,27 @@ class TestKeylessPubChemGate:
         assert lig["pubchem_id"] == "111"
         assert not any("Mismatch" in w for w in warnings)
 
+    def test_keyed_excluded_buffer_not_gated(self) -> None:
+        # An excluded buffer (e.g. PLM) is a keyed component: it has a chem_comp_id
+        # and its CID is echoed from metadata, not guessed -> never synonym-gated,
+        # and no network call is made.
+        from unittest.mock import patch
+
+        cache = _FakeSynonymCache({})
+        lig = {
+            "name": "Palmitic acid",
+            "chem_comp_id": "PLM",
+            "type": "lipid",
+            "pubchem_id": "985",
+        }
+        with patch(
+            "gpcr_tools.validator.ligand_validator.check_pubchem_synonym_match"
+        ) as mock_check:
+            warnings = self._gate_warnings([lig], cache)
+        mock_check.assert_not_called()
+        assert lig["pubchem_id"] == "985"
+        assert not any("Mismatch" in w or "API_UNAVAILABLE" in w for w in warnings)
+
     def test_correct_cid_kept_via_reported_synonym(self) -> None:
         cache = _FakeSynonymCache({"111": ["n-acetyl-example-amide"]})
         lig = {
