@@ -1,10 +1,14 @@
 """Multi-tier PDF downloader for GPCR papers.
 
-Downloads open-access PDFs via a tiered fallback strategy:
-  Tier 0 — CrossRef metadata enrichment (extract PMID/PMCID)
-  Tier 1 — Unpaywall (best OA PDF link)
-  Tier 2 — NCBI PMC OA interface (PDF link from XML)
-  Fallback — mark as ``"fallback_paywalled"``
+Resolves the DOI (recovering it from the citation table / a title search when
+the primary citation lacks one), then tries candidate PDF URLs as a true
+fallback chain -- a URL that resolves but yields a non-PDF (an HTML challenge)
+or a 403/404 does not end the search, only an exhausted chain marks the paper
+paywalled:
+  CrossRef metadata — PMID/PMCID and a direct publisher PDF link
+  Unpaywall — best OA PDF link
+  PMC open-access S3 bucket — by PMCID (promoting a PMID to a PMCID first)
+  Fallback — mark ``"fallback_paywalled"`` (left for manual download)
 
 Reads enriched JSON from ``enriched/{pdb_id}.json``, writes PDFs to
 ``papers/{pdb_id}.pdf``, and updates ``state/download_log.json``
@@ -20,7 +24,6 @@ import os
 import re
 import tempfile
 import time
-import xml.etree.ElementTree as ET
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -43,8 +46,10 @@ from gpcr_tools.config import (
     HTTP_RETRY_READ,
     HTTP_RETRY_STATUS_FORCELIST,
     HTTP_RETRY_TOTAL,
-    NCBI_PMC_OA_URL,
+    NCBI_IDCONV_URL,
     PDF_DOWNLOAD_CHUNK_SIZE,
+    PDF_MIN_VALID_BYTES,
+    PMC_S3_BASE_URL,
     SLEEP_NCBI_RATE_LIMIT,
     TIMEOUT_CROSSREF,
     TIMEOUT_NCBI_PMC_OA,
@@ -150,7 +155,12 @@ def _update_download_log(pdb_id: str, entry: dict[str, Any]) -> None:
 
 
 def _fetch_crossref_metadata(doi: str, session: requests.Session) -> dict[str, str | None]:
-    """Tier 0: Enrich with CrossRef metadata (PMID, PMCID)."""
+    """Tier 0: CrossRef metadata -- PMID, PMCID, and a direct PDF link if present.
+
+    Many gold/hybrid-OA publishers (notably Nature-brand journals) expose a direct
+    ``application/pdf`` link in CrossRef even when Unpaywall carries no PDF URL, so
+    capturing it here is the single largest DOI-only recovery.
+    """
     url = f"{CROSSREF_API_URL}/{doi}"
     try:
         response = session.get(url, timeout=TIMEOUT_CROSSREF)
@@ -158,16 +168,22 @@ def _fetch_crossref_metadata(doi: str, session: requests.Session) -> dict[str, s
             data = response.json().get("message") or {}
             pmid = data.get("PMID")
             pmcid: str | None = None
+            pdf_url: str | None = None
             for link in data.get("link") or []:
                 link_url = link.get("URL") or ""
+                content_type = link.get("content-type") or ""
+                if pdf_url is None and (
+                    "application/pdf" in content_type or link_url.lower().endswith(".pdf")
+                ):
+                    pdf_url = link_url
                 if "www.ncbi.nlm.nih.gov/pmc/articles/PMC" in link_url:
                     match = re.search(r"PMC(\d+)", link_url)
                     if match:
                         pmcid = match.group(1)
-            return {"pmid": pmid, "pmcid": pmcid}
+            return {"pmid": pmid, "pmcid": pmcid, "crossref_pdf_url": pdf_url}
     except requests.exceptions.RequestException as exc:
         logger.warning("[CrossRef] Failed for DOI %s: %s", doi, exc)
-    return {"pmid": None, "pmcid": None}
+    return {"pmid": None, "pmcid": None, "crossref_pdf_url": None}
 
 
 def _fetch_unpaywall_pdf_url(
@@ -193,26 +209,145 @@ def _fetch_unpaywall_pdf_url(
     return None
 
 
-def _fetch_pmc_oa_pdf_url(pmcid: str, session: requests.Session) -> str | None:
-    """Tier 2: Get PDF URL from NCBI PMC OA interface."""
-    pmcid_num = pmcid.upper().replace("PMC", "")
-    url = f"{NCBI_PMC_OA_URL}?id=PMC{pmcid_num}"
+def _fetch_pmc_s3_pdf_url(pmcid: str, session: requests.Session) -> str | None:
+    """Resolve the article PDF in the PMC open-access S3 bucket.
+
+    Replaces the retired NCBI OA FTP interface (the legacy oa_pdf paths now 404,
+    and the web reader endpoint is behind a bot challenge). Confirms via the
+    per-article metadata JSON that a PDF exists, then returns the canonical S3 PDF
+    URL. ``None`` when the article is not in the open-access subset.
+    """
+    pmcid_norm = pmcid.upper()
+    if not pmcid_norm.startswith("PMC"):
+        pmcid_norm = f"PMC{pmcid_norm}"
+    meta_url = f"{PMC_S3_BASE_URL}/metadata/{pmcid_norm}.1.json"
     try:
-        response = session.get(url, timeout=TIMEOUT_NCBI_PMC_OA)
-        time.sleep(SLEEP_NCBI_RATE_LIMIT)
-        if response.status_code == 200:
-            root = ET.fromstring(response.content)
-            for record in root.findall(".//record"):
-                for link in record.findall('.//link[@format="pdf"]'):
-                    pdf_href = link.get("href")
-                    if pdf_href:
-                        # Convert FTP to HTTPS if needed
-                        if pdf_href.startswith("ftp://ftp.ncbi.nlm.nih.gov/"):
-                            pdf_href = pdf_href.replace("ftp://", "https://", 1)
-                        return pdf_href
-    except (requests.exceptions.RequestException, ET.ParseError) as exc:
-        logger.warning("[PMC OA] Failed for PMCID %s: %s", pmcid, exc)
+        response = session.get(meta_url, timeout=TIMEOUT_NCBI_PMC_OA)
+        if response.status_code != 200:
+            return None
+        # ``pdf_url`` is the authoritative object path as an ``s3://bucket/key``
+        # URI with an optional ``?md5=`` query; map it to the public HTTPS object
+        # (this also carries the correct version, so no version is assumed). Null
+        # when the article has no PDF in the open-access subset.
+        pdf_field = (response.json() or {}).get("pdf_url")
+        if not pdf_field:
+            return None
+        pdf_field = str(pdf_field)
+        if pdf_field.startswith("s3://"):
+            key = pdf_field.removeprefix("s3://").split("/", 1)[1].split("?", 1)[0]
+            return f"{PMC_S3_BASE_URL}/{key}"
+        if pdf_field.startswith("http"):
+            return pdf_field.split("?", 1)[0]
+        return f"{PMC_S3_BASE_URL}/{pdf_field.lstrip('/').split('?', 1)[0]}"
+    except (requests.exceptions.RequestException, ValueError, IndexError) as exc:
+        logger.warning("[PMC S3] Failed for PMCID %s: %s", pmcid, exc)
     return None
+
+
+def _promote_pmid_to_pmcid(pmid: str, session: requests.Session) -> str | None:
+    """Map a PMID to a PMCID via the NCBI ID Converter.
+
+    Lets a DOI-only paper that nonetheless has a free PMC full text reach the PMC
+    open-access route. Returns ``PMC...`` or ``None``.
+    """
+    params = {"ids": str(pmid), "format": "json", "tool": "litfetcher"}
+    try:
+        response = session.get(NCBI_IDCONV_URL, params=params, timeout=TIMEOUT_NCBI_PMC_OA)
+        time.sleep(SLEEP_NCBI_RATE_LIMIT)  # the ID Converter rate-limits aggressively
+        if response.status_code == 200:
+            records = response.json().get("records") or []
+            if records and records[0].get("pmcid"):
+                return str(records[0]["pmcid"])
+    except (requests.exceptions.RequestException, ValueError) as exc:
+        logger.warning("[ID Converter] Failed for PMID %s: %s", pmid, exc)
+    return None
+
+
+_TITLE_TOKEN_RE = re.compile(r"[a-z0-9]+")
+# Boilerplate dropped before matching, so two distinct structural-biology titles
+# do not look similar merely by sharing "structure of the ... receptor".
+_TITLE_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "of",
+        "in",
+        "on",
+        "to",
+        "and",
+        "or",
+        "for",
+        "with",
+        "by",
+        "structure",
+        "structural",
+        "crystal",
+        "cryo",
+        "em",
+        "basis",
+    }
+)
+_TITLE_CONTAINMENT_MIN = 0.85
+
+
+def _title_tokens(text: str) -> set[str]:
+    return {t for t in _TITLE_TOKEN_RE.findall(text.lower()) if t not in _TITLE_STOPWORDS}
+
+
+def _fetch_doi_from_title(title: str, session: requests.Session) -> str | None:
+    """Recover a DOI from a paper title via CrossRef bibliographic search.
+
+    Accepts the top hit only when the two titles are near-identical in BOTH
+    directions (symmetric containment >= 0.85 over content tokens, stopwords
+    dropped). This rejects companion/series papers ("Structure of X" vs "Structure
+    of X bound to Y"), because attaching the WRONG paper is worse than none.
+    """
+    want = _title_tokens(title)
+    if len(want) < 3:  # too few content tokens to disambiguate safely
+        return None
+    params = {"query.bibliographic": title, "rows": "1"}
+    try:
+        response = session.get(CROSSREF_API_URL, params=params, timeout=TIMEOUT_CROSSREF)
+        if response.status_code == 200:
+            items = (response.json().get("message") or {}).get("items") or []
+            if items:
+                got = _title_tokens(" ".join(items[0].get("title") or []))
+                overlap = len(want & got)
+                if (
+                    got
+                    and overlap / len(want) >= _TITLE_CONTAINMENT_MIN
+                    and overlap / len(got) >= _TITLE_CONTAINMENT_MIN
+                ):
+                    doi = items[0].get("DOI")
+                    return str(doi) if doi else None
+    except (requests.exceptions.RequestException, ValueError) as exc:
+        logger.warning("[CrossRef title] Failed for %r: %s", title[:60], exc)
+    return None
+
+
+def _recover_missing_doi(
+    entry_data: dict[str, Any], pmid: Any, session: requests.Session
+) -> tuple[str | None, Any]:
+    """Best-effort DOI recovery when the primary citation carries none.
+
+    Reads the already-fetched ``citation`` table (its DOI/PubMed fields), then
+    falls back to a CrossRef title search. Returns ``(doi, pmid)``.
+    """
+    citations = [c for c in (entry_data.get("citation") or []) if isinstance(c, dict)]
+    primary = next((c for c in citations if c.get("id") == "primary"), None)
+    if primary is None and citations:
+        primary = citations[0]
+    if not primary:
+        return None, pmid
+    doi = primary.get("pdbx_database_id_DOI")
+    pmid = pmid or primary.get("pdbx_database_id_PubMed")
+    if doi:
+        return str(doi), pmid
+    title = primary.get("title")
+    if title:
+        return _fetch_doi_from_title(str(title), session), pmid
+    return None, pmid
 
 
 def _download_file(url: str, output_path: Path, session: requests.Session) -> bool:
@@ -224,17 +359,26 @@ def _download_file(url: str, output_path: Path, session: requests.Session) -> bo
             for chunk in response.iter_content(chunk_size=PDF_DOWNLOAD_CHUNK_SIZE):
                 f.write(chunk)
 
-        # Validate that the downloaded content is actually a PDF
+        # Validate the downloaded content: real PDF magic AND a plausible size.
+        # The magic check rejects HTML bot-challenge pages; the size floor rejects
+        # tiny error stubs / a stream truncated after the first chunk (which would
+        # otherwise be promoted to the final path and never retried).
         with open(output_path, "rb") as f:
             header = f.read(len(_PDF_MAGIC))
-        if not header.startswith(_PDF_MAGIC):
-            logger.warning("Downloaded content from %s is not a PDF (header: %r)", url, header[:16])
+        size = output_path.stat().st_size
+        if not header.startswith(_PDF_MAGIC) or size < PDF_MIN_VALID_BYTES:
+            logger.warning(
+                "Downloaded content from %s is not a valid PDF (header: %r, %d bytes)",
+                url,
+                header[:16],
+                size,
+            )
             with contextlib.suppress(OSError):
                 output_path.unlink()
             return False
 
         return True
-    except requests.exceptions.RequestException as exc:
+    except (requests.exceptions.RequestException, OSError) as exc:
         logger.warning("Download failed for %s: %s", url, exc)
         with contextlib.suppress(OSError):
             output_path.unlink()
@@ -337,6 +481,12 @@ def download_paper_for_pdb(
     pmcid = (entry_data.get("pubmed") or {}).get("rcsb_pubmed_central_id")
 
     if not doi:
+        # No DOI on the primary citation -- try the already-fetched citation[]
+        # table and a CrossRef title search before giving up; many entries have a
+        # published paper RCSB simply did not tag with a DOI.
+        doi, pmid = _recover_missing_doi(entry_data, pmid, sess)
+
+    if not doi:
         logger.info("[%s] No DOI found", pdb_id)
         entry = {
             "status": DL_STATUS_FAILED_NO_DOI,
@@ -350,33 +500,35 @@ def download_paper_for_pdb(
         _update_download_log(pdb_id, entry)
         return entry
 
-    # Tier 0: CrossRef metadata enrichment
+    # Tier 0: CrossRef metadata (PMID/PMCID + a direct publisher PDF link).
     crossref = _fetch_crossref_metadata(doi, sess)
     pmid = crossref.get("pmid") or pmid
     pmcid = crossref.get("pmcid") or pmcid
 
-    # Tier 1: Unpaywall
-    pdf_url: str | None = None
-    source: str | None = None
+    cfg.papers_dir.mkdir(parents=True, exist_ok=True)
+    temp_pdf = cfg.papers_dir / f"{pdb_id}_temp.pdf"
 
-    pdf_url = _fetch_unpaywall_pdf_url(doi, sess, email=resolved_email)
-    if pdf_url:
-        source = "unpaywall_pdf"
+    # Ordered candidate resolvers, tried as a TRUE fallback chain: a URL that
+    # resolves but yields a non-PDF (e.g. an HTML bot challenge) or a 403/404 does
+    # NOT end the search -- only an exhausted chain marks the paper paywalled.
+    def _pmc_s3_url() -> str | None:
+        nonlocal pmcid
+        if not pmcid and pmid:
+            pmcid = _promote_pmid_to_pmcid(str(pmid), sess)
+        return _fetch_pmc_s3_pdf_url(str(pmcid), sess) if pmcid else None
 
-    # Tier 2: NCBI PMC OA
-    if not pdf_url and pmcid:
-        pdf_url = _fetch_pmc_oa_pdf_url(str(pmcid), sess)
-        if pdf_url:
-            source = "ncbi_pmc_oa_pdf"
-
-    # Download if we have a URL
-    if pdf_url:
-        cfg.papers_dir.mkdir(parents=True, exist_ok=True)
-        temp_pdf = cfg.papers_dir / f"{pdb_id}_temp.pdf"
-
+    resolvers: list[tuple[str, Any]] = [
+        ("crossref_pdf", lambda: crossref.get("crossref_pdf_url")),
+        ("unpaywall_pdf", lambda: _fetch_unpaywall_pdf_url(doi, sess, email=resolved_email)),
+        ("pmc_s3_pdf", _pmc_s3_url),
+    ]
+    for source, resolve in resolvers:
+        pdf_url = resolve()
+        if not pdf_url:
+            continue
         if _download_file(pdf_url, temp_pdf, sess):
             os.replace(str(temp_pdf), str(final_pdf))
-            logger.info("[%s] Downloaded PDF → %s", pdb_id, final_pdf)
+            logger.info("[%s] Downloaded PDF → %s (%s)", pdb_id, final_pdf, source)
             entry = {
                 "status": DL_STATUS_SUCCESS,
                 "source": source,
@@ -388,14 +540,13 @@ def download_paper_for_pdb(
             }
             _update_download_log(pdb_id, entry)
             return entry
-        else:
-            # Clean up temp file
-            with contextlib.suppress(OSError):
-                temp_pdf.unlink()
+        with contextlib.suppress(OSError):
+            temp_pdf.unlink()
 
-    # No usable PDF. We deliberately do NOT fall back to an abstract: the
-    # annotator needs the full paper, and a PDB with no PDF is simply not
-    # processed (left paywalled for optional manual download, then skipped).
+    # Every open-access route exhausted. We deliberately do NOT fall back to an
+    # abstract: the annotator needs the full paper, so the PDB is left paywalled
+    # for manual download (the watcher ingests a hand-dropped PDF) and otherwise
+    # skipped downstream.
     logger.info("[%s] No open-access PDF available, marking paywalled", pdb_id)
     entry = {
         "status": DL_STATUS_PAYWALLED,

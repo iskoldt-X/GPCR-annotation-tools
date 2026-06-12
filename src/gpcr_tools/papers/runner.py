@@ -9,13 +9,15 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
-from gpcr_tools.config import get_config
+from gpcr_tools.config import DL_STATUS_FAILED_NO_DATA, get_config
 from gpcr_tools.fetcher.targets import read_targets
 from gpcr_tools.papers.downloader import (
     _build_session,
     _read_download_log,
+    _update_download_log,
     download_paper_for_pdb,
 )
 from gpcr_tools.papers.watcher import _get_pending_paywalled, run_watcher
@@ -89,12 +91,27 @@ def run_fetch_papers(
     ok = 0
     fail = 0
     for pid in tqdm(pdb_ids, desc="Fetching papers"):
-        result = download_paper_for_pdb(
-            pid,
-            session=session,
-            email=email,
-            force=force,
-        )
+        try:
+            result = download_paper_for_pdb(
+                pid,
+                session=session,
+                email=email,
+                force=force,
+            )
+        except Exception as exc:
+            # One bad record must not abort the batch: log it and record a
+            # terminal entry so it is never silently dropped.
+            logger.warning("[%s] Unexpected error, recording as failed: %s", pid, exc)
+            result = {
+                "status": DL_STATUS_FAILED_NO_DATA,
+                "source": None,
+                "file_path": None,
+                "doi": None,
+                "pmid": None,
+                "pmcid": None,
+                "timestamp": datetime.now(UTC).isoformat(),
+            }
+            _update_download_log(pid, result)
         status = result.get("status") or ""
         if status.startswith("success") or status.startswith("skipped"):
             ok += 1
