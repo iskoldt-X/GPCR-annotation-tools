@@ -109,6 +109,22 @@ class TestSequenceCache:
         assert cache2.get("P12345", now=2000.0 + 1 * 86400) == "ACDEF"
         assert cache2.get("P12345", now=2000.0 + 31 * 86400) is None
 
+    def test_mark_unavailable_default_false(self, tmp_path: Path) -> None:
+        cache = SequenceCache(tmp_path / "seq.json")
+        assert cache.is_unavailable("P12345") is False
+
+    def test_mark_unavailable_is_in_memory_and_not_persisted(self, tmp_path: Path) -> None:
+        # The transient-failure guard is per-run: never saved, so a fresh run
+        # re-probes the accession rather than freezing an outage as a cached fact.
+        path = tmp_path / "seq.json"
+        cache = SequenceCache(path)
+        cache.mark_unavailable("P12345")
+        assert cache.is_unavailable("P12345") is True
+        cache.save()
+        on_disk = json.loads(path.read_text(encoding="utf-8"))
+        assert "P12345" not in on_disk
+        assert SequenceCache(path).is_unavailable("P12345") is False
+
 
 class TestAtomicWrite:
     def test_file_written(self, tmp_path: Path) -> None:

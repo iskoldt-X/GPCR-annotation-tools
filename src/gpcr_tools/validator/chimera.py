@@ -143,6 +143,10 @@ def get_sequence_from_uniprot(
     cached = cache.get(accession)
     if cached is not None:
         return cached
+    if cache.is_unavailable(accession):
+        # Already failed transiently this run -- don't re-hit the dead endpoint
+        # once per PDB. Abstains (returns None) exactly as a fresh failure would.
+        return None
 
     url = f"{UNIPROT_REST_URL}/{accession}.fasta"
     for attempt in range(API_MAX_RETRIES):
@@ -167,11 +171,13 @@ def get_sequence_from_uniprot(
                     resp.status_code,
                     accession,
                 )
+                cache.mark_unavailable(accession)
                 return None
             time.sleep(SLEEP_VALIDATION_RETRY)
         except (requests.RequestException, OSError) as exc:
             if attempt == API_MAX_RETRIES - 1:
                 logger.warning("UniProt FASTA fetch error for '%s': %s", accession, exc)
+                cache.mark_unavailable(accession)
                 return None
             time.sleep(SLEEP_VALIDATION_RETRY)
 
@@ -274,6 +280,7 @@ def _base_result() -> dict[str, Any]:
         "backbone_family": None,
         "backbone_slug": None,
         "is_alpha5_graft": False,
+        "transient_abstained": [],
         "error": None,
     }
 
@@ -294,7 +301,7 @@ def get_chimera_analysis(
     ``family_confident``, ``subtype``, ``subtype_resolution``,
     ``candidate_set``, ``score``, ``a5_window``, ``a5_tail``,
     ``candidates_checked``, ``backbone_family``, ``backbone_slug``,
-    ``is_alpha5_graft``, ``error``.
+    ``is_alpha5_graft``, ``transient_abstained``, ``error``.
     """
     result = _base_result()
     w = CHIMERA_A5_WINDOW
@@ -349,8 +356,18 @@ def get_chimera_analysis(
         if len(ref_seq) >= w:
             ref_tails[slug] = ref_seq[-w:]
 
+    # References that transiently failed THIS run (timeout/5xx, never a definitive
+    # 404). Distinct from `abstained` above, which also counts 404s: only a
+    # transient gap means a re-run could recover the datum, so only this set marks
+    # the detect output incomplete (an all-404 roster is genuinely unresolvable,
+    # not degraded, and must not trigger a perpetual re-run).
+    transient_abstained = sorted(
+        slug for acc_id, slug in candidates.items() if cache.is_unavailable(acc_id)
+    )
+
     if not ref_tails:
         result["status"] = CHIMERA_STATUS_NO_VALID_COMPARISONS
+        result["transient_abstained"] = transient_abstained
         return result
 
     # 5. Score the structure's alpha5 against each reference. Try the
@@ -410,5 +427,6 @@ def get_chimera_analysis(
         backbone_family=backbone_family,
         backbone_slug=backbone_slug,
         is_alpha5_graft=is_graft,
+        transient_abstained=transient_abstained,
     )
     return result

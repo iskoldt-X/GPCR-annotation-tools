@@ -6,11 +6,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from gpcr_tools.config import FULL_G_ALPHA_CANDIDATES, reset_config
+from gpcr_tools.config import (
+    API_MAX_RETRIES,
+    DETECT_INCOMPLETE_MARKER_KEY,
+    FULL_G_ALPHA_CANDIDATES,
+    reset_config,
+)
 from gpcr_tools.detector.gprotein import G_PROTEIN_LOCUS, detect_g_protein_identity
 from gpcr_tools.detector.ligands import detect_incidental_candidates
 from gpcr_tools.detector.signals import (
@@ -57,6 +62,21 @@ def _nonpoly_entry(comp_ids: list[str]) -> dict[str, Any]:
 
 
 _TRANSDUCIN_TAILS = dict.fromkeys(("gnat1_human", "gnat2_human", "gnat3_human"), TRANSDUCIN_A5)
+
+
+def _outage_fetch(accession: str, cache: Any) -> None:
+    """A get_sequence_from_uniprot stand-in that transiently abstains for every
+    accession, marking it unavailable this run exactly as the real transient
+    (timeout/5xx) branch does."""
+    cache.mark_unavailable(accession)
+    return None
+
+
+def _resp(status_code: int) -> MagicMock:
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.text = ""
+    return resp
 
 
 class TestIncidentalCandidateLigandDetector:
@@ -133,7 +153,7 @@ class TestGProteinDetector:
             "gpcr_tools.validator.chimera.get_sequence_from_uniprot",
             side_effect=_mock_refs(_TRANSDUCIN_TAILS),
         ):
-            sigs = detect_g_protein_identity("9IIX", entry, cache)
+            sigs, _ = detect_g_protein_identity("9IIX", entry, cache)
         assert len(sigs) == 1
         s = sigs[0]
         assert s.kind == SIGNAL_CHIMERIC_GPROTEIN
@@ -150,7 +170,7 @@ class TestGProteinDetector:
             "gpcr_tools.validator.chimera.get_sequence_from_uniprot",
             side_effect=_mock_refs({"gnas2_human": target}),
         ):
-            sigs = detect_g_protein_identity("X", entry, cache)
+            sigs, _ = detect_g_protein_identity("X", entry, cache)
         assert len(sigs) == 1
         assert sigs[0].severity == SEVERITY_ADVISORY
         assert sigs[0].payload["subtype"] == "gnas2_human"
@@ -172,7 +192,7 @@ class TestGProteinDetector:
             "gpcr_tools.validator.chimera.get_sequence_from_uniprot",
             side_effect=_mock_refs(tails),
         ):
-            sigs = detect_g_protein_identity("X", entry, cache)
+            sigs, _ = detect_g_protein_identity("X", entry, cache)
         assert len(sigs) == 1
         s = sigs[0]
         assert s.severity == SEVERITY_REVIEW
@@ -193,7 +213,7 @@ class TestGProteinDetector:
             "gpcr_tools.validator.chimera.get_sequence_from_uniprot",
             side_effect=_mock_refs(tails),
         ):
-            sigs = detect_g_protein_identity("X", entry, cache)
+            sigs, _ = detect_g_protein_identity("X", entry, cache)
         assert len(sigs) == 1
         assert sigs[0].severity == SEVERITY_ADVISORY
         assert sigs[0].payload["subtype"] == "gnas2_human"
@@ -208,7 +228,7 @@ class TestGProteinDetector:
                 }
             ]
         }
-        assert detect_g_protein_identity("X", entry, cache) == []
+        assert detect_g_protein_identity("X", entry, cache) == ([], False)
 
     def test_low_confidence_emits_weak_review(self, tmp_path: Path) -> None:
         cache = SequenceCache(tmp_path / "seq.json")
@@ -217,10 +237,35 @@ class TestGProteinDetector:
             "gpcr_tools.validator.chimera.get_sequence_from_uniprot",
             side_effect=_mock_refs({}),  # every ref gets DISTINCT_A5 (no 'A')
         ):
-            sigs = detect_g_protein_identity("X", entry, cache)
+            sigs, _ = detect_g_protein_identity("X", entry, cache)
         assert len(sigs) == 1
         assert sigs[0].severity == SEVERITY_REVIEW
         assert "too weak" in sigs[0].summary
+
+    def test_transient_reference_outage_reports_degraded(self, tmp_path: Path) -> None:
+        # Every reference fetch transiently abstains: no signal can be emitted and
+        # the result is flagged degraded so the detect stage marks it for re-run.
+        cache = SequenceCache(tmp_path / "seq.json")
+        entry = _galpha_entry("MMMMMMMMMM" + TRANSDUCIN_A5)
+        with patch(
+            "gpcr_tools.validator.chimera.get_sequence_from_uniprot",
+            side_effect=_outage_fetch,
+        ):
+            sigs, degraded = detect_g_protein_identity("X", entry, cache)
+        assert sigs == []
+        assert degraded is True
+
+    def test_clean_resolution_not_degraded(self, tmp_path: Path) -> None:
+        cache = SequenceCache(tmp_path / "seq.json")
+        target = "ACDEFGHIKLM"
+        entry = _galpha_entry("MMMMMMMMMM" + target)
+        with patch(
+            "gpcr_tools.validator.chimera.get_sequence_from_uniprot",
+            side_effect=_mock_refs({"gnas2_human": target}),
+        ):
+            sigs, degraded = detect_g_protein_identity("X", entry, cache)
+        assert len(sigs) == 1
+        assert degraded is False
 
 
 class TestDetectStage:
@@ -325,3 +370,119 @@ class TestDetectStage:
         ):
             run_detect_stage("9IIX")
         assert (ws / "cache" / "uniprot_sequence_cache.json").is_file()
+
+    def test_complete_output_is_skipped_on_rerun(self, ws: Path) -> None:
+        (ws / "enriched" / "9IIX.json").write_text(
+            json.dumps(_galpha_entry("MMMMMMMMMM" + TRANSDUCIN_A5))
+        )
+        with patch(
+            "gpcr_tools.validator.chimera.get_sequence_from_uniprot",
+            side_effect=_mock_refs(_TRANSDUCIN_TAILS),
+        ):
+            first = run_detect("9IIX")  # writes a complete (un-marked) output
+        # A second run must not recompute: the detector would raise if reached.
+        with patch(
+            "gpcr_tools.detector.stage.detect_g_protein_identity",
+            side_effect=AssertionError("complete output should be skipped"),
+        ):
+            again = run_detect("9IIX")
+        assert again == first  # served from the persisted file
+
+    def test_force_recomputes_complete_output(self, ws: Path) -> None:
+        (ws / "enriched" / "9IIX.json").write_text(
+            json.dumps(_galpha_entry("MMMMMMMMMM" + TRANSDUCIN_A5))
+        )
+        with patch(
+            "gpcr_tools.validator.chimera.get_sequence_from_uniprot",
+            side_effect=_mock_refs(_TRANSDUCIN_TAILS),
+        ):
+            run_detect("9IIX")
+            recomputed: list[str] = []
+
+            def _spy(pdb_id: str, entry: Any, cache: Any) -> tuple[list, bool]:
+                recomputed.append(pdb_id)
+                return [], False
+
+            with patch("gpcr_tools.detector.stage.detect_g_protein_identity", side_effect=_spy):
+                run_detect("9IIX", force=True)
+        assert recomputed == ["9IIX"]  # recomputed despite a complete output
+
+    def test_incomplete_marked_output_is_recomputed_and_marker_cleared(self, ws: Path) -> None:
+        (ws / "enriched" / "9IIX.json").write_text(
+            json.dumps(_galpha_entry("MMMMMMMMMM" + TRANSDUCIN_A5))
+        )
+        (ws / "detect" / "9IIX.json").write_text(
+            json.dumps({"pdb_id": "9IIX", "signals": [], DETECT_INCOMPLETE_MARKER_KEY: True})
+        )
+        with patch(
+            "gpcr_tools.validator.chimera.get_sequence_from_uniprot",
+            side_effect=_mock_refs(_TRANSDUCIN_TAILS),
+        ):
+            sigs = run_detect("9IIX")  # recompute now that the fetch succeeds
+        assert len(sigs) == 1
+        data = json.loads((ws / "detect" / "9IIX.json").read_text())
+        assert DETECT_INCOMPLETE_MARKER_KEY not in data  # marker cleared on clean recompute
+
+    def test_transient_outage_marks_detect_incomplete(self, ws: Path) -> None:
+        (ws / "enriched" / "9IIX.json").write_text(
+            json.dumps(_galpha_entry("MMMMMMMMMM" + TRANSDUCIN_A5))
+        )
+        with patch(
+            "gpcr_tools.validator.chimera.get_sequence_from_uniprot",
+            side_effect=_outage_fetch,
+        ):
+            run_detect("9IIX")
+        data = json.loads((ws / "detect" / "9IIX.json").read_text())
+        assert data.get(DETECT_INCOMPLETE_MARKER_KEY) is True
+
+    def test_skip_api_checks_preserves_existing_incomplete_marker(self, ws: Path) -> None:
+        # A metadata-only pass over a file marked incomplete by an earlier outage
+        # cannot resolve the sequence-fetch gap, so it must NOT clear the marker
+        # (else a later full run would skip it and freeze the missing signal).
+        (ws / "enriched" / "9IIX.json").write_text(
+            json.dumps(_galpha_entry("MMMMMMMMMM" + TRANSDUCIN_A5))
+        )
+        (ws / "detect" / "9IIX.json").write_text(
+            json.dumps({"pdb_id": "9IIX", "signals": [], DETECT_INCOMPLETE_MARKER_KEY: True})
+        )
+        run_detect("9IIX", skip_api_checks=True)
+        data = json.loads((ws / "detect" / "9IIX.json").read_text())
+        assert data.get(DETECT_INCOMPLETE_MARKER_KEY) is True
+
+    def test_signal_free_structure_not_marked_and_skipped(self, ws: Path) -> None:
+        # A structure with no G-alpha legitimately yields no chimera signal: it
+        # must carry no incomplete marker and be skipped on a later run (never
+        # re-run forever).
+        entry: dict[str, Any] = {
+            "polymer_entities": [
+                {
+                    "rcsb_polymer_entity": {"pdbx_description": "Dopamine receptor D2"},
+                    "entity_poly": {"pdbx_seq_one_letter_code_can": "MMMMMMMMMMMM"},
+                }
+            ]
+        }
+        (ws / "enriched" / "9XYZ.json").write_text(json.dumps(entry))
+        run_detect("9XYZ")
+        data = json.loads((ws / "detect" / "9XYZ.json").read_text())
+        assert DETECT_INCOMPLETE_MARKER_KEY not in data
+        with patch(
+            "gpcr_tools.detector.stage.detect_g_protein_identity",
+            side_effect=AssertionError("signal-free output should be skipped"),
+        ):
+            run_detect("9XYZ")
+
+    def test_outage_reference_fetched_once_across_run(self, ws: Path) -> None:
+        # The shared per-run cache memoizes a transient failure, so during a total
+        # outage each reference is attempted once (with its retries) on the first
+        # PDB, not re-requested for every subsequent PDB in the batch.
+        for pid in ("AAAA", "BBBB", "CCCC"):
+            (ws / "enriched" / f"{pid}.json").write_text(
+                json.dumps(_galpha_entry("MMMMMMMMMM" + TRANSDUCIN_A5))
+            )
+        with (
+            patch("gpcr_tools.validator.chimera.requests.get", return_value=_resp(503)) as mock_get,
+            patch("gpcr_tools.validator.chimera.time.sleep"),
+        ):
+            run_detect_stage()
+        # Bounded by the roster size x retries, regardless of the number of PDBs.
+        assert mock_get.call_count <= len(FULL_G_ALPHA_CANDIDATES) * API_MAX_RETRIES
