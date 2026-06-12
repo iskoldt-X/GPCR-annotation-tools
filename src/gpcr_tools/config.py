@@ -89,12 +89,6 @@ SLEEP_VALIDATION_RETRY: float = 1.0
 SLEEP_GEMINI_429: float = 5.0
 
 # ---------------------------------------------------------------------------
-# Enricher thresholds
-# ---------------------------------------------------------------------------
-
-LIGAND_WEIGHT_THRESHOLD: float = 900.0
-
-# ---------------------------------------------------------------------------
 # PDF download / compression
 # ---------------------------------------------------------------------------
 
@@ -304,6 +298,19 @@ SOFT_FIELD_KEYS: frozenset[str] = frozenset(
 # each other are flagged for human review: a near-tie is too fragile to present
 # as settled, even when the selected value equals the majority.
 VOTE_NEAR_TIE_MARGIN: int = 1
+
+# Leaf fields whose votes differ only by letter case ("Nanobody" vs "nanobody")
+# should not be treated as competing candidates: the runs agree on the entity
+# and disagree only on capitalisation. For these fields the voting and
+# discrepancy stages compare values case-insensitively (plain casefold) so a
+# pure-case split is not surfaced as a near-tie, and a selected value that
+# differs from the majority only by case is not surfaced as a discrepancy.
+# Membership is deliberately narrow — ONLY a free-text display name belongs
+# here. `chain_id` is excluded on purpose: chains "A" and "a" are distinct
+# chains in some entries, so folding their case would silently merge them.
+# Other identifier fields (type.value, role.value, uniprot_entry_name,
+# chem_comp_id) are likewise left case-sensitive.
+CASE_FOLD_NAME_FIELDS: frozenset[str] = frozenset({"name"})
 
 # Self-reported confidence levels that should be promoted to human review even
 # when all runs agree — a unanimous low-confidence inference is still a guess.
@@ -636,6 +643,63 @@ INCIDENTAL_CANDIDATES: frozenset[str] = frozenset(
         "NKP",  # lysophosphatidic acid (LPA-receptor agonist)
         "ACT",  # acetate (short-chain fatty-acid agonist at FFA receptors)
         "SIN",  # succinic acid (succinate-receptor agonist)
+    }
+)
+
+# Genuine-lipid chem_comp ids for deterministic ``lipid`` typing. The CCD
+# ``_chem_comp.type`` is "non-polymer" for almost every ligand and so cannot
+# separate a lipid from any other small molecule; this frozen whitelist supplies
+# that distinction. It was built offline by taking the nonpolymer comp_ids that
+# occur bound in GPCR structures, keeping only members of an established lipid
+# class — sterols/steroids, free fatty acids (saturated, unsaturated, hydroxy),
+# fatty-acyl amides and N-acylethanolamines, sphingolipids, glycerophospholipids,
+# lysophospholipids and lysophosphatidic acids — verified by chemical name and
+# formula against ChEBI (is-a lipid, CHEBI:18059) and the RCSB CCD, plus a few
+# canonical lipid codes (e.g. STE, MYR, PCW) that future depositions may carry.
+# Deliberately excluded as a separate, model-overridable boundary: retinoids and
+# other isoprenoids/prenols, short- and medium-chain acids (acetate, succinate,
+# pentanoic/octanoic acid), prostaglandins/leukotrienes and other eicosanoid
+# drug analogues, and synthetic lipid-receptor-agonist scaffolds. The whitelist
+# is frozen in code and refreshed offline, never queried at inference time.
+# Membrane-matrix and solubilization lipids (monoolein OLC/OLB, cholesterol
+# hemisuccinate Y01) are intentionally absent because LIGAND_EXCLUDE_LIST strips
+# them before classification.
+LIPID_COMP_IDS: frozenset[str] = frozenset(
+    {
+        # Sterols / steroids
+        "CLR",  # cholesterol
+        "CO1",  # oxidized cholesterol (oxysterol)
+        # Free fatty acids
+        "PLM",  # palmitic acid
+        "OLA",  # oleic acid
+        "MYR",  # myristic acid
+        "STE",  # stearic acid
+        "DAO",  # lauric acid
+        "EIC",  # linoleic acid
+        "EPA",  # eicosapentaenoic acid
+        "HXA",  # docosahexaenoic acid
+        "HXD",  # 3-hydroxydodecanoic acid
+        "7NR",  # 9-hydroxyoctadecanoic acid
+        "9HO",  # hydroxyoctadecadienoic acid
+        # Fatty-acyl amides / N-acylethanolamines
+        "140",  # N-palmitoylglycine
+        "5YM",  # oleoylethanolamide
+        "ZI5",  # N-acylethanolamide (anandamide analogue)
+        # Sphingolipids
+        "S1P",  # sphingosine-1-phosphate
+        "SPH",  # sphingosine
+        # Glycerophospholipids / lyso / phosphatidic acid
+        "LPC",  # lysophosphatidylcholine
+        "LSC",  # lysophosphatidylcholine
+        "PFS",  # platelet-activating-factor ether phospholipid
+        "PCW",  # phosphatidylcholine
+        "A1LYA",  # phosphatidylcholine
+        "U3D",  # phosphatidylcholine
+        "L9Q",  # phosphatidylethanolamine
+        "U3G",  # phosphatidylethanolamine
+        "NKP",  # lysophosphatidic acid
+        "TJR",  # lysophosphatidic acid
+        "UBL",  # lysophosphatidic acid
     }
 )
 

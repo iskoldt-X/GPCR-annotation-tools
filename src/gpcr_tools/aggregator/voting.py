@@ -11,6 +11,7 @@ from collections import Counter, defaultdict
 from typing import Any
 
 from gpcr_tools.config import (
+    CASE_FOLD_NAME_FIELDS,
     GROUND_TRUTH_PATHS,
     LIST_ITEM_KEY_FIELDS,
     SOFT_FIELD_KEYS,
@@ -63,6 +64,33 @@ def _resolve_key_field(path: str) -> str | None:
         if segment in path:
             return key_field
     return None
+
+
+def _case_only_canonical(values: list[Any]) -> str | None:
+    """Return one canonical casing when *values* are a pure case-only variation.
+
+    The runs are a pure-case variation when every value is a string and they
+    all ``casefold()`` to a single bucket — i.e. the runs agree on the entity
+    and disagree only on capitalisation ("Nanobody" vs "nanobody"). Returns
+    ``None`` when that does not hold, so a genuine spelling difference (one run
+    saying "CholesterolBase" against "Cholesterol") still folds to more than one
+    bucket and is left to surface as a real disagreement.
+
+    The chosen casing is deterministic so the displayed name does not drift
+    between runs: most-common original spelling, then fewest uppercase letters,
+    then lexicographic.
+    """
+    if not values or not all(isinstance(v, str) for v in values):
+        return None
+    if len({v.casefold() for v in values}) != 1:
+        return None
+    counts = Counter(values)
+    return str(
+        min(
+            counts,
+            key=lambda s: (-counts[s], sum(1 for ch in s if ch.isupper()), s),
+        )
+    )
 
 
 def get_majority_votes(
@@ -137,6 +165,15 @@ def get_majority_votes(
         return majority_dict, counts_dict
 
     # --- Scalar branch ---
+    # A name field whose values differ only by letter case is one entity the
+    # runs agree on. Collapse the vote to a single canonical-casing candidate
+    # so the pure-case split is never read as a near-tie. A genuine spelling
+    # difference folds to more than one bucket and is left to vote normally.
+    if key_name in CASE_FOLD_NAME_FIELDS:
+        canonical = _case_only_canonical(values)
+        if canonical is not None:
+            return canonical, {canonical: len(values)}
+
     try:
         counter = Counter(values)
         most_common = counter.most_common(1)[0][0]
@@ -301,6 +338,23 @@ def find_discrepancies(
 
     if majority_data is not None:
         if best_run_data != majority_data:
+            # A name leaf whose best-run value differs from the majority value
+            # ONLY by letter case is not a real disagreement: the best run was
+            # selected on the whole structure and may carry a minority
+            # capitalisation of a name it otherwise agrees on. Skip it. This is
+            # independent of how the best run is chosen, so it catches the
+            # selected-value-differs case that the vote-collapse alone does not.
+            # The skip is confined to this differing-value branch on purpose:
+            # when the values are equal the vote shape must still be checked
+            # below, so a genuine near-tie between distinct name wordings (which
+            # do not fold to one bucket) keeps being surfaced for review.
+            if (
+                current_key in CASE_FOLD_NAME_FIELDS
+                and isinstance(best_run_data, str)
+                and isinstance(majority_data, str)
+                and best_run_data.casefold() == majority_data.casefold()
+            ):
+                return discrepancies
             discrepancies.append(
                 {
                     "path": path,

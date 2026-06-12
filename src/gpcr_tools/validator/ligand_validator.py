@@ -3,8 +3,10 @@
 Validates each AI-reported ligand against the enriched PDB metadata and
 injects pre-fetched chemical identifiers (InChIKey, SMILES, etc.) in-place.
 
-Purely offline: reads only from the pre-loaded enriched entry dict.
-No network calls.
+Reads primarily from the pre-loaded enriched entry dict.  The one network
+touch point is the optional PubChem synonym gate, which runs only for a ligand
+that carries a model-supplied PubChem CID with no matched chemical component,
+and only when a cache is provided; without a cache the pass stays fully offline.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ import logging
 from typing import Any
 
 from gpcr_tools.config import (
+    ALERT_PREFIX_API_UNAVAILABLE,
     ALERT_PREFIX_G_PROTEIN_LIGAND,
     ALERT_PREFIX_MULTIPLE_AGONISTS,
     APO_SENTINEL,
@@ -29,6 +32,7 @@ from gpcr_tools.config import (
     VALIDATION_MATCHED_SMALL_MOLECULE,
     VALIDATION_SKIPPED_APO,
 )
+from gpcr_tools.validator.api_clients import SynonymCache, check_pubchem_synonym_match
 from gpcr_tools.validator.chimera import is_g_alpha_description
 from gpcr_tools.validator.endogenous import ENDOGENOUS_UNKNOWN, classify_endogenous
 
@@ -90,12 +94,20 @@ def validate_and_enrich_ligands(
     pdb_id: str,
     best_run_data: dict[str, Any],
     enriched_entry: dict[str, Any],
+    *,
+    synonym_cache: SynonymCache | None = None,
 ) -> list[str]:
     """Validate AI-reported ligands and inject chemical identifiers.
 
     Mutates *best_run_data* ligand dicts in-place.
     Returns a list of warning strings (``GHOST_LIGAND`` detections, plus apo
     placeholders that coexist with real ligands).
+
+    When *synonym_cache* is provided, a ligand that carries a model-supplied
+    PubChem CID but matched no chemical component (no authoritative CID to copy)
+    has that CID cross-checked against PubChem's synonym list; a CID that names a
+    different molecule is blanked and flagged.  Without a cache this step is
+    skipped and the pass remains fully offline.
 
     Warning format:
         ``f"GHOST_LIGAND at 'ligands[{label}]': '{name}' ({cid}) not found in API entities."``
@@ -171,11 +183,68 @@ def validate_and_enrich_ligands(
             f"'{ai_name}' ({cid_display}) not found in API entities."
         )
 
+    if synonym_cache is not None:
+        _gate_keyless_pubchem_ids(ligands, synonym_cache, warnings)
     _warn_on_apo_with_real_ligands(ligands, warnings)
     _warn_on_role_site_mismatch(ligands, warnings)
     _warn_on_g_protein_peptide_as_ligand(ligands, api["poly_by_chain"], warnings)
     _warn_on_multiple_agonists(ligands, warnings)
     return warnings
+
+
+def _gate_keyless_pubchem_ids(
+    ligands: list[Any],
+    synonym_cache: SynonymCache,
+    warnings: list[str],
+) -> None:
+    """Cross-check a model-supplied PubChem CID against the CID's own synonyms.
+
+    Runs only for a *keyless* ligand -- one with no matched chemical component,
+    so its ``api_pubchem_cid`` was never set from authoritative metadata and the
+    CID was supplied from the model's own memory.  A ligand that matched a small
+    molecule keeps the authoritative CID copied from the enriched data and is
+    never touched here (matched CIDs carry occasional sparse-synonym entries that
+    a synonym check would wrongly reject).
+
+    Candidate names are the union of the reported name and any reported synonyms;
+    matching against this union, rather than the bare name, keeps the false-
+    reject rate low.  On a definitive mismatch the CID is blanked and a warning
+    is appended.  On a network abstention the value is left untouched and an
+    ``[API_UNAVAILABLE]`` note is emitted, mirroring the other API checks.
+    """
+    for lig in ligands:
+        if not isinstance(lig, dict) or "api_pubchem_cid" in lig:
+            continue  # Matched small molecule -> authoritative CID, leave it.
+        cid = lig.get("pubchem_id")
+        if not cid or str(cid).strip().lower() in EMPTY_VALUES:
+            continue
+
+        name = (lig.get("name") or "").strip()
+        synonyms = lig.get("synonyms")
+        candidate_names = [name] if name else []
+        if isinstance(synonyms, list):
+            candidate_names.extend(str(s) for s in synonyms if s)
+        if not candidate_names:
+            # No name or synonyms to compare against: there is nothing to verify and
+            # no network call is made, so emit no warning (an [API_UNAVAILABLE] note
+            # here would wrongly imply a network failure that never happened).
+            continue
+
+        verdict = check_pubchem_synonym_match(str(cid), candidate_names, synonym_cache)
+        if verdict is False:
+            lig["pubchem_id"] = None
+            display = name or lig.get("chem_comp_id") or "?"
+            warnings.append(
+                f"PubChem CID Mismatch at 'ligands': CID '{cid}' is not a known "
+                f"synonym of '{display}' -- the identifier appears to name a "
+                f"different compound and has been cleared."
+            )
+        elif verdict is None:
+            display = name or lig.get("chem_comp_id") or "?"
+            warnings.append(
+                f"{ALERT_PREFIX_API_UNAVAILABLE} at 'ligands': could not verify "
+                f"PubChem CID '{cid}' for '{display}'."
+            )
 
 
 # Role values (subsets of the schema role enum) used by the role/site consistency
