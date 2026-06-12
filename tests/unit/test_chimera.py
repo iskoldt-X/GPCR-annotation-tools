@@ -10,9 +10,12 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+
+import requests
 
 from gpcr_tools.config import (
+    API_MAX_RETRIES,
     CHIMERA_A5_WINDOW,
     CHIMERA_STATUS_NO_G_PROTEIN,
     CHIMERA_STATUS_NO_VALID_COMPARISONS,
@@ -26,8 +29,10 @@ from gpcr_tools.config import (
 )
 from gpcr_tools.validator.cache import SequenceCache
 from gpcr_tools.validator.chimera import (
+    _resolve_subtype,
     calculate_match_score,
     get_chimera_analysis,
+    get_sequence_from_uniprot,
     is_alpha5_mimetic_description,
     is_g_alpha_description,
 )
@@ -192,18 +197,22 @@ def _make_enriched(
     return {"polymer_entities": [entity]}
 
 
-def _mock_refs(tail_by_slug: dict[str, str], default_tail: str = DISTINCT_A5) -> Any:
+def _mock_refs(tail_by_slug: dict[str, str | None], default_tail: str = DISTINCT_A5) -> Any:
     """Return a get_sequence_from_uniprot stand-in.
 
     Each accession maps (via FULL_G_ALPHA_CANDIDATES) to a slug; the returned
     sequence ends with that slug's assigned alpha5 window, padded so it exceeds
-    the window length.
+    the window length. A slug whose entry is explicitly ``None`` simulates a
+    fetch abstain (transient outage / absent accession) and returns ``None``;
+    unlisted slugs fall back to *default_tail*.
     """
 
     def _fetch(accession: str, cache: Any) -> str | None:
         slug = FULL_G_ALPHA_CANDIDATES.get(accession)
-        tail = tail_by_slug.get(slug, default_tail) if slug else default_tail
-        return "GGGGG" + tail
+        if slug is not None and slug in tail_by_slug:
+            tail = tail_by_slug[slug]
+            return None if tail is None else "GGGGG" + tail
+        return "GGGGG" + default_tail
 
     return _fetch
 
@@ -254,6 +263,70 @@ class TestGetChimeraAnalysis:
         assert result["subtype"] is None
         assert result["subtype_resolution"] == CHIMERA_SUBTYPE_INSEPARABLE_SET
         assert result["candidate_set"] == ["gnat1_human", "gnat2_human", "gnat3_human"]
+
+    def test_partial_abstain_does_not_force_single_subtype(self, tmp_path: Path) -> None:
+        """A transient fetch abstain that drops the co-members of an inseparable
+        set must NOT leave a lone survivor that resolves to a confident subtype.
+
+        The transducin structure ties gnat1/2/3. If gnat2/gnat3 abstain (fetch
+        returned None this run) while gnat1 is fetched, gnat1 is the only scored
+        member -- but the roster is known-incomplete, so the call stays at the
+        family and routes the subtype to review rather than emitting a
+        confidently-wrong gnat1.
+        """
+        cache = SequenceCache(tmp_path / "seq.json")
+        enriched = _make_enriched(sequence="MMMMMMMMMM" + TRANSDUCIN_A5)
+        tails: dict[str, str | None] = {
+            "gnat1_human": TRANSDUCIN_A5,
+            "gnat2_human": None,  # fetch abstained this run
+            "gnat3_human": None,  # fetch abstained this run
+        }
+        with patch(
+            "gpcr_tools.validator.chimera.get_sequence_from_uniprot",
+            side_effect=_mock_refs(tails),
+        ):
+            result = get_chimera_analysis("TEST", enriched, cache)
+
+        assert result["status"] == CHIMERA_STATUS_SUCCESS
+        assert result["family"] == "Gi/o"
+        assert result["subtype"] is None
+        assert result["subtype_resolution"] == CHIMERA_SUBTYPE_INSEPARABLE_SET
+
+    def test_genuine_resolve_unaffected_when_roster_complete(self, tmp_path: Path) -> None:
+        """Guard against over-suppression: with NO abstains a unique winner still
+        resolves to its subtype (the conservative downgrade only fires when a
+        candidate reference could not be fetched)."""
+        cache = SequenceCache(tmp_path / "seq.json")
+        target = "ACDEFGHIKLM"
+        enriched = _make_enriched(sequence="MMMMMMMMMM" + target)
+        with patch(
+            "gpcr_tools.validator.chimera.get_sequence_from_uniprot",
+            side_effect=_mock_refs({"gnas2_human": target}),
+        ):
+            result = get_chimera_analysis("TEST", enriched, cache)
+
+        assert result["status"] == CHIMERA_STATUS_SUCCESS
+        assert result["subtype"] == "gnas2_human"
+        assert result["subtype_resolution"] == CHIMERA_SUBTYPE_RESOLVED
+
+    def test_unrelated_abstain_leaves_unique_winner_resolved(self, tmp_path: Path) -> None:
+        """A partial outage that drops an UNRELATED reference must not downgrade a
+        genuinely-unique winner. The structure uniquely matches gnas2; gnaz (no
+        shared inseparable set) abstains. gnaz could never have tied gnas2, so the
+        subtype stays resolved -- no false-review storm during a partial outage."""
+        cache = SequenceCache(tmp_path / "seq.json")
+        target = "ACDEFGHIKLM"
+        enriched = _make_enriched(sequence="MMMMMMMMMM" + target)
+        tails: dict[str, str | None] = {"gnas2_human": target, "gnaz_human": None}
+        with patch(
+            "gpcr_tools.validator.chimera.get_sequence_from_uniprot",
+            side_effect=_mock_refs(tails),
+        ):
+            result = get_chimera_analysis("TEST", enriched, cache)
+
+        assert result["status"] == CHIMERA_STATUS_SUCCESS
+        assert result["subtype"] == "gnas2_human"
+        assert result["subtype_resolution"] == CHIMERA_SUBTYPE_RESOLVED
 
     def test_cross_member_tie_is_family_only(self, tmp_path: Path) -> None:
         """A tie across same-family members that are not a defined inseparable
@@ -463,3 +536,140 @@ class TestAlpha5Graft:
             result = get_chimera_analysis("TEST", enriched, cache)
         assert result["backbone_slug"] is None
         assert result["is_alpha5_graft"] is False
+
+
+# ===================================================================
+# _resolve_subtype (roster-incomplete behaviour)
+# ===================================================================
+
+
+class TestResolveSubtype:
+    def test_lone_winner_resolves_when_no_abstain(self) -> None:
+        assert _resolve_subtype(["gnat1_human"], 11) == (
+            "gnat1_human",
+            CHIMERA_SUBTYPE_RESOLVED,
+        )
+
+    def test_lone_winner_not_promoted_when_tie_partner_abstained(self) -> None:
+        # gnat2/gnat3 are co-members of gnat1's inseparable set; their abstain
+        # could have hidden a tie, so the lone gnat1 survivor is downgraded to the
+        # inseparable-set family review -- not a confident subtype. gnat1 is a
+        # member of a known inseparable set, so the outcome is INSEPARABLE_SET.
+        subtype, resolution = _resolve_subtype(
+            ["gnat1_human"], 11, abstained=frozenset({"gnat2_human", "gnat3_human"})
+        )
+        assert subtype is None
+        assert resolution == CHIMERA_SUBTYPE_INSEPARABLE_SET
+
+    def test_lone_winner_resolves_when_unrelated_slug_abstained(self) -> None:
+        # gnas2 shares no inseparable set with the abstained gnaz, so gnaz could
+        # never have tied it: a genuinely-unique winner stays RESOLVED even when
+        # an unrelated reference could not be fetched (no false-review storm).
+        assert _resolve_subtype(["gnas2_human"], 11, abstained=frozenset({"gnaz_human"})) == (
+            "gnas2_human",
+            CHIMERA_SUBTYPE_RESOLVED,
+        )
+
+    def test_lone_inseparable_member_resolves_when_only_unrelated_abstained(self) -> None:
+        # gnat1's tie-partners (gnat2/gnat3) are present; only an unrelated slug
+        # abstained, so there is no hidden tie and gnat1 still resolves.
+        assert _resolve_subtype(["gnat1_human"], 11, abstained=frozenset({"gnaq_human"})) == (
+            "gnat1_human",
+            CHIMERA_SUBTYPE_RESOLVED,
+        )
+
+
+# ===================================================================
+# get_sequence_from_uniprot (resilience: 200 / 404 / transient)
+# ===================================================================
+
+
+def _resp(status_code: int, text: str = "") -> MagicMock:
+    """Build a stand-in requests.Response with the given status and body."""
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.text = text
+    return resp
+
+
+class TestGetSequenceFromUniprot:
+    _ACC = "P63092"
+    _FASTA = ">sp|P63092|GNAS_HUMAN\nMGCLGNSKTEDQRNEEKAQR"
+
+    def test_200_caches_and_returns(self, tmp_path: Path) -> None:
+        cache = SequenceCache(tmp_path / "seq.json")
+        with patch(
+            "gpcr_tools.validator.chimera.requests.get",
+            return_value=_resp(200, self._FASTA),
+        ) as mock_get:
+            seq = get_sequence_from_uniprot(self._ACC, cache)
+        assert seq == "MGCLGNSKTEDQRNEEKAQR"
+        assert mock_get.call_count == 1
+        assert cache.get(self._ACC) == "MGCLGNSKTEDQRNEEKAQR"
+
+    def test_transient_5xx_retries_then_abstains_no_cache(self, tmp_path: Path) -> None:
+        cache = SequenceCache(tmp_path / "seq.json")
+        with (
+            patch(
+                "gpcr_tools.validator.chimera.requests.get",
+                return_value=_resp(503),
+            ) as mock_get,
+            patch("gpcr_tools.validator.chimera.time.sleep"),
+        ):
+            seq = get_sequence_from_uniprot(self._ACC, cache)
+        assert seq is None
+        assert mock_get.call_count == API_MAX_RETRIES
+        assert self._ACC not in cache
+
+    def test_404_abstains_immediately_no_retry_no_cache(self, tmp_path: Path) -> None:
+        cache = SequenceCache(tmp_path / "seq.json")
+        with (
+            patch(
+                "gpcr_tools.validator.chimera.requests.get",
+                return_value=_resp(404),
+            ) as mock_get,
+            patch("gpcr_tools.validator.chimera.time.sleep"),
+        ):
+            seq = get_sequence_from_uniprot(self._ACC, cache)
+        assert seq is None
+        assert mock_get.call_count == 1
+        assert self._ACC not in cache
+
+    def test_transient_then_success(self, tmp_path: Path) -> None:
+        cache = SequenceCache(tmp_path / "seq.json")
+        with (
+            patch(
+                "gpcr_tools.validator.chimera.requests.get",
+                side_effect=[_resp(503), _resp(200, self._FASTA)],
+            ) as mock_get,
+            patch("gpcr_tools.validator.chimera.time.sleep"),
+        ):
+            seq = get_sequence_from_uniprot(self._ACC, cache)
+        assert seq == "MGCLGNSKTEDQRNEEKAQR"
+        assert mock_get.call_count == 2
+        assert cache.get(self._ACC) == "MGCLGNSKTEDQRNEEKAQR"
+
+    def test_network_error_retries_then_abstains(self, tmp_path: Path) -> None:
+        cache = SequenceCache(tmp_path / "seq.json")
+        with (
+            patch(
+                "gpcr_tools.validator.chimera.requests.get",
+                side_effect=requests.RequestException("boom"),
+            ) as mock_get,
+            patch("gpcr_tools.validator.chimera.time.sleep"),
+        ):
+            seq = get_sequence_from_uniprot(self._ACC, cache)
+        assert seq is None
+        assert mock_get.call_count == API_MAX_RETRIES
+        assert self._ACC not in cache
+
+    def test_200_empty_body_returns_none_no_cache(self, tmp_path: Path) -> None:
+        cache = SequenceCache(tmp_path / "seq.json")
+        with patch(
+            "gpcr_tools.validator.chimera.requests.get",
+            return_value=_resp(200, ">sp|P63092|GNAS_HUMAN"),
+        ) as mock_get:
+            seq = get_sequence_from_uniprot(self._ACC, cache)
+        assert seq is None
+        assert mock_get.call_count == 1
+        assert self._ACC not in cache

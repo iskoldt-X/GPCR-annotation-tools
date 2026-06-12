@@ -154,12 +154,26 @@ def get_sequence_from_uniprot(
                     seq = "".join(lines[1:])
                     cache.set(accession, seq)
                     return seq
-            break
+                # 200 with an empty/header-only body: a real but unusable answer.
+                return None
+            if resp.status_code == 404:
+                # Definitive: the accession does not exist. Abstain (no useful
+                # "empty sequence" to cache), do not retry.
+                return None
+            # 5xx / 429 / other: service unavailable, not a verdict. Retry, then abstain.
+            if attempt == API_MAX_RETRIES - 1:
+                logger.warning(
+                    "UniProt FASTA unavailable (HTTP %s) for '%s'",
+                    resp.status_code,
+                    accession,
+                )
+                return None
+            time.sleep(SLEEP_VALIDATION_RETRY)
         except (requests.RequestException, OSError) as exc:
             if attempt == API_MAX_RETRIES - 1:
                 logger.warning("UniProt FASTA fetch error for '%s': %s", accession, exc)
-            else:
-                time.sleep(SLEEP_VALIDATION_RETRY)
+                return None
+            time.sleep(SLEEP_VALIDATION_RETRY)
 
     return None
 
@@ -197,17 +211,47 @@ def _best_alpha5_match(struct_seq: str, ref_tail: str, *, slide: bool) -> tuple[
     return best_score, best_window
 
 
-def _resolve_subtype(winners: list[str], best_score: int) -> tuple[str | None, str]:
+def _has_hidden_tie_partner(winners: set[str], abstained: set[str]) -> bool:
+    """True when an abstained reference could have tied the (lone) *winners*.
+
+    The only way a fetch abstain can manufacture a false-unique winner is by
+    removing a co-member of an inseparable set: within such a set every
+    reference's alpha5 tail is identical, so a dropped member would have tied at
+    the same best score. An abstain of any slug OUTSIDE the winner's inseparable
+    set(s) could never have hidden a tie (its alpha5 differs), so it is no reason
+    to withhold a confident subtype. This keeps the conservative downgrade scoped
+    to the genuine hazard rather than firing on every partial outage.
+    """
+    if not abstained:
+        return False
+    return any(winners <= group and (group & abstained) for group in A5_INSEPARABLE_SUBTYPE_SETS)
+
+
+def _resolve_subtype(
+    winners: list[str],
+    best_score: int,
+    *,
+    abstained: frozenset[str] = frozenset(),
+) -> tuple[str | None, str]:
     """Map the set of equally-scoring slugs to (subtype, resolution).
 
     A single winner resolves to that subtype. A winner set contained in one of
     the inseparable subtype sets stops at the family. Anything else is reported
     family-only. A weak best score is low confidence regardless.
+
+    *abstained* lists candidate references that could not be fetched this run. A
+    lone winner is NOT promoted to a confident subtype when one of the abstained
+    references is a co-member of the winner's inseparable set: the outage could
+    have removed a tie-partner, making a survivor look unique. The call then stops
+    at the family for review rather than emitting a confidently-wrong subtype.
+    Abstains of unrelated references (whose alpha5 could never have tied) do not
+    trigger this downgrade, so a genuinely-unique winner stays resolved even
+    during a partial outage.
     """
     if best_score < CHIMERA_A5_ANCHOR_MIN_SCORE:
         return None, CHIMERA_SUBTYPE_LOW_CONFIDENCE
     unique = set(winners)
-    if len(unique) == 1:
+    if len(unique) == 1 and not _has_hidden_tie_partner(unique, set(abstained)):
         return winners[0], CHIMERA_SUBTYPE_RESOLVED
     if any(unique <= group for group in A5_INSEPARABLE_SUBTYPE_SETS):
         return None, CHIMERA_SUBTYPE_INSEPARABLE_SET
@@ -292,9 +336,17 @@ def get_chimera_analysis(
 
     # 4. Fetch reference sequences once (cached across calls).
     ref_tails: dict[str, str] = {}
+    abstained: list[str] = []
     for acc_id, slug in candidates.items():
         ref_seq = get_sequence_from_uniprot(acc_id, cache)
-        if ref_seq and len(ref_seq) >= w:
+        if ref_seq is None:
+            # Fetch abstained (transient outage or absent accession). Unlike a
+            # fetched-but-too-short sequence, we have NO datum for this slug, so it
+            # silently drops out of scoring -- which can turn an inseparable tie
+            # into a lone "winner". Record it so resolution can stay conservative.
+            abstained.append(slug)
+            continue
+        if len(ref_seq) >= w:
             ref_tails[slug] = ref_seq[-w:]
 
     if not ref_tails:
@@ -321,7 +373,7 @@ def get_chimera_analysis(
 
     families = {A5_SUBTYPE_FAMILY[s] for s in winners if s in A5_SUBTYPE_FAMILY}
     family = next(iter(families)) if len(families) == 1 else None
-    subtype, resolution = _resolve_subtype(winners, best_score)
+    subtype, resolution = _resolve_subtype(winners, best_score, abstained=frozenset(abstained))
 
     # Backbone (scaffold) family from the entity's attached G-alpha slug. When it
     # differs from the alpha5-derived family this is an alpha5-graft chimera
