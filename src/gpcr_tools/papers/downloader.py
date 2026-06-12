@@ -5,9 +5,9 @@ the primary citation lacks one), then tries candidate PDF URLs as a true
 fallback chain -- a URL that resolves but yields a non-PDF (an HTML challenge)
 or a 403/404 does not end the search, only an exhausted chain marks the paper
 paywalled:
-  CrossRef metadata — PMID/PMCID and a direct publisher PDF link
+  CrossRef metadata — the article's PMID and a direct publisher PDF link
   Unpaywall — best OA PDF link
-  PMC open-access S3 bucket — by PMCID (promoting a PMID to a PMCID first)
+  PMC open-access S3 bucket — by a PMCID resolved from the DOI/PMID via the ID Converter
   Fallback — mark ``"fallback_paywalled"`` (left for manual download)
 
 Reads enriched JSON from ``enriched/{pdb_id}.json``, writes PDFs to
@@ -155,11 +155,16 @@ def _update_download_log(pdb_id: str, entry: dict[str, Any]) -> None:
 
 
 def _fetch_crossref_metadata(doi: str, session: requests.Session) -> dict[str, str | None]:
-    """Tier 0: CrossRef metadata -- PMID, PMCID, and a direct PDF link if present.
+    """Tier 0: CrossRef metadata -- the article's PMID and a direct PDF link.
 
     Many gold/hybrid-OA publishers (notably Nature-brand journals) expose a direct
     ``application/pdf`` link in CrossRef even when Unpaywall carries no PDF URL, so
     capturing it here is the single largest DOI-only recovery.
+
+    Deliberately does NOT extract a PMCID from ``link[]``: a CrossRef link can
+    point at a *reference's* PMC article, not this one, and a wrong PMCID would
+    fetch the WRONG paper. The PMCID is resolved authoritatively from the DOI via
+    the ID Converter (``_resolve_pmcid``) instead.
     """
     url = f"{CROSSREF_API_URL}/{doi}"
     try:
@@ -167,7 +172,6 @@ def _fetch_crossref_metadata(doi: str, session: requests.Session) -> dict[str, s
         if response.status_code == 200:
             data = response.json().get("message") or {}
             pmid = data.get("PMID")
-            pmcid: str | None = None
             pdf_url: str | None = None
             for link in data.get("link") or []:
                 link_url = link.get("URL") or ""
@@ -176,14 +180,10 @@ def _fetch_crossref_metadata(doi: str, session: requests.Session) -> dict[str, s
                     "application/pdf" in content_type or link_url.lower().endswith(".pdf")
                 ):
                     pdf_url = link_url
-                if "www.ncbi.nlm.nih.gov/pmc/articles/PMC" in link_url:
-                    match = re.search(r"PMC(\d+)", link_url)
-                    if match:
-                        pmcid = match.group(1)
-            return {"pmid": pmid, "pmcid": pmcid, "crossref_pdf_url": pdf_url}
+            return {"pmid": pmid, "crossref_pdf_url": pdf_url}
     except requests.exceptions.RequestException as exc:
         logger.warning("[CrossRef] Failed for DOI %s: %s", doi, exc)
-    return {"pmid": None, "pmcid": None, "crossref_pdf_url": None}
+    return {"pmid": None, "crossref_pdf_url": None}
 
 
 def _fetch_unpaywall_pdf_url(
@@ -244,49 +244,42 @@ def _fetch_pmc_s3_pdf_url(pmcid: str, session: requests.Session) -> str | None:
     return None
 
 
-def _promote_pmid_to_pmcid(pmid: str, session: requests.Session) -> str | None:
-    """Map a PMID to a PMCID via the NCBI ID Converter.
+def _resolve_pmcid(doi: str | None, pmid: str | None, session: requests.Session) -> str | None:
+    """Resolve a PMCID authoritatively via the NCBI ID Converter.
 
-    Lets a DOI-only paper that nonetheless has a free PMC full text reach the PMC
-    open-access route. Returns ``PMC...`` or ``None``.
+    Queries by DOI first (then PMID) so the PMC open-access download uses a PMCID
+    that provably belongs to THIS paper -- never one guessed from a CrossRef
+    reference link or an unverified metadata field, which could fetch the WRONG
+    paper. Returns ``PMC...`` or ``None`` (no S3 attempt, the paper stays
+    paywalled, which is safe).
     """
-    params = {"ids": str(pmid), "format": "json", "tool": "litfetcher"}
-    try:
-        response = session.get(NCBI_IDCONV_URL, params=params, timeout=TIMEOUT_NCBI_PMC_OA)
-        time.sleep(SLEEP_NCBI_RATE_LIMIT)  # the ID Converter rate-limits aggressively
-        if response.status_code == 200:
-            records = response.json().get("records") or []
-            if records and records[0].get("pmcid"):
-                return str(records[0]["pmcid"])
-    except (requests.exceptions.RequestException, ValueError) as exc:
-        logger.warning("[ID Converter] Failed for PMID %s: %s", pmid, exc)
+    for ident in (doi, pmid):
+        if not ident:
+            continue
+        params = {"ids": str(ident), "format": "json", "tool": "litfetcher"}
+        try:
+            response = session.get(NCBI_IDCONV_URL, params=params, timeout=TIMEOUT_NCBI_PMC_OA)
+            time.sleep(SLEEP_NCBI_RATE_LIMIT)  # the ID Converter rate-limits aggressively
+            if response.status_code == 200:
+                records = response.json().get("records") or []
+                rec = records[0] if records else {}
+                # Trust the PMCID only when the converter echoed back the exact id
+                # we queried (it returns one record per id with ``requested-id``),
+                # so the PMCID provably belongs to THIS paper and a future batched
+                # query could never positionally cross-bind a wrong PMCID.
+                if rec.get("pmcid") and str(rec.get("requested-id")) == str(ident):
+                    return str(rec["pmcid"])
+        except (requests.exceptions.RequestException, ValueError) as exc:
+            logger.warning("[ID Converter] Failed for %s: %s", ident, exc)
     return None
 
 
 _TITLE_TOKEN_RE = re.compile(r"[a-z0-9]+")
-# Boilerplate dropped before matching, so two distinct structural-biology titles
-# do not look similar merely by sharing "structure of the ... receptor".
+# Only true function words are dropped. Domain words (structure/crystal/cryo/em)
+# are kept ON PURPOSE: they discriminate "Cryo-EM structure of X" from "Crystal
+# structure of X", so two different papers on the same target do not collide.
 _TITLE_STOPWORDS = frozenset(
-    {
-        "a",
-        "an",
-        "the",
-        "of",
-        "in",
-        "on",
-        "to",
-        "and",
-        "or",
-        "for",
-        "with",
-        "by",
-        "structure",
-        "structural",
-        "crystal",
-        "cryo",
-        "em",
-        "basis",
-    }
+    {"a", "an", "the", "of", "in", "on", "to", "and", "or", "for", "with", "by"}
 )
 _TITLE_CONTAINMENT_MIN = 0.85
 
@@ -295,17 +288,36 @@ def _title_tokens(text: str) -> set[str]:
     return {t for t in _TITLE_TOKEN_RE.findall(text.lower()) if t not in _TITLE_STOPWORDS}
 
 
-def _fetch_doi_from_title(title: str, session: requests.Session) -> str | None:
+def _crossref_item_year(item: dict[str, Any]) -> int | None:
+    """Best-effort publication year from a CrossRef work item."""
+    for key in ("published", "issued", "published-print", "published-online", "created"):
+        parts = (item.get(key) or {}).get("date-parts") or []
+        if parts and parts[0] and parts[0][0]:
+            try:
+                return int(parts[0][0])
+            except (TypeError, ValueError):
+                continue  # this field's year is unparseable; try the next one
+    return None
+
+
+def _fetch_doi_from_title(
+    title: str, session: requests.Session, expected_year: Any = None
+) -> str | None:
     """Recover a DOI from a paper title via CrossRef bibliographic search.
 
-    Accepts the top hit only when the two titles are near-identical in BOTH
-    directions (symmetric containment >= 0.85 over content tokens, stopwords
-    dropped). This rejects companion/series papers ("Structure of X" vs "Structure
-    of X bound to Y"), because attaching the WRONG paper is worse than none.
+    Accepts the top hit only when (a) the two titles are near-identical in BOTH
+    directions (symmetric containment >= 0.85 over content tokens) AND (b) the
+    publication year matches the expected year within one (when both are known).
+    This rejects companion/series papers and same-target/different-year papers,
+    because attaching the WRONG paper is worse than none.
     """
     want = _title_tokens(title)
     if len(want) < 3:  # too few content tokens to disambiguate safely
         return None
+    try:
+        want_year = int(expected_year) if expected_year else None
+    except (TypeError, ValueError):
+        want_year = None
     params = {"query.bibliographic": title, "rows": "1"}
     try:
         response = session.get(CROSSREF_API_URL, params=params, timeout=TIMEOUT_CROSSREF)
@@ -314,13 +326,21 @@ def _fetch_doi_from_title(title: str, session: requests.Session) -> str | None:
             if items:
                 got = _title_tokens(" ".join(items[0].get("title") or []))
                 overlap = len(want & got)
-                if (
+                if not (
                     got
                     and overlap / len(want) >= _TITLE_CONTAINMENT_MIN
                     and overlap / len(got) >= _TITLE_CONTAINMENT_MIN
                 ):
-                    doi = items[0].get("DOI")
-                    return str(doi) if doi else None
+                    return None
+                got_year = _crossref_item_year(items[0])
+                # Reject a title match whose year is off by >1 (a different paper,
+                # e.g. a re-determination/series). Kept deliberately tight: a rare
+                # legitimate print-vs-online >1y gap fails closed (-> paywalled,
+                # hand-droppable), which is far safer than attaching a wrong paper.
+                if want_year and got_year and abs(got_year - want_year) > 1:
+                    return None
+                doi = items[0].get("DOI")
+                return str(doi) if doi else None
     except (requests.exceptions.RequestException, ValueError) as exc:
         logger.warning("[CrossRef title] Failed for %r: %s", title[:60], exc)
     return None
@@ -331,13 +351,13 @@ def _recover_missing_doi(
 ) -> tuple[str | None, Any]:
     """Best-effort DOI recovery when the primary citation carries none.
 
-    Reads the already-fetched ``citation`` table (its DOI/PubMed fields), then
-    falls back to a CrossRef title search. Returns ``(doi, pmid)``.
+    Uses ONLY the ``citation`` row tagged ``id == "primary"`` (the structure's own
+    paper) -- never another row, which is a CITED reference and would attach the
+    wrong paper. Reads that row's DOI/PubMed, then falls back to a CrossRef title
+    search (gated by a year match). Returns ``(doi, pmid)``.
     """
     citations = [c for c in (entry_data.get("citation") or []) if isinstance(c, dict)]
     primary = next((c for c in citations if c.get("id") == "primary"), None)
-    if primary is None and citations:
-        primary = citations[0]
     if not primary:
         return None, pmid
     doi = primary.get("pdbx_database_id_DOI")
@@ -346,7 +366,7 @@ def _recover_missing_doi(
         return str(doi), pmid
     title = primary.get("title")
     if title:
-        return _fetch_doi_from_title(str(title), session), pmid
+        return _fetch_doi_from_title(str(title), session, expected_year=primary.get("year")), pmid
     return None, pmid
 
 
@@ -478,7 +498,10 @@ def download_paper_for_pdb(
     entry_data = (pdb_data.get("data") or {}).get("entry") or {}
     doi = (entry_data.get("rcsb_primary_citation") or {}).get("pdbx_database_id_DOI")
     pmid = (entry_data.get("rcsb_entry_container_identifiers") or {}).get("pubmed_id")
-    pmcid = (entry_data.get("pubmed") or {}).get("rcsb_pubmed_central_id")
+    # PMCID is NOT read from metadata here: the enriched ``rcsb_pubmed_central_id``
+    # and CrossRef links can carry a wrong/reference PMCID. It is resolved
+    # authoritatively from the DOI only if/when the PMC-S3 tier is reached.
+    pmcid: str | None = None
 
     if not doi:
         # No DOI on the primary citation -- try the already-fetched citation[]
@@ -500,10 +523,9 @@ def download_paper_for_pdb(
         _update_download_log(pdb_id, entry)
         return entry
 
-    # Tier 0: CrossRef metadata (PMID/PMCID + a direct publisher PDF link).
+    # Tier 0: CrossRef metadata (the article's PMID + a direct publisher PDF link).
     crossref = _fetch_crossref_metadata(doi, sess)
     pmid = crossref.get("pmid") or pmid
-    pmcid = crossref.get("pmcid") or pmcid
 
     cfg.papers_dir.mkdir(parents=True, exist_ok=True)
     temp_pdf = cfg.papers_dir / f"{pdb_id}_temp.pdf"
@@ -512,10 +534,12 @@ def download_paper_for_pdb(
     # resolves but yields a non-PDF (e.g. an HTML bot challenge) or a 403/404 does
     # NOT end the search -- only an exhausted chain marks the paper paywalled.
     def _pmc_s3_url() -> str | None:
+        # Resolve the PMCID authoritatively from the DOI/PMID (never an unverified
+        # field), so the S3 download cannot fetch a different paper. The resolved
+        # PMCID is what gets logged. No resolution -> no S3 attempt -> paywalled.
         nonlocal pmcid
-        if not pmcid and pmid:
-            pmcid = _promote_pmid_to_pmcid(str(pmid), sess)
-        return _fetch_pmc_s3_pdf_url(str(pmcid), sess) if pmcid else None
+        pmcid = _resolve_pmcid(doi, str(pmid) if pmid else None, sess)
+        return _fetch_pmc_s3_pdf_url(pmcid, sess) if pmcid else None
 
     resolvers: list[tuple[str, Any]] = [
         ("crossref_pdf", lambda: crossref.get("crossref_pdf_url")),
