@@ -199,12 +199,15 @@ def _gate_keyless_pubchem_ids(
 ) -> None:
     """Cross-check a model-supplied PubChem CID against the CID's own synonyms.
 
-    Runs only for a *keyless* ligand -- one with no matched chemical component,
-    so its ``api_pubchem_cid`` was never set from authoritative metadata and the
-    CID was supplied from the model's own memory.  A ligand that matched a small
-    molecule keeps the authoritative CID copied from the enriched data and is
-    never touched here (matched CIDs carry occasional sparse-synonym entries that
-    a synonym check would wrongly reject).
+    Runs only for a *keyless* ligand -- one with no ``chem_comp_id`` (a peptide,
+    protein, or other entity the model named, and whose CID it therefore supplied
+    from its own memory).  Any ligand carrying a ``chem_comp_id`` is left
+    untouched: a matched
+    small molecule keeps the authoritative CID copied from enriched data, and an
+    excluded buffer (e.g. a structural lipid such as PLM) carries a CID echoed from
+    that same metadata -- neither is a from-memory guess, and matched CIDs also
+    carry occasional sparse-synonym entries that a synonym check would wrongly
+    reject.
 
     Candidate names are the union of the reported name and any reported synonyms;
     matching against this union, rather than the bare name, keeps the false-
@@ -215,6 +218,11 @@ def _gate_keyless_pubchem_ids(
     for lig in ligands:
         if not isinstance(lig, dict) or "api_pubchem_cid" in lig:
             continue  # Matched small molecule -> authoritative CID, leave it.
+        comp_id = lig.get("chem_comp_id")
+        if comp_id and str(comp_id).strip().lower() not in EMPTY_VALUES:
+            # A keyed component (e.g. an excluded buffer like PLM) is identified by
+            # its chem_comp_id and its CID is echoed from metadata, not guessed.
+            continue
         cid = lig.get("pubchem_id")
         if not cid or str(cid).strip().lower() in EMPTY_VALUES:
             continue

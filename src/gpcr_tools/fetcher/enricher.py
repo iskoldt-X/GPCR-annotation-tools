@@ -377,9 +377,9 @@ def _determine_ligand_type(comp_id: str | None, chem_comp: dict[str, Any]) -> st
     1. A comp_id on the curated lipid whitelist resolves to ``lipid`` directly.
        This is checked first so the answer is stable even for older fetches that
        predate the ``type`` field.
-    2. Otherwise the CCD type routes the classes it can name: saccharides and
-       free amino acids (peptide-linking monomers) are small molecules, while
-       nucleotide-linking monomers are nucleic acids.
+    2. Otherwise the CCD type routes the classes it can name: saccharides,
+       free amino acids (peptide-linking monomers), and free mononucleotides
+       (nucleotide-linking monomers, e.g. a bound GDP) are all small molecules.
     3. Anything else is a small molecule.
 
     Peptide and protein ligands are polymer entities and never reach this
@@ -397,9 +397,10 @@ def _determine_ligand_type(comp_id: str | None, chem_comp: dict[str, Any]) -> st
         # A single free amino acid; treated as a small molecule until the schema
         # gains a dedicated amino-acid value.
         return "small-molecule"
-    if "rna linking" in ccd_type or "dna linking" in ccd_type:
-        return "na"
-
+    # A nucleotide-linking component here is a single free mononucleotide (a
+    # bound nucleotide cofactor, e.g. a GDP/GTP) -- a small molecule. The 'na'
+    # value is reserved for polymer nucleic-acid entities, classified on the
+    # polymer path.
     return "small-molecule"
 
 

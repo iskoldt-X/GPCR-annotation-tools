@@ -116,9 +116,12 @@ class TestDetermineLigandType:
     def test_free_amino_acid_is_small_molecule(self) -> None:
         assert _determine_ligand_type("GLU", {"type": "L-peptide linking"}) == "small-molecule"
 
-    def test_nucleotide_monomer_is_na(self) -> None:
-        assert _determine_ligand_type("A", {"type": "RNA linking"}) == "na"
-        assert _determine_ligand_type("DA", {"type": "DNA linking"}) == "na"
+    def test_free_mononucleotide_is_small_molecule(self) -> None:
+        # A single nucleotide-linking component is a free mononucleotide (e.g. a
+        # bound GDP/GTP cofactor) -- a small molecule. The 'na' value is reserved
+        # for polymer nucleic-acid entities, classified on the polymer path.
+        assert _determine_ligand_type("A", {"type": "RNA linking"}) == "small-molecule"
+        assert _determine_ligand_type("DA", {"type": "DNA linking"}) == "small-molecule"
 
     def test_unknown_type_defaults_small_molecule(self) -> None:
         assert _determine_ligand_type("ZMA", {}) == "small-molecule"
