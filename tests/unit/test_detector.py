@@ -28,11 +28,13 @@ TRANSDUCIN_A5 = "IKENLKDCGLF"
 DISTINCT_A5 = "WWWWWWWWWWW"
 
 
-def _mock_refs(tail_by_slug: dict[str, str], default_tail: str = DISTINCT_A5) -> Any:
+def _mock_refs(tail_by_slug: dict[str, str | None], default_tail: str = DISTINCT_A5) -> Any:
     def _fetch(accession: str, cache: Any) -> str | None:
         slug = FULL_G_ALPHA_CANDIDATES.get(accession)
         tail = tail_by_slug.get(slug, default_tail) if slug else default_tail
-        return "GGGGG" + tail
+        # An explicit None entry simulates a fetch abstain (transient outage /
+        # absent accession): the reference silently drops out of scoring.
+        return None if tail is None else "GGGGG" + tail
 
     return _fetch
 
@@ -147,6 +149,49 @@ class TestGProteinDetector:
         with patch(
             "gpcr_tools.validator.chimera.get_sequence_from_uniprot",
             side_effect=_mock_refs({"gnas2_human": target}),
+        ):
+            sigs = detect_g_protein_identity("X", entry, cache)
+        assert len(sigs) == 1
+        assert sigs[0].severity == SEVERITY_ADVISORY
+        assert sigs[0].payload["subtype"] == "gnas2_human"
+
+    def test_tie_partner_abstain_routes_subtype_to_review(self, tmp_path: Path) -> None:
+        """A partial outage that drops a tie-partner must surface as REVIEW, not a
+        confidently-wrong advisory. The transducin alpha5 ties gnat1/2/3; gnat2 and
+        gnat3 abstain while gnat1 is fetched. The lone gnat1 survivor must NOT
+        become an advisory subtype call -- the consumer emits a Gi/o family review
+        signal instead, with a clean family message."""
+        cache = SequenceCache(tmp_path / "seq.json")
+        entry = _galpha_entry("MMMMMMMMMM" + TRANSDUCIN_A5)
+        tails: dict[str, str | None] = {
+            "gnat1_human": TRANSDUCIN_A5,
+            "gnat2_human": None,  # fetch abstained this run
+            "gnat3_human": None,  # fetch abstained this run
+        }
+        with patch(
+            "gpcr_tools.validator.chimera.get_sequence_from_uniprot",
+            side_effect=_mock_refs(tails),
+        ):
+            sigs = detect_g_protein_identity("X", entry, cache)
+        assert len(sigs) == 1
+        s = sigs[0]
+        assert s.severity == SEVERITY_REVIEW
+        assert s.payload["subtype"] is None
+        assert s.payload["family"] == "Gi/o"
+        assert "Gi/o" in s.summary
+
+    def test_unrelated_abstain_keeps_unique_subtype_advisory(self, tmp_path: Path) -> None:
+        """A partial outage that drops an UNRELATED reference must not force a
+        unique subtype to review. gnas2 is uniquely matched; gnaz (no shared
+        inseparable set) abstains and could never have tied it, so the subtype
+        stays an advisory call -- no false-review storm during a partial outage."""
+        cache = SequenceCache(tmp_path / "seq.json")
+        target = "ACDEFGHIKLM"
+        entry = _galpha_entry("MMMMMMMMMM" + target)
+        tails: dict[str, str | None] = {"gnas2_human": target, "gnaz_human": None}
+        with patch(
+            "gpcr_tools.validator.chimera.get_sequence_from_uniprot",
+            side_effect=_mock_refs(tails),
         ):
             sigs = detect_g_protein_identity("X", entry, cache)
         assert len(sigs) == 1
