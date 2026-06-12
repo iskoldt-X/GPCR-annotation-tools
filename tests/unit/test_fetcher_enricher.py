@@ -11,6 +11,7 @@ import pytest
 import requests
 
 from gpcr_tools.fetcher.enricher import (
+    INCOMPLETE_MARKER_KEY,
     _determine_ligand_type,
     _enrich_siblings,
     _enrich_uniprot,
@@ -320,6 +321,34 @@ class TestEnrichSinglePdb:
         assert result is False
         assert not enriched.exists()
 
+    def test_all_lookups_failed_via_non_200_returns_false_and_writes_nothing(
+        self, workspace: Path
+    ) -> None:
+        """The outage guard must also fire when lookups fail via a non-forcelist
+        non-200 status (e.g. 403). The PubChem/chem_comp helpers abstain in-band
+        on such a status (the new three-way path) while the raise_for_status
+        helpers surface it as an HTTPError; either way it counts as hard_failed,
+        so a 403 on every lookup is a total outage just like a connection error."""
+        enriched = workspace / "enriched" / "7W55.json"
+        if enriched.exists():
+            enriched.unlink()
+
+        # A realistic 403: status_code is 403 and raise_for_status() raises (as
+        # requests does for a 4xx), so the in-band three-way helpers see the 403
+        # directly and the raise_for_status helpers fail via their except clause.
+        resp = MagicMock()
+        resp.status_code = 403
+        resp.raise_for_status.side_effect = requests.exceptions.HTTPError("403")
+        resp.json.return_value = {}
+        session = MagicMock()
+        session.post.return_value = resp
+        session.get.return_value = resp
+
+        result = enrich_single_pdb("7W55", session=session, force=True)
+
+        assert result is False
+        assert not enriched.exists()
+
 
 class TestEnrichmentCacheNotPoisoned:
     """A transient lookup failure must never be written to the shared cache —
@@ -351,13 +380,27 @@ class TestEnrichmentCacheNotPoisoned:
         assert _get_pubchem_cid("KEY", session, cache) is None
         cache.set.assert_not_called()
 
+    def test_cid_200_with_no_cid_caches_confirmed_none(self):
+        # A 200 with no CID is a confirmed negative for this InChIKey and is
+        # cached as None (opt-in) so it is not re-queried; it is NOT an outage.
+        cache = MagicMock()
+        cache.has.return_value = False
+        session = MagicMock()
+        session.get.return_value = self._resp(200, {})
+        stats = {"attempted": 0, "hard_failed": 0}
+        assert _get_pubchem_cid("KEY", session, cache, stats=stats) is None
+        cache.set.assert_called_once_with("KEY", None, allow_none=True)
+        assert stats["hard_failed"] == 0
+
     def test_cid_200_is_cached(self):
         cache = MagicMock()
         cache.has.return_value = False
         session = MagicMock()
         session.get.return_value = self._resp(200, {"IdentifierList": {"CID": [271]}})
         assert _get_pubchem_cid("KEY", session, cache) == "271"
-        cache.set.assert_called_once_with("KEY", "271")
+        # The 200 path opts into None-caching (so a 200-with-no-CID confirmed
+        # negative is cached); a real CID stores identically with the flag set.
+        cache.set.assert_called_once_with("KEY", "271", allow_none=True)
 
     def test_synonyms_transient_failure_not_cached(self):
         cache = MagicMock()
@@ -374,3 +417,180 @@ class TestEnrichmentCacheNotPoisoned:
         session.post.side_effect = requests.exceptions.ConnectionError("boom")
         assert _fetch_chem_comp_descriptors("ATP", session, cache) is None
         cache.set.assert_not_called()
+
+
+class TestEnrichmentHelpersThreeWayOutcome:
+    """Each enrichment helper must distinguish a definitive 404 (a real
+    negative) from a non-forcelist non-200 (a transient/unexpected status).
+    A 404 returns None without counting as an outage; any other non-200 counts
+    as hard_failed so the outage guard can see it — and neither caches anything,
+    so a blip can never freeze as a silent 'absent' in the shared cache.
+    """
+
+    @staticmethod
+    def _resp(status, payload=None):
+        r = MagicMock()
+        r.status_code = status
+        r.json.return_value = payload or {}
+        return r
+
+    # -- _get_pubchem_cid ----------------------------------------------------
+
+    def test_cid_404_is_definitive_not_hard_failed(self):
+        cache = MagicMock()
+        cache.has.return_value = False
+        session = MagicMock()
+        session.get.return_value = self._resp(404)
+        stats = {"attempted": 0, "hard_failed": 0}
+        assert _get_pubchem_cid("KEY", session, cache, stats=stats) is None
+        cache.set.assert_not_called()
+        assert stats["hard_failed"] == 0
+
+    def test_cid_non_forcelist_non_200_is_hard_failed(self):
+        # 403 is not on the urllib3 status_forcelist, so it does NOT raise; it
+        # reaches neither the 200 branch nor the except — it must be caught as a
+        # transient abstention, counted in hard_failed, and cached nothing.
+        cache = MagicMock()
+        cache.has.return_value = False
+        session = MagicMock()
+        session.get.return_value = self._resp(403)
+        stats = {"attempted": 0, "hard_failed": 0}
+        assert _get_pubchem_cid("KEY", session, cache, stats=stats) is None
+        cache.set.assert_not_called()
+        assert stats["hard_failed"] == 1
+
+    # -- _get_pubchem_synonyms ----------------------------------------------
+
+    def test_synonyms_404_is_definitive_not_hard_failed(self):
+        cache = MagicMock()
+        cache.has.return_value = False
+        session = MagicMock()
+        session.get.return_value = self._resp(404)
+        stats = {"attempted": 0, "hard_failed": 0}
+        assert _get_pubchem_synonyms("271", session, cache, stats=stats) is None
+        cache.set.assert_not_called()
+        assert stats["hard_failed"] == 0
+
+    def test_synonyms_non_forcelist_non_200_is_hard_failed(self):
+        cache = MagicMock()
+        cache.has.return_value = False
+        session = MagicMock()
+        session.get.return_value = self._resp(520)
+        stats = {"attempted": 0, "hard_failed": 0}
+        assert _get_pubchem_synonyms("271", session, cache, stats=stats) is None
+        cache.set.assert_not_called()
+        assert stats["hard_failed"] == 1
+
+    # -- _fetch_chem_comp_descriptors ---------------------------------------
+
+    def test_chem_comp_404_is_definitive_not_hard_failed(self):
+        cache = MagicMock()
+        cache.has.return_value = False
+        session = MagicMock()
+        session.post.return_value = self._resp(404)
+        stats = {"attempted": 0, "hard_failed": 0}
+        assert _fetch_chem_comp_descriptors("ATP", session, cache, stats=stats) is None
+        cache.set.assert_not_called()
+        assert stats["hard_failed"] == 0
+
+    def test_chem_comp_non_forcelist_non_200_is_hard_failed(self):
+        cache = MagicMock()
+        cache.has.return_value = False
+        session = MagicMock()
+        session.post.return_value = self._resp(598)
+        stats = {"attempted": 0, "hard_failed": 0}
+        assert _fetch_chem_comp_descriptors("ATP", session, cache, stats=stats) is None
+        cache.set.assert_not_called()
+        assert stats["hard_failed"] == 1
+
+
+class TestEnrichIncompleteMarker:
+    """A partial transient failure (some lookups fail, not all) must persist the
+    record stamped incomplete, and the resume skip must re-enrich a record
+    carrying that marker — while a fully-successful record is unmarked and
+    skipped normally.
+    """
+
+    def test_successful_enrich_is_unmarked_and_skipped_on_resume(self, workspace: Path) -> None:
+        enriched = workspace / "enriched" / "7W55.json"
+        if enriched.exists():
+            enriched.unlink()
+
+        with (
+            patch("gpcr_tools.fetcher.enricher._enrich_uniprot"),
+            patch("gpcr_tools.fetcher.enricher._enrich_ligands"),
+            patch("gpcr_tools.fetcher.enricher._enrich_siblings"),
+        ):
+            assert enrich_single_pdb("7W55", force=True) is True
+
+        data = json.loads(enriched.read_text())
+        assert INCOMPLETE_MARKER_KEY not in data
+
+        # Resume (no force): a clean record is skipped without re-enriching.
+        with patch("gpcr_tools.fetcher.enricher._enrich_uniprot") as m_uniprot:
+            assert enrich_single_pdb("7W55") is True
+            m_uniprot.assert_not_called()
+
+    def test_partial_failure_is_marked_incomplete_and_persisted(self, workspace: Path) -> None:
+        enriched = workspace / "enriched" / "7W55.json"
+        if enriched.exists():
+            enriched.unlink()
+
+        # One lookup hard-fails, the rest succeed -> partial outage.
+        def _fail_one(pdb_data, *args, stats=None, **kwargs):
+            if stats is not None:
+                stats["attempted"] += 1
+                stats["hard_failed"] += 1
+
+        def _succeed_one(pdb_data, *args, stats=None, **kwargs):
+            if stats is not None:
+                stats["attempted"] += 1
+
+        with (
+            patch("gpcr_tools.fetcher.enricher._enrich_uniprot", side_effect=_succeed_one),
+            patch("gpcr_tools.fetcher.enricher._enrich_ligands", side_effect=_fail_one),
+            patch("gpcr_tools.fetcher.enricher._enrich_siblings", side_effect=_succeed_one),
+        ):
+            assert enrich_single_pdb("7W55", force=True) is True
+
+        # Record IS written (so the pipeline proceeds) but marked incomplete.
+        assert enriched.exists()
+        data = json.loads(enriched.read_text())
+        assert data[INCOMPLETE_MARKER_KEY] is True
+
+    def test_incomplete_record_is_reenriched_on_resume(self, workspace: Path) -> None:
+        enriched = workspace / "enriched" / "7W55.json"
+        # Pre-seed an existing-but-incomplete record (as a prior partial run left it).
+        enriched.write_text(json.dumps({INCOMPLETE_MARKER_KEY: True, "data": {}}))
+
+        # Resume WITHOUT force: the marker must trigger a re-enrich, not a skip.
+        with (
+            patch("gpcr_tools.fetcher.enricher._enrich_uniprot") as m_uniprot,
+            patch("gpcr_tools.fetcher.enricher._enrich_ligands"),
+            patch("gpcr_tools.fetcher.enricher._enrich_siblings"),
+        ):
+            assert enrich_single_pdb("7W55") is True
+            m_uniprot.assert_called_once()
+
+        # The re-enrich succeeded cleanly, so the marker is cleared.
+        data = json.loads(enriched.read_text())
+        assert INCOMPLETE_MARKER_KEY not in data
+
+    def test_corrupt_enriched_record_is_reenriched_on_resume(self, workspace: Path) -> None:
+        # A truncated / unreadable enriched file (e.g. a prior run interrupted
+        # mid-write) must not be trusted as a completed checkpoint: the resume
+        # skip must re-enrich it rather than skip it.
+        enriched = workspace / "enriched" / "7W55.json"
+        enriched.write_text('{"data": {"entry"')  # truncated, invalid JSON
+
+        with (
+            patch("gpcr_tools.fetcher.enricher._enrich_uniprot") as m_uniprot,
+            patch("gpcr_tools.fetcher.enricher._enrich_ligands"),
+            patch("gpcr_tools.fetcher.enricher._enrich_siblings"),
+        ):
+            assert enrich_single_pdb("7W55") is True
+            m_uniprot.assert_called_once()
+
+        # The re-enrich rewrote a valid, clean record.
+        data = json.loads(enriched.read_text())
+        assert INCOMPLETE_MARKER_KEY not in data

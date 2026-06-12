@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import tempfile
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -53,6 +54,12 @@ logger = logging.getLogger(__name__)
 # to clear typical peptide agonists while staying below short antibody fragments
 # and structural domains.
 PEPTIDE_LIGAND_MAX_LENGTH = 50
+
+# Top-level marker stamped on an enriched record that was written while one or
+# more external lookups transiently failed. The resume skip re-enriches a record
+# carrying this marker (the cross-run caches mean only the failed lookup is
+# re-hit), so a partial-outage record self-heals rather than freezing its gaps.
+INCOMPLETE_MARKER_KEY = "_enrich_incomplete"
 
 _CHEM_COMP_QUERY = """\
 query($id: String!) {
@@ -116,8 +123,16 @@ def enrich_single_pdb(
     enriched_path = cfg.enriched_dir / f"{pdb_id}.json"
 
     if enriched_path.exists() and not force:
-        logger.info("[%s] Enriched JSON already exists, skipping", pdb_id)
-        return True
+        # A previous run may have written this record while one or more lookups
+        # were transiently failing; it carries the _enrich_incomplete marker.
+        # Re-enrich those (the successful lookups are cached cross-run, so only
+        # the previously-failed lookup is re-hit — cheap and self-healing once
+        # the transient clears). A clean record has no marker and is skipped.
+        if _enriched_is_incomplete(enriched_path):
+            logger.info("[%s] Enriched JSON exists but is marked incomplete, re-enriching", pdb_id)
+        else:
+            logger.info("[%s] Enriched JSON already exists, skipping", pdb_id)
+            return True
 
     if not raw_path.exists():
         logger.error("[%s] Raw JSON not found at %s", pdb_id, raw_path)
@@ -161,6 +176,25 @@ def enrich_single_pdb(
         )
         return False
 
+    # A PARTIAL transient failure (some lookups succeeded, some hard-failed)
+    # still leaves the record with null/empty fields where the failed lookups
+    # would sit. Persist it so the rest of the pipeline proceeds, but stamp it
+    # incomplete so the resume skip re-enriches it on the next run instead of
+    # freezing the gaps as truth. A fully-successful enrich carries no marker
+    # (and any stale marker from a prior partial run is cleared) so it is
+    # skipped normally.
+    if stats["hard_failed"] > 0:
+        pdb_data[INCOMPLETE_MARKER_KEY] = True
+        logger.warning(
+            "[%s] %d of %d enrichment lookup(s) failed — writing record marked "
+            "incomplete; rerun to re-enrich the failed lookup(s)",
+            pdb_id,
+            stats["hard_failed"],
+            stats["attempted"],
+        )
+    else:
+        pdb_data.pop(INCOMPLETE_MARKER_KEY, None)
+
     # Write enriched output atomically. The existence-based resume skip treats
     # enriched/{id}.json as a completed checkpoint, so a half-written file from
     # an interrupted run must never be left behind — a later run would trust it
@@ -178,6 +212,23 @@ def enrich_single_pdb(
         return False
     logger.info("[%s] Enriched → %s", pdb_id, enriched_path)
     return True
+
+
+def _enriched_is_incomplete(enriched_path: Path) -> bool:
+    """Return True if an existing enriched record is marked incomplete.
+
+    A record stamped with :data:`INCOMPLETE_MARKER_KEY` was written while a
+    lookup transiently failed and must be re-enriched. A record that cannot be
+    read (truncated / corrupt) is also treated as needing a redo. A clean,
+    fully-successful record returns False and is skipped on resume.
+    """
+    try:
+        with open(enriched_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        # Unreadable: don't trust it as a completed checkpoint — re-enrich.
+        return True
+    return bool(isinstance(data, dict) and data.get(INCOMPLETE_MARKER_KEY))
 
 
 # ---------------------------------------------------------------------------
@@ -259,10 +310,12 @@ def _resolve_uniprot_slugs(
                     cache.set(accession, slug)
                 found.add(accession)
 
-        # Cache misses as None so we don't re-query
+        # Cache misses as None so we don't re-query. This is a confirmed
+        # negative: the accession was absent from a SUCCESSFUL (200) batch
+        # response, so opt into None-caching explicitly.
         for acc in to_fetch - found:
             if cache:
-                cache.set(acc, None)
+                cache.set(acc, None, allow_none=True)
 
     except requests.exceptions.RequestException as exc:
         logger.error("UniProt API request failed: %s", exc)
@@ -423,6 +476,14 @@ def _get_pubchem_cid(
         stats["attempted"] += 1
     try:
         response = session.get(url, timeout=TIMEOUT_PUBCHEM_CID)
+        # Three-way outcome (mirrors the validator's existence checks):
+        #   200 -> confirmed answer, parse + cache (a 200 with no CID is a real
+        #          negative for this InChIKey, cached as a confirmed None).
+        #   404 -> definitive "not found"; abstain from caching but it is a true
+        #          negative, NOT an outage, so it does not count as hard_failed.
+        #   other -> transient/unexpected (403/408/520/Cloudflare 5xx, etc.):
+        #          count as hard_failed so the outage guard sees it, cache
+        #          nothing, return None. Forcelist transients raise into except.
         if response.status_code == 200:
             data = response.json()
             cids = (data.get("IdentifierList") or {}).get("CID")
@@ -431,12 +492,20 @@ def _get_pubchem_cid(
                     pubchem_id = str(cids[0])
                 elif isinstance(cids, int | float):
                     pubchem_id = str(int(cids))
-            # Cache only a confirmed (HTTP 200) answer. A transient failure or
-            # non-200 must NOT be cached: the cache is keyed by InChIKey (not
-            # PDB), shared across runs and not cleared by --force, so a cached
-            # negative from one blip would suppress this ligand forever.
+            # Cache only a confirmed (HTTP 200) answer; a 200-with-no-CID is a
+            # confirmed negative, so opt into caching the None explicitly.
             if cache:
-                cache.set(inchikey, pubchem_id)
+                cache.set(inchikey, pubchem_id, allow_none=True)
+        elif response.status_code == 404:
+            logger.info("PubChem has no CID for InChIKey %s (HTTP 404)", inchikey)
+        else:
+            logger.warning(
+                "PubChem CID lookup for %s returned unexpected HTTP %s — abstaining",
+                inchikey,
+                response.status_code,
+            )
+            if stats is not None:
+                stats["hard_failed"] += 1
     except requests.exceptions.RequestException as exc:
         logger.error("PubChem CID lookup failed for %s: %s", inchikey, exc)
         if stats is not None:
@@ -462,6 +531,11 @@ def _get_pubchem_synonyms(
         stats["attempted"] += 1
     try:
         response = session.get(url, timeout=TIMEOUT_PUBCHEM_SYNONYMS)
+        # Three-way outcome — see _get_pubchem_cid for the full rationale.
+        #   200 -> confirmed list (possibly empty), parse + cache.
+        #   404 -> definitive "no synonyms on record": leave None, no cache, NOT
+        #          counted as hard_failed (a real negative, not an outage).
+        #   other -> transient/unexpected: count as hard_failed, cache nothing.
         if response.status_code == 200:
             data = response.json()
             info_list = (data.get("InformationList") or {}).get("Information") or []
@@ -469,6 +543,16 @@ def _get_pubchem_synonyms(
             # Cache only a confirmed (HTTP 200) answer — see _get_pubchem_cid.
             if cache:
                 cache.set(cid, synonyms)
+        elif response.status_code == 404:
+            logger.info("PubChem has no synonyms for CID %s (HTTP 404)", cid)
+        else:
+            logger.warning(
+                "PubChem synonyms lookup for CID %s returned unexpected HTTP %s — abstaining",
+                cid,
+                response.status_code,
+            )
+            if stats is not None:
+                stats["hard_failed"] += 1
     except requests.exceptions.RequestException as exc:
         logger.error("PubChem synonyms lookup failed for CID %s: %s", cid, exc)
         if stats is not None:
@@ -497,12 +581,26 @@ def _fetch_chem_comp_descriptors(
             headers={"Content-Type": "application/json"},
             timeout=TIMEOUT_RCSB_CHEM_COMP,
         )
+        # Three-way outcome — see _get_pubchem_cid for the full rationale.
+        #   200 -> confirmed answer (descriptor dict, possibly empty), cache it.
+        #   404 -> definitive "not found": no cache, NOT counted as hard_failed.
+        #   other -> transient/unexpected: count as hard_failed, cache nothing.
         if resp.status_code == 200:
             data = resp.json().get("data") or {}
             result = (data.get("chem_comp") or {}).get("rcsb_chem_comp_descriptor") or {}
             # Cache only a confirmed (HTTP 200) answer — see _get_pubchem_cid.
             if cache:
                 cache.set(comp_id, result)
+        elif resp.status_code == 404:
+            logger.info("RCSB chem_comp has no descriptor for %s (HTTP 404)", comp_id)
+        else:
+            logger.warning(
+                "RCSB chem_comp query for %s returned unexpected HTTP %s — abstaining",
+                comp_id,
+                resp.status_code,
+            )
+            if stats is not None:
+                stats["hard_failed"] += 1
     except requests.exceptions.RequestException as exc:
         logger.error("RCSB chem_comp query failed for %s: %s", comp_id, exc)
         if stats is not None:
