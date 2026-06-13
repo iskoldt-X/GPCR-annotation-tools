@@ -13,6 +13,7 @@ import gemmi
 import pytest
 import requests
 
+from gpcr_tools.config import API_MAX_RETRIES
 from gpcr_tools.validator import geometry as geom
 from gpcr_tools.validator.geometry import (
     _SPHERE_DIRECTIONS,
@@ -83,8 +84,9 @@ class TestLigandCopyGeometry:
 
 
 class _FakeResp:
-    def __init__(self, content: bytes) -> None:
+    def __init__(self, content: bytes, status_code: int = 200) -> None:
         self.content = content
+        self.status_code = status_code
 
     def raise_for_status(self) -> None:
         pass
@@ -116,7 +118,48 @@ class TestFetchStructure:
             raise requests.RequestException("boom")
 
         monkeypatch.setattr(requests, "get", fail)
+        monkeypatch.setattr(geom.time, "sleep", lambda *_: None)
         assert fetch_structure("9IIX", tmp_path) is None
+
+    def test_transient_status_then_success_is_retried(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A transient 503 on the first attempt must be retried; the next 200 wins.
+        responses = [_FakeResp(b"", status_code=503), _FakeResp(b"coords", status_code=200)]
+        monkeypatch.setattr(requests, "get", lambda *a, **k: responses.pop(0))
+        monkeypatch.setattr(geom.time, "sleep", lambda *_: None)
+        path = fetch_structure("9IIX", tmp_path)
+        assert path is not None and path.read_bytes() == b"coords"
+        assert responses == []  # both responses consumed (one retry happened)
+
+    def test_404_returns_none_without_retry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A definitive 404 is not retried -- the request is made exactly once.
+        calls = {"n": 0}
+
+        def get(*a: object, **k: object) -> _FakeResp:
+            calls["n"] += 1
+            return _FakeResp(b"", status_code=404)
+
+        monkeypatch.setattr(requests, "get", get)
+        monkeypatch.setattr(geom.time, "sleep", lambda *_: None)
+        assert fetch_structure("9IIX", tmp_path) is None
+        assert calls["n"] == 1
+
+    def test_all_attempts_transient_returns_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = {"n": 0}
+
+        def get(*a: object, **k: object) -> _FakeResp:
+            calls["n"] += 1
+            return _FakeResp(b"", status_code=503)
+
+        monkeypatch.setattr(requests, "get", get)
+        monkeypatch.setattr(geom.time, "sleep", lambda *_: None)
+        assert fetch_structure("9IIX", tmp_path) is None
+        assert calls["n"] == API_MAX_RETRIES
 
 
 class TestLoadStructure:

@@ -23,6 +23,7 @@ import logging
 import math
 import os
 import tempfile
+import time
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,7 @@ import gemmi
 import requests
 
 from gpcr_tools.config import (
+    API_MAX_RETRIES,
     GEOMETRY_BURIAL_CONE_DEG,
     GEOMETRY_BURIAL_SPHERE_DIRS,
     GEOMETRY_CONTACT_RADIUS,
@@ -40,6 +42,7 @@ from gpcr_tools.config import (
     GEOMETRY_METAL_COORD_DIST,
     GEOMETRY_NEIGHBOR_SEARCH_RADIUS,
     RCSB_STRUCTURE_DOWNLOAD_URL,
+    SLEEP_VALIDATION_RETRY,
     STRUCTURE_CACHE_SUBDIR,
     TIMEOUT_RCSB_STRUCTURE,
 )
@@ -108,18 +111,40 @@ def fetch_structure(pdb_id: str, cache_dir: Path) -> Path | None:
     """Return the cached mmCIF path for *pdb_id*, downloading it once if absent.
 
     A released PDB's coordinates are immutable, so a cached file is never
-    refetched. Network / write failures log a warning and return ``None``.
+    refetched. A transient failure (timeout / connection error / HTTP 5xx / 429)
+    is retried, then logs a warning and returns ``None``; a definitive HTTP 404
+    (structure genuinely absent) returns ``None`` immediately without retrying.
     """
     subdir = cache_dir / STRUCTURE_CACHE_SUBDIR
     path = subdir / f"{pdb_id.lower()}.cif.gz"
     if path.is_file():
         return path
     url = f"{RCSB_STRUCTURE_DOWNLOAD_URL}/{pdb_id.upper()}.cif.gz"
-    try:
-        resp = requests.get(url, timeout=TIMEOUT_RCSB_STRUCTURE)
-        resp.raise_for_status()
-    except (requests.RequestException, OSError) as exc:
-        logger.warning("[geometry] %s: could not download coordinates: %s", pdb_id, exc)
+    resp = None
+    for attempt in range(API_MAX_RETRIES):
+        try:
+            resp = requests.get(url, timeout=TIMEOUT_RCSB_STRUCTURE)
+            if resp.status_code == 200:
+                break
+            if resp.status_code == 404:
+                # The structure is genuinely absent; re-fetching will not help. An
+                # apo / missing structure is indistinguishable downstream, where
+                # ``load_structure`` treats ``None`` uniformly -- the intended design.
+                logger.warning("[geometry] %s: coordinates not found (HTTP 404)", pdb_id)
+                return None
+            # 5xx / 429 / other: service unavailable, not a verdict. Retry, then abstain.
+            if attempt == API_MAX_RETRIES - 1:
+                logger.warning(
+                    "[geometry] %s: coordinates unavailable (HTTP %s)", pdb_id, resp.status_code
+                )
+                return None
+            time.sleep(SLEEP_VALIDATION_RETRY)
+        except (requests.RequestException, OSError) as exc:
+            if attempt == API_MAX_RETRIES - 1:
+                logger.warning("[geometry] %s: could not download coordinates: %s", pdb_id, exc)
+                return None
+            time.sleep(SLEEP_VALIDATION_RETRY)
+    if resp is None or resp.status_code != 200:
         return None
     subdir.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(subdir), suffix=".tmp")
