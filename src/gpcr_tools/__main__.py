@@ -154,6 +154,16 @@ def cli() -> None:
         help="Use Gemini Batch API instead of single calls.",
     )
     ann_parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        metavar="T",
+        help=(
+            "Sampling temperature for generation. Omit to keep the built-in "
+            "default (single mode pins 0.0; batch sends no override)."
+        ),
+    )
+    ann_parser.add_argument(
         "--check-batch",
         action="store_true",
         default=False,
@@ -343,6 +353,7 @@ def cli() -> None:
                     model=args.model,
                     num_runs=args.runs,
                     batch=args.batch,
+                    temperature=args.temperature,
                 )
             except FileNotFoundError as exc:
                 print(f"Error: {exc}", file=sys.stderr)
