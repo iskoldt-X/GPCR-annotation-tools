@@ -15,6 +15,7 @@ from gpcr_tools.config import (
     ALERT_HALLUCINATION,
     ALERT_MISSED_PROTOMER,
     ALERT_MULTI_COPY_LIGAND,
+    ALERT_NO_GPCR,
     ALERT_SUSPICIOUS_7TM,
     TM_STATUS_INCOMPLETE,
     VALIDATION_FATAL_KEYWORDS,
@@ -49,7 +50,12 @@ def inject_oligomer_alerts(oligo: dict, validation_data: dict) -> None:
 
     for alert in oligo.get("alerts") or []:
         atype = alert.get("type") or ""
-        if atype in (ALERT_HALLUCINATION, ALERT_MISSED_PROTOMER, ALERT_SUSPICIOUS_7TM):
+        if atype in (
+            ALERT_HALLUCINATION,
+            ALERT_MISSED_PROTOMER,
+            ALERT_SUSPICIOUS_7TM,
+            ALERT_NO_GPCR,
+        ):
             # The "at 'receptor_info'" prefix is a routing anchor so this alert
             # buckets under the receptor block during review. ensure_alert_prefix
             # keeps the message's own "[TYPE]" label present exactly once --

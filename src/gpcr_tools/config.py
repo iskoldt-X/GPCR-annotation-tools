@@ -575,6 +575,11 @@ VALIDATION_GHOST_LIGAND: str = "GHOST_LIGAND"
 VALIDATION_RECEPTOR_MATCH: str = "RECEPTOR_MATCH"
 VALIDATION_UNIPROT_CLASH: str = "UNIPROT_CLASH"
 VALIDATION_RECEPTOR_NO_API_DATA: str = "RECEPTOR_NO_API_DATA"
+# A reported chain carries a UniProt accession in the source data but no resolved
+# GPCRdb slug -- an upstream mapping gap to recover, distinct from a chain the
+# source has no UniProt reference for at all (RECEPTOR_NO_API_DATA). The receptor
+# identity cannot be confirmed here, so this state gates one-click accept.
+VALIDATION_RECEPTOR_RCSB_UNMAPPED: str = "RECEPTOR_RCSB_UNMAPPED"
 
 # ---------------------------------------------------------------------------
 # Ligand exclude list (common buffers, ions, artifacts, detergents, matrix lipids)
@@ -1033,6 +1038,11 @@ ALERT_SUSPICIOUS_7TM: str = "SUSPICIOUS_7TM"
 ALERT_MULTI_COPY_LIGAND: str = "MULTI_COPY_LIGAND"
 ALERT_PROTOMER_IN_AUXILIARY: str = "PROTOMER_IN_AUXILIARY"
 ALERT_ASSEMBLY_MISMATCH: str = "ASSEMBLY_MISMATCH"
+# The roster carried no GPCR protomer -- a GPCR-annotation tool concluding "no
+# GPCR" must alarm the curator rather than pass silently (the emptiness may be an
+# unresolved/missing UniProt mapping, not a true absence). Promoted to a gating
+# warning, unlike the other advisory oligomer alerts.
+ALERT_NO_GPCR: str = "NO_GPCR"
 
 # ---------------------------------------------------------------------------
 # 7TM statuses & detection constants

@@ -15,6 +15,7 @@ from typing import Any
 from gpcr_tools.config import (
     VALIDATION_RECEPTOR_MATCH,
     VALIDATION_RECEPTOR_NO_API_DATA,
+    VALIDATION_RECEPTOR_RCSB_UNMAPPED,
     VALIDATION_UNIPROT_CLASH,
 )
 
@@ -55,6 +56,10 @@ def validate_receptor_identity(
 
     # Per-chain results: chain -> list of slugs from its entity
     chain_slugs: dict[str, list[str]] = {}
+    # Chains whose entity carries a UniProt accession (rcsb_id) but no resolved
+    # GPCRdb slug -- a recoverable upstream mapping gap, distinct from a chain the
+    # source has no UniProt reference for at all.
+    unmapped_accession_chains: set[str] = set()
 
     for chain in ai_chains:
         for entity in polymer_entities:
@@ -65,13 +70,18 @@ def validate_receptor_identity(
 
             if chain in auth_asym_ids:
                 slugs: list[str] = []
+                has_accession = False
                 for u in entity.get("uniprots") or []:
                     if not isinstance(u, dict):
                         continue
+                    if u.get("rcsb_id"):
+                        has_accession = True
                     slug = u.get("gpcrdb_entry_name_slug")
                     if slug:
                         slugs.append(slug)
                 chain_slugs[chain] = slugs
+                if not slugs and has_accession:
+                    unmapped_accession_chains.add(chain)
                 break  # found entity for this chain, move to next chain
 
     if not chain_slugs:
@@ -88,9 +98,19 @@ def validate_receptor_identity(
 
     # A chain the API has no UniProt slug for cannot be checked -- that is "no
     # data", not a clash. Validate only against chains that actually carry a slug;
-    # surface the unverifiable chains as a soft note for the curator.
+    # surface the unverifiable chains as a soft note for the curator. A chain whose
+    # accession is present but unmapped gets a stronger gating warning below instead,
+    # so it is excluded here to avoid a duplicate soft note.
     chains_with_slugs = {c: s for c, s in chain_slugs.items() if s}
-    no_data_chains = sorted(c for c, s in chain_slugs.items() if not s)
+    # In the pure no-slug case the unmapped chains get the gating warning below, so
+    # they are excluded here; in the mixed case (identity confirmable elsewhere) the
+    # soft note is kept for every unverifiable chain.
+    suppress_unmapped_note = not chains_with_slugs
+    no_data_chains = sorted(
+        c
+        for c, s in chain_slugs.items()
+        if not s and not (suppress_unmapped_note and c in unmapped_accession_chains)
+    )
     if no_data_chains:
         warnings.append(
             f"RECEPTOR_NO_API_DATA at 'receptor_info': the API exposes no UniProt slug for "
@@ -116,9 +136,24 @@ def validate_receptor_identity(
     matched_chains = [c for c, s in chains_with_slugs.items() if ai_uniprot in s]
 
     if not chains_with_slugs:
-        # No chain carried any slug at all -> nothing to validate against.
-        receptor_info["validation_status"] = VALIDATION_RECEPTOR_NO_API_DATA
-        receptor_info["api_reality"] = all_slugs
+        # No chain carried any slug at all -> nothing to validate against. Two
+        # distinct causes: a chain carrying a UniProt accession that simply has no
+        # resolved GPCRdb slug is a recoverable mapping gap (RECEPTOR_RCSB_UNMAPPED),
+        # whereas a chain the source has no UniProt reference for at all stays
+        # RECEPTOR_NO_API_DATA. The unmapped case must NOT silently assert a
+        # confident absence, so it raises a warning that gates one-click accept.
+        if unmapped_accession_chains:
+            receptor_info["validation_status"] = VALIDATION_RECEPTOR_RCSB_UNMAPPED
+            receptor_info["api_reality"] = all_slugs
+            warnings.append(
+                f"RECEPTOR_RCSB_UNMAPPED at 'receptor_info': chain(s) "
+                f"{', '.join(sorted(unmapped_accession_chains))} carry a UniProt "
+                f"accession with no resolved GPCRdb slug; the receptor identity "
+                f"cannot be confirmed (upstream mapping gap). Confirm manually."
+            )
+        else:
+            receptor_info["validation_status"] = VALIDATION_RECEPTOR_NO_API_DATA
+            receptor_info["api_reality"] = all_slugs
     elif matched_chains:
         receptor_info["validation_status"] = VALIDATION_RECEPTOR_MATCH
         receptor_info["api_reality"] = all_slugs
