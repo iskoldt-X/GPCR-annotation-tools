@@ -24,6 +24,7 @@ from gpcr_tools.config import (
     ALERT_HALLUCINATION,
     ALERT_MISSED_PROTOMER,
     ALERT_MULTI_COPY_LIGAND,
+    ALERT_NO_GPCR,
     ALERT_PREFIX_FUSION_NOTE,
     ALERT_PREFIX_MISSED_POLYMER,
     ALERT_PROTOMER_IN_AUXILIARY,
@@ -620,6 +621,14 @@ def _get_assembly_cross_check(
     supplies ``oligomeric_state`` / ``stoichiometry`` / ``kind`` / ``type``; the
     candidate flag and modeled-monomer count are surfaced alongside so a caller can
     reconcile the GPCR-centric classification against the biological assembly.
+
+    The first block's state is kept as the displayed ``oligomeric_state`` (changing
+    it would perturb the surfaced annotation), but ALL symmetry blocks of the chosen
+    assembly are scanned for a derived ``has_homo_symmetry`` flag -- True when ANY
+    block's ``oligomeric_state`` starts with "Homo" (case-insensitive). RCSB can
+    record the homo-oligomer in a later Local/Pseudo block rather than the first
+    Global one, so reading only the first block misses a real homodimer.
+
     All data is already in the enriched entry -- no network call.  Returns ``{}``
     when no assembly carries a symmetry block.
     """
@@ -638,22 +647,32 @@ def _get_assembly_cross_check(
         assemblies[0],
     )
 
-    for sym in chosen.get("rcsb_struct_symmetry") or []:
-        if not isinstance(sym, dict):
-            continue
-        return {
-            "oligomeric_state": sym.get("oligomeric_state"),
-            "stoichiometry": sym.get("stoichiometry"),
-            "kind": sym.get("kind"),
-            "type": sym.get("type"),
-            "rcsb_candidate_assembly": (chosen.get("pdbx_struct_assembly") or {}).get(
-                "rcsb_candidate_assembly"
-            ),
-            "modeled_polymer_monomer_count": (chosen.get("rcsb_assembly_info") or {}).get(
-                "modeled_polymer_monomer_count"
-            ),
-        }
-    return {}
+    symmetry_blocks = [s for s in (chosen.get("rcsb_struct_symmetry") or []) if isinstance(s, dict)]
+    if not symmetry_blocks:
+        return {}
+
+    # ANY block declaring a Homo oligomer corroborates a receptor homo-oligomer,
+    # even when it is not the first (e.g. a later Local/Pseudo block).
+    has_homo_symmetry = any(
+        isinstance(s.get("oligomeric_state"), str)
+        and s["oligomeric_state"].strip().lower().startswith("homo")
+        for s in symmetry_blocks
+    )
+
+    first = symmetry_blocks[0]
+    return {
+        "oligomeric_state": first.get("oligomeric_state"),
+        "stoichiometry": first.get("stoichiometry"),
+        "kind": first.get("kind"),
+        "type": first.get("type"),
+        "has_homo_symmetry": has_homo_symmetry,
+        "rcsb_candidate_assembly": (chosen.get("pdbx_struct_assembly") or {}).get(
+            "rcsb_candidate_assembly"
+        ),
+        "modeled_polymer_monomer_count": (chosen.get("rcsb_assembly_info") or {}).get(
+            "modeled_polymer_monomer_count"
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -702,10 +721,11 @@ def _reconcile_assembly_consistency(
     - ``MONOMER`` while the biological assembly is a higher-order complex
       (oligomeric_state parses to N >= 2) -- the receptor may be one chain of a
       larger hetero-complex the GPCR-only count cannot see.
-    - ``HOMOMER`` while the biological assembly does not corroborate a
-      receptor homo-oligomer (state is a monomer or a hetero-complex, not a
-      ``Homo N-mer``) -- the two same-slug chains may be crystallographic copies
-      rather than a biological homodimer.
+    - ``HOMOMER`` while NO symmetry block of the biological assembly corroborates a
+      receptor homo-oligomer (no ``Homo N-mer`` block at all) -- the two same-slug
+      chains may be crystallographic copies rather than a biological homodimer.
+      Reading every block (not just the first) keeps a real homodimer whose Homo
+      block is recorded later (Local/Pseudo) from false-firing.
     """
     state = assembly_info.get("oligomeric_state") if isinstance(assembly_info, dict) else None
     if not isinstance(state, str) or not state.strip():
@@ -713,7 +733,7 @@ def _reconcile_assembly_consistency(
 
     count = _parse_oligomeric_count(state)
     stoich = assembly_info.get("stoichiometry")
-    state_lower = state.strip().lower()
+    has_homo_symmetry = bool(assembly_info.get("has_homo_symmetry"))
 
     # MONOMER vs higher-order biological assembly (e.g. a 2:2:2 hetero-complex
     # whose single GPCR chain makes the GPCR-only count read MONOMER).
@@ -730,10 +750,10 @@ def _reconcile_assembly_consistency(
             },
         )
 
-    # HOMOMER vs a biological assembly that does not corroborate a receptor
-    # homo-oligomer: the state is a monomer or a hetero-complex (it does not start
-    # with "homo"). Same-slug chains may be crystallographic copies, not a dimer.
-    if classification == OLIGOMER_HOMOMER and not state_lower.startswith("homo"):
+    # HOMOMER vs a biological assembly with no Homo symmetry block at all: the
+    # same-slug chains may be crystallographic copies, not a dimer. Checking every
+    # block keeps a real homodimer whose Homo block is later (Local/Pseudo) silent.
+    if classification == OLIGOMER_HOMOMER and not has_homo_symmetry:
         note = (
             f"two same-slug chains may be crystallographic copies, not a biological "
             f"homodimer ({state}, {stoich}); confirm."
@@ -1229,6 +1249,23 @@ def analyze_oligomer(
         ai_chain,
         best_run_data,
     )
+
+    # A GPCR-annotation tool that finds NO GPCR protomer must alarm the curator, not
+    # pass silently: the empty roster can be a genuine non-GPCR structure OR an
+    # unresolved/missing UniProt mapping (RCSB exposed no slug). Promoted to a gating
+    # warning by inject_oligomer_alerts so one-click accept is disabled.
+    if classification == OLIGOMER_NO_GPCR:
+        alerts.append(
+            {
+                "type": ALERT_NO_GPCR,
+                "message": (
+                    f"[{ALERT_NO_GPCR}] at 'receptor_info': no GPCR protomer was found "
+                    f"in the structure (the roster is empty). This may be a non-GPCR "
+                    f"structure or an unresolved/missing UniProt-to-GPCRdb mapping; "
+                    f"confirm the receptor identity manually."
+                ),
+            }
+        )
 
     unknown_chains = [c for c in all_gpcr_chains if c["7tm_status"] == TM_STATUS_UNKNOWN]
     if unknown_chains:

@@ -23,6 +23,7 @@ from gpcr_tools.config import (
     ALERT_HALLUCINATION,
     ALERT_MISSED_PROTOMER,
     ALERT_MULTI_COPY_LIGAND,
+    ALERT_NO_GPCR,
     ALERT_PROTOMER_IN_AUXILIARY,
     ALERT_SUSPICIOUS_7TM,
     OLIGOMER_HETEROMER,
@@ -34,6 +35,7 @@ from gpcr_tools.config import (
     TM_STATUS_UNKNOWN,
 )
 from gpcr_tools.csv_generator.logic import resolve_partner_protomer
+from gpcr_tools.csv_generator.validation_display import inject_oligomer_alerts
 from gpcr_tools.validator.oligomer import (
     _analyze_tm_for_entity_instance,
     _apply_chain_override,
@@ -1513,6 +1515,72 @@ class TestAssemblyCrossCheckCandidatePreference:
 
 
 # ===================================================================
+# _get_assembly_cross_check — derived has_homo_symmetry (all blocks scanned)
+# ===================================================================
+
+
+class TestAssemblyCrossCheckHasHomoSymmetry:
+    """The first block still supplies the displayed state, but ALL symmetry blocks
+    of the chosen assembly are scanned for the derived has_homo_symmetry flag."""
+
+    @staticmethod
+    def _entry(blocks: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "assemblies": [
+                {
+                    "pdbx_struct_assembly": {"rcsb_candidate_assembly": "Y"},
+                    "rcsb_struct_symmetry": blocks,
+                }
+            ]
+        }
+
+    def test_homo_first_block_true(self) -> None:
+        result = self._entry([{"oligomeric_state": "Homo 2-mer", "kind": "Global Symmetry"}])
+        out = _get_assembly_cross_check(result)
+        assert out["oligomeric_state"] == "Homo 2-mer"
+        assert out["has_homo_symmetry"] is True
+
+    def test_homo_in_later_local_block_true(self) -> None:
+        # 9AYF-style: first (Global) block is a hetero-complex, a later (Local) block
+        # declares the Homo oligomer. Displayed state stays the first block's value;
+        # the derived flag still picks up the later Homo block.
+        out = _get_assembly_cross_check(
+            self._entry(
+                [
+                    {"oligomeric_state": "Hetero 6-mer", "kind": "Global Symmetry"},
+                    {"oligomeric_state": "Homo 2-mer", "kind": "Local Symmetry"},
+                ]
+            )
+        )
+        assert out["oligomeric_state"] == "Hetero 6-mer"
+        assert out["has_homo_symmetry"] is True
+
+    def test_no_homo_block_false(self) -> None:
+        # 5G53-style: only a hetero-complex block, no Homo block anywhere.
+        out = _get_assembly_cross_check(
+            self._entry([{"oligomeric_state": "Hetero 2-mer", "kind": "Global Symmetry"}])
+        )
+        assert out["oligomeric_state"] == "Hetero 2-mer"
+        assert out["has_homo_symmetry"] is False
+
+    def test_case_insensitive_and_none_safe(self) -> None:
+        out = _get_assembly_cross_check(
+            self._entry(
+                [
+                    {"oligomeric_state": None},
+                    {"oligomeric_state": "homo 3-mer"},
+                ]
+            )
+        )
+        assert out["has_homo_symmetry"] is True
+
+    def test_real_5g53_no_homo(self) -> None:
+        # The real 5G53 candidate assembly carries only a Hetero 2-mer block.
+        out = _get_assembly_cross_check(_load_enriched_entry("5G53"))
+        assert out["has_homo_symmetry"] is False
+
+
+# ===================================================================
 # _parse_oligomeric_count
 # ===================================================================
 
@@ -1603,8 +1671,26 @@ class TestReconcileAssemblyConsistency:
         assert alert is None
 
     def test_homomer_homodimer_corroborated_silent(self) -> None:
+        # Corroboration is driven by the derived has_homo_symmetry flag (any Homo
+        # block across the assembly), not the first block's displayed state.
         consistency, alert = _reconcile_assembly_consistency(
-            OLIGOMER_HOMOMER, {"oligomeric_state": "Homo 2-mer", "stoichiometry": ["A2"]}
+            OLIGOMER_HOMOMER,
+            {"oligomeric_state": "Homo 2-mer", "stoichiometry": ["A2"], "has_homo_symmetry": True},
+        )
+        assert consistency["agrees"] is True
+        assert alert is None
+
+    def test_homomer_homo_block_in_later_block_silent(self) -> None:
+        # The first block reads as a hetero-complex, but a later Local/Pseudo block
+        # declares a Homo oligomer (has_homo_symmetry True) -> a real homodimer is
+        # corroborated and the advisory stays silent (9AYF-style).
+        consistency, alert = _reconcile_assembly_consistency(
+            OLIGOMER_HOMOMER,
+            {
+                "oligomeric_state": "Hetero 6-mer",
+                "stoichiometry": ["A2", "B2", "C2"],
+                "has_homo_symmetry": True,
+            },
         )
         assert consistency["agrees"] is True
         assert alert is None
@@ -1716,3 +1802,110 @@ class TestAnalyzeOligomerAssemblyConsistency:
         assert oligo["assembly_cross_check"] == {}
         assert oligo["assembly_consistency"]["agrees"] is True
         assert self._mismatch_alerts(oligo) == []
+
+
+# ===================================================================
+# ASSEMBLY_MISMATCH stays a NON-gating advisory
+# ===================================================================
+
+
+class TestAssemblyMismatchNonGating:
+    """A HOMOMER with no Homo symmetry block fires ASSEMBLY_MISMATCH; one with a
+    Homo block (even a later Local block) does not. Either way the advisory never
+    reaches the curator's critical_warnings (one-click accept stays enabled)."""
+
+    @staticmethod
+    def _homomer_with_symmetry(blocks: list[dict[str, Any]]) -> dict[str, Any]:
+        enriched = _make_enriched_with_entities(
+            [_make_entity("drd2_human", "A"), _make_entity("drd2_human", "B")]
+        )
+        enriched["assemblies"] = [
+            {
+                "pdbx_struct_assembly": {"rcsb_candidate_assembly": "Y"},
+                "rcsb_struct_symmetry": blocks,
+            }
+        ]
+        data: dict[str, Any] = {"receptor_info": {"chain_id": "A, B"}}
+        with patch(
+            "gpcr_tools.validator.oligomer.scan_all_chains_7tm",
+            return_value=({}, None),
+        ):
+            analyze_oligomer("TEST", data, enriched)
+        return data["oligomer_analysis"]
+
+    def test_no_homo_block_fires_mismatch(self) -> None:
+        oligo = self._homomer_with_symmetry(
+            [{"oligomeric_state": "Hetero 2-mer", "kind": "Global Symmetry"}]
+        )
+        assert oligo["classification"] == OLIGOMER_HOMOMER
+        assert any(a["type"] == ALERT_ASSEMBLY_MISMATCH for a in oligo["alerts"])
+
+    def test_later_homo_block_silent(self) -> None:
+        oligo = self._homomer_with_symmetry(
+            [
+                {"oligomeric_state": "Hetero 6-mer", "kind": "Global Symmetry"},
+                {"oligomeric_state": "Homo 2-mer", "kind": "Local Symmetry"},
+            ]
+        )
+        assert oligo["classification"] == OLIGOMER_HOMOMER
+        assert not any(a["type"] == ALERT_ASSEMBLY_MISMATCH for a in oligo["alerts"])
+
+    def test_mismatch_not_promoted_to_critical(self) -> None:
+        # The mismatch advisory is NOT in inject_oligomer_alerts's promoted set, so
+        # it never disables one-click accept -- it stays a non-gating advisory.
+        oligo = self._homomer_with_symmetry(
+            [{"oligomeric_state": "Hetero 2-mer", "kind": "Global Symmetry"}]
+        )
+        assert any(a["type"] == ALERT_ASSEMBLY_MISMATCH for a in oligo["alerts"])
+        validation_data: dict[str, Any] = {}
+        inject_oligomer_alerts(oligo, validation_data)
+        assert not any(
+            ALERT_ASSEMBLY_MISMATCH in w for w in validation_data.get("critical_warnings") or []
+        )
+
+
+# ===================================================================
+# NO_GPCR honesty — the empty roster must alarm the curator (GATING)
+# ===================================================================
+
+
+class TestNoGpcrGating:
+    """A GPCR-annotation tool finding no GPCR must alarm the curator: analyze_oligomer
+    emits an ALERT_NO_GPCR that inject_oligomer_alerts promotes to a critical warning
+    (one-click accept disabled)."""
+
+    def _no_gpcr_oligo(self) -> dict[str, Any]:
+        # An empty roster: no polymer entity carried a resolved GPCRdb slug
+        # (e.g. an antibody/fusion-only entry, or an unresolved UniProt mapping).
+        enriched = _make_enriched_with_entities([])
+        data: dict[str, Any] = {"receptor_info": {"chain_id": "A"}}
+        with patch(
+            "gpcr_tools.validator.oligomer.scan_all_chains_7tm",
+            return_value=({}, None),
+        ):
+            analyze_oligomer("TEST", data, enriched)
+        return data["oligomer_analysis"]
+
+    def test_no_gpcr_emits_alert(self) -> None:
+        oligo = self._no_gpcr_oligo()
+        assert oligo["classification"] == OLIGOMER_NO_GPCR
+        assert any(a["type"] == ALERT_NO_GPCR for a in oligo["alerts"])
+
+    def test_no_gpcr_alert_promoted_to_critical(self) -> None:
+        oligo = self._no_gpcr_oligo()
+        validation_data: dict[str, Any] = {}
+        inject_oligomer_alerts(oligo, validation_data)
+        warnings = validation_data.get("critical_warnings") or []
+        assert any(ALERT_NO_GPCR in w for w in warnings)
+
+    def test_gpcr_present_emits_no_no_gpcr_alert(self) -> None:
+        # A normal monomer with a real GPCR must not raise the NO_GPCR alarm.
+        enriched = _make_enriched_with_entities([_make_entity("drd2_human", "A")])
+        data: dict[str, Any] = {"receptor_info": {"chain_id": "A"}}
+        with patch(
+            "gpcr_tools.validator.oligomer.scan_all_chains_7tm",
+            return_value=({}, None),
+        ):
+            analyze_oligomer("TEST", data, enriched)
+        oligo = data["oligomer_analysis"]
+        assert not any(a["type"] == ALERT_NO_GPCR for a in oligo["alerts"])

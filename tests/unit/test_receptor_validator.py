@@ -12,6 +12,7 @@ from typing import Any
 from gpcr_tools.config import (
     VALIDATION_RECEPTOR_MATCH,
     VALIDATION_RECEPTOR_NO_API_DATA,
+    VALIDATION_RECEPTOR_RCSB_UNMAPPED,
     VALIDATION_UNIPROT_CLASH,
 )
 from gpcr_tools.validator.receptor_validator import validate_receptor_identity
@@ -308,6 +309,53 @@ class TestMultiChain:
         warnings = validate_receptor_identity("TEST", data, enriched)
         assert warnings == []
         assert data["receptor_info"]["validation_status"] == VALIDATION_RECEPTOR_MATCH
+
+
+def _entity_with_accession_no_slug(chain_ids: list[str], accession: str) -> dict[str, Any]:
+    """An entity carrying a UniProt accession (rcsb_id) but no resolved GPCRdb slug."""
+    return {
+        "rcsb_polymer_entity_container_identifiers": {"auth_asym_ids": chain_ids},
+        "uniprots": [{"rcsb_id": accession}],
+    }
+
+
+class TestRcsbUnmapped:
+    """A reported chain whose entity carries a UniProt accession but no resolved
+    GPCRdb slug is a recoverable mapping gap (RECEPTOR_RCSB_UNMAPPED), distinct from
+    a chain with no UniProt reference at all (RECEPTOR_NO_API_DATA). It must NOT pass
+    silently: the receptor identity is unconfirmable, so a gating warning is raised."""
+
+    def test_accession_present_no_slug_sets_unmapped_status(self) -> None:
+        data: dict[str, Any] = {
+            "receptor_info": {"uniprot_entry_name": "ccr6_human", "chain_id": "A"}
+        }
+        enriched = _make_enriched([_entity_with_accession_no_slug(["A"], "Q9NXX")])
+        warnings = validate_receptor_identity("9D3G", data, enriched)
+        assert data["receptor_info"]["validation_status"] == VALIDATION_RECEPTOR_RCSB_UNMAPPED
+        # A single, gating warning is raised; no duplicate soft NO_API_DATA note.
+        assert len(warnings) == 1
+        assert "RECEPTOR_RCSB_UNMAPPED" in warnings[0]
+        assert "RECEPTOR_NO_API_DATA" not in warnings[0]
+        assert _WARNING_REGEX.search(warnings[0]) is not None
+
+    def test_no_accession_no_slug_stays_no_api_data(self) -> None:
+        # No UniProt reference at all (uniprots null) -> the existing NO_API_DATA
+        # status / soft note, NOT the recoverable-unmapped gating warning.
+        data: dict[str, Any] = {
+            "receptor_info": {"uniprot_entry_name": "drd2_human", "chain_id": "A"}
+        }
+        enriched = _make_enriched(
+            [
+                {
+                    "rcsb_polymer_entity_container_identifiers": {"auth_asym_ids": ["A"]},
+                    "uniprots": None,
+                }
+            ]
+        )
+        warnings = validate_receptor_identity("TEST", data, enriched)
+        assert data["receptor_info"]["validation_status"] == VALIDATION_RECEPTOR_NO_API_DATA
+        assert any("RECEPTOR_NO_API_DATA" in w for w in warnings)
+        assert not any("RECEPTOR_RCSB_UNMAPPED" in w for w in warnings)
 
 
 class TestWarningFormat:

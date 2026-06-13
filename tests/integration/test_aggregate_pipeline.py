@@ -232,6 +232,32 @@ class TestAggregatePdb:
         assert result.success is False
         assert "Enriched data" in (result.error or "")
 
+    def test_incomplete_enrichment_refused_before_validation(
+        self, aggregate_workspace: Path
+    ) -> None:
+        # An enrichment stamped with the top-level _enrich_incomplete marker (written
+        # during a transient API gap) must NOT be aggregated: consuming it would turn
+        # an unresolved field into an affirmative answer (e.g. a missing slug -> "no
+        # GPCR"). aggregate_pdb refuses with the re-run-fetch message and never reaches
+        # receptor / oligomer validation, so no aggregated output is written.
+        ai_dir = aggregate_workspace / "ai_results" / "INCOMPLETE1"
+        ai_dir.mkdir(parents=True)
+        (ai_dir / "run_00.json").write_text(json.dumps(_make_ai_run()))
+        # The marker lives at the top level, OUTSIDE data.entry.
+        enriched = {"_enrich_incomplete": True, "data": {"entry": _make_enriched_entry()}}
+        (aggregate_workspace / "enriched" / "INCOMPLETE1.json").write_text(json.dumps(enriched))
+
+        with patch(
+            "gpcr_tools.aggregator.runner.analyze_oligomer",
+            side_effect=AssertionError("validation must not run on an incomplete enrichment"),
+        ):
+            result = aggregate_pdb("INCOMPLETE1", skip_api_checks=True)
+
+        assert result.success is False
+        assert "re-run fetch" in (result.error or "")
+        assert result.aggregated_path is None
+        assert not (aggregate_workspace / "aggregated" / "INCOMPLETE1.json").exists()
+
     def test_ground_truth_injected(self, aggregate_workspace: Path) -> None:
         with patch("gpcr_tools.validator.oligomer.scan_all_chains_7tm", return_value=({}, None)):
             result = aggregate_pdb("TEST1", skip_api_checks=True)
