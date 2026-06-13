@@ -333,6 +333,10 @@ def _setup_batch_state(tmp_path, monkeypatch, job_name="batchJobs/mock_job"):
     config = get_config()
     (tmp_path / "state").mkdir(exist_ok=True)
     config.current_batch_job_file.write_text(job_name)
+    # Start each setup from a clean registry so the legacy-adoption path (the
+    # only thing the single-file pointer drives now) is exercised consistently,
+    # and a loop reusing one tmp_path doesn't carry a job's status across rounds.
+    config.batch_jobs_registry_file.unlink(missing_ok=True)
     return config
 
 
@@ -490,3 +494,323 @@ def test_registry_fresh_uri_expiry():
     assert runner._registry_fresh_uri("files/legacy-bare-string", now) is None
     assert runner._registry_fresh_uri(None, now) is None
     assert runner._registry_fresh_uri({"uri": "files/x"}, now) is None  # no timestamp
+
+
+def test_chunk_request_groups_packs_and_never_splits_a_pdb():
+    """Groups that can't combine under the cap each become their own chunk,
+    intact -- a single PDB's runs are never split across jobs."""
+    groups = [[1, 2, 3], [4, 5, 6]]  # two PDBs, 3 runs each
+    assert runner._chunk_request_groups(groups, 4) == [[1, 2, 3], [4, 5, 6]]
+
+
+def test_chunk_request_groups_combines_small_groups():
+    groups = [[1, 2], [3], [4, 5, 6]]
+    assert runner._chunk_request_groups(groups, 3) == [[1, 2, 3], [4, 5, 6]]
+
+
+def test_chunk_request_groups_oversized_group_is_its_own_chunk():
+    """A single PDB whose runs exceed the cap is kept whole in its own chunk
+    rather than being divided."""
+    groups = [[1, 2, 3, 4, 5], [6]]
+    assert runner._chunk_request_groups(groups, 3) == [[1, 2, 3, 4, 5], [6]]
+
+
+def test_chunk_request_groups_empty():
+    assert runner._chunk_request_groups([], 3) == []
+
+
+def _setup_multi_pdb_batch(tmp_path, monkeypatch, pdbs):
+    monkeypatch.setenv("GPCR_ENRICHED_PATH", str(tmp_path / "enriched"))
+    monkeypatch.setenv("GPCR_PAPERS_PATH", str(tmp_path / "papers"))
+    monkeypatch.setenv("GPCR_AI_RESULTS_PATH", str(tmp_path / "ai_results"))
+    monkeypatch.setenv("GPCR_STATE_PATH", str(tmp_path / "state"))
+    reset_config()
+    config = get_config()
+    (tmp_path / "state").mkdir()
+    config.enriched_dir.mkdir()
+    config.papers_dir.mkdir()
+    for p in pdbs:
+        (config.enriched_dir / f"{p}.json").write_text("{}")
+        (config.papers_dir / f"{p}.pdf").write_text("%PDF")
+
+    upl = MagicMock()
+    upl.uri = "u"
+    upl.name = "files/src"
+    client = MagicMock()
+    client.files.upload.return_value = upl
+    monkeypatch.setattr("gpcr_tools.annotator.runner.get_client", lambda: client)
+    monkeypatch.setattr("gpcr_tools.annotator.runner.compress_pdf_if_needed", lambda a, b: a)
+    return config, client
+
+
+def test_build_and_submit_batch_shards_into_multiple_jobs(tmp_path, monkeypatch):
+    """A submission larger than the per-job cap is split into multiple jobs,
+    each registered in the job registry; the single-file pointer alone could
+    not have tracked them."""
+    config, client = _setup_multi_pdb_batch(tmp_path, monkeypatch, ["1ABC", "2DEF", "3GHI"])
+    # cap 2; 3 PDBs x 1 run = 3 requests, never splitting a PDB -> 2 jobs.
+    monkeypatch.setattr("gpcr_tools.annotator.runner.GEMINI_BATCH_MAX_REQUESTS", 2)
+    job0, job1 = MagicMock(), MagicMock()
+    job0.name = "batchJobs/j0"
+    job1.name = "batchJobs/j1"
+    client.batches.create.side_effect = [job0, job1]
+
+    runner.build_and_submit_batch(["1ABC", "2DEF", "3GHI"], "Prompt", num_runs=1)
+
+    assert client.batches.create.call_count == 2
+    registry = json.loads(config.batch_jobs_registry_file.read_text())
+    assert set(registry["jobs"]) == {"batchJobs/j0", "batchJobs/j1"}
+    assert registry["jobs"]["batchJobs/j0"]["chunk_count"] == 2
+    assert registry["jobs"]["batchJobs/j0"]["status"] == "submitted"
+    # The deprecated single-file pointer mirrors the most recent job.
+    assert config.current_batch_job_file.read_text() == "batchJobs/j1"
+
+
+def test_build_and_submit_batch_chunk_failure_isolated(tmp_path, monkeypatch):
+    """If one chunk fails to submit, earlier chunks stay registered and the
+    call does not crash."""
+    config, client = _setup_multi_pdb_batch(tmp_path, monkeypatch, ["1ABC", "2DEF", "3GHI"])
+    monkeypatch.setattr("gpcr_tools.annotator.runner.GEMINI_BATCH_MAX_REQUESTS", 2)
+    job0 = MagicMock()
+    job0.name = "batchJobs/j0"
+    client.batches.create.side_effect = [job0, RuntimeError("boom")]
+
+    runner.build_and_submit_batch(["1ABC", "2DEF", "3GHI"], "Prompt", num_runs=1)  # no raise
+
+    assert client.batches.create.call_count == 2
+    registry = json.loads(config.batch_jobs_registry_file.read_text())
+    assert set(registry["jobs"]) == {"batchJobs/j0"}
+
+
+def test_check_batch_status_polls_all_pending_jobs(tmp_path, monkeypatch):
+    """All submitted jobs in the registry are polled and downloaded, not just
+    one (the single-file pointer could track only one)."""
+    monkeypatch.setenv("GPCR_STATE_PATH", str(tmp_path / "state"))
+    monkeypatch.setenv("GPCR_AI_RESULTS_PATH", str(tmp_path / "ai_results"))
+    reset_config()
+    config = get_config()
+    config.state_dir.mkdir(parents=True, exist_ok=True)
+    config.batch_jobs_registry_file.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "jobs": {
+                    "batchJobs/a": {"job_name": "batchJobs/a", "status": "submitted"},
+                    "batchJobs/b": {"job_name": "batchJobs/b", "status": "submitted"},
+                },
+            }
+        )
+    )
+    client = MagicMock()
+    client.batches.get.side_effect = lambda name: _mock_batch_job("JOB_STATE_SUCCEEDED")
+    client.files.download.return_value = b"{}\n"
+    monkeypatch.setattr("gpcr_tools.annotator.runner.get_client", lambda: client)
+    monkeypatch.setattr("gpcr_tools.annotator.runner.recover_batch", lambda: None)
+
+    runner.check_batch_status()
+
+    assert client.files.download.call_count == 2
+    registry = json.loads(config.batch_jobs_registry_file.read_text())
+    assert registry["jobs"]["batchJobs/a"]["status"] == "downloaded"
+    assert registry["jobs"]["batchJobs/b"]["status"] == "downloaded"
+
+
+def test_check_batch_status_adopts_legacy_job(tmp_path, monkeypatch):
+    """A pre-registry workspace with only current_batch_job.txt has its
+    in-flight job adopted into the registry and polled."""
+    config = _setup_batch_state(tmp_path, monkeypatch, job_name="batchJobs/legacy")
+    client = MagicMock()
+    client.batches.get.return_value = _mock_batch_job("JOB_STATE_SUCCEEDED")
+    client.files.download.return_value = b"{}\n"
+    monkeypatch.setattr("gpcr_tools.annotator.runner.get_client", lambda: client)
+    monkeypatch.setattr("gpcr_tools.annotator.runner.recover_batch", lambda: None)
+
+    runner.check_batch_status()
+
+    registry = json.loads(config.batch_jobs_registry_file.read_text())
+    assert "batchJobs/legacy" in registry["jobs"]
+    client.batches.get.assert_called_once_with(name="batchJobs/legacy")
+    client.files.download.assert_called_once()
+
+
+def test_recover_batch_skips_existing_run(tmp_path, monkeypatch):
+    """recover never clobbers an already-recovered run (idempotent; immune to a
+    stale re-downloaded raw file)."""
+    monkeypatch.setenv("GPCR_STATE_PATH", str(tmp_path / "state"))
+    monkeypatch.setenv("GPCR_AI_RESULTS_PATH", str(tmp_path / "ai_results"))
+    reset_config()
+    config = get_config()
+    config.pipeline_runs_dir.mkdir(parents=True)
+
+    out_dir = config.ai_results_dir / "7W55" / model_run_subdir(None)
+    out_dir.mkdir(parents=True)
+    (out_dir / "run_1.json").write_text('{"keep": true}')
+
+    raw_output = config.pipeline_runs_dir / "raw_output_testjob.jsonl"
+    raw_output.write_text(
+        json.dumps(
+            {
+                "key": "7W55__run_01",
+                "response": {
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [
+                                    {
+                                        "functionCall": {
+                                            "name": "annotate_gpcr_db_structure",
+                                            "args": {"receptor_info": {}},
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                },
+            }
+        )
+        + "\n"
+    )
+
+    called = {"n": 0}
+
+    def _pp(args):
+        called["n"] += 1
+        return {"overwritten": True}
+
+    monkeypatch.setattr("gpcr_tools.annotator.runner.post_process_annotation", _pp)
+
+    runner.recover_batch()
+
+    # The existing run is untouched and post-processing was never invoked.
+    assert json.loads((out_dir / "run_1.json").read_text()) == {"keep": True}
+    assert called["n"] == 0
+
+
+def test_recover_batch_uses_registry_attribution(tmp_path, monkeypatch):
+    """When a raw output has a registry entry, its model/prompt come from the
+    entry -- not a stale shared sidecar that names a different model."""
+    monkeypatch.setenv("GPCR_STATE_PATH", str(tmp_path / "state"))
+    monkeypatch.setenv("GPCR_AI_RESULTS_PATH", str(tmp_path / "ai_results"))
+    reset_config()
+    config = get_config()
+    config.pipeline_runs_dir.mkdir(parents=True)
+
+    raw_path = config.pipeline_runs_dir / "raw_output_batchJobs_jx.jsonl"
+    raw_path.write_text(
+        json.dumps(
+            {
+                "key": "1ABC__run_01",
+                "response": {
+                    "modelVersion": "model-pro-002",
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [
+                                    {
+                                        "functionCall": {
+                                            "name": "annotate_gpcr_db_structure",
+                                            "args": {"receptor_info": {}},
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ],
+                },
+            }
+        )
+        + "\n"
+    )
+    config.batch_jobs_registry_file.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "jobs": {
+                    "batchJobs/jx": {
+                        "job_name": "batchJobs/jx",
+                        "status": "downloaded",
+                        "model_requested": "model-pro",
+                        "prompt": "v5",
+                        "code_version": "zzz",
+                        "detect_advisory": {},
+                        "raw_output_file": str(raw_path),
+                    }
+                },
+            }
+        )
+    )
+    # A stale shared sidecar names a different model; the registry must win.
+    (config.pipeline_runs_dir / "_batch_provenance.json").write_text(
+        json.dumps({"model_requested": "model-flash", "prompt": "old"})
+    )
+    monkeypatch.setattr(
+        "gpcr_tools.annotator.runner.post_process_annotation", lambda args: {"ok": True}
+    )
+
+    runner.recover_batch()
+
+    pro = config.ai_results_dir / "1ABC" / model_run_subdir("model-pro") / "run_1.json"
+    flash = config.ai_results_dir / "1ABC" / model_run_subdir("model-flash") / "run_1.json"
+    assert pro.exists()
+    assert not flash.exists()
+    prov = json.loads(pro.read_text())["_provenance"]
+    assert prov["model_requested"] == "model-pro"
+    assert prov["prompt"] == "v5"
+    assert prov["code_version"] == "zzz"
+    registry = json.loads(config.batch_jobs_registry_file.read_text())
+    assert registry["jobs"]["batchJobs/jx"]["status"] == "recovered"
+
+
+def test_check_batch_status_legacy_recover_uses_sidecar_model(tmp_path, monkeypatch):
+    """End-to-end migration: an in-flight job adopted from current_batch_job.txt
+    recovers under the model recorded in its legacy sidecar -- not the adopted
+    entry's null model, which would mis-file the result to default/."""
+    config = _setup_batch_state(tmp_path, monkeypatch, job_name="batchJobs/old1")
+    config.pipeline_runs_dir.mkdir(parents=True, exist_ok=True)
+    # Legacy per-job sidecar holds the real model (written by the old code path).
+    (config.pipeline_runs_dir / "_batch_provenance_batchJobs_old1.json").write_text(
+        json.dumps({"model_requested": "gemini-2.5-pro", "prompt": "v5", "code_version": "abc1234"})
+    )
+
+    raw_line = (
+        json.dumps(
+            {
+                "key": "7W55__run_01",
+                "response": {
+                    "modelVersion": "gemini-2.5-pro-002",
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [
+                                    {
+                                        "functionCall": {
+                                            "name": "annotate_gpcr_db_structure",
+                                            "args": {"receptor_info": {}},
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ],
+                },
+            }
+        ).encode()
+        + b"\n"
+    )
+
+    client = MagicMock()
+    client.batches.get.return_value = _mock_batch_job("JOB_STATE_SUCCEEDED")
+    client.files.download.return_value = raw_line
+    monkeypatch.setattr("gpcr_tools.annotator.runner.get_client", lambda: client)
+    monkeypatch.setattr(
+        "gpcr_tools.annotator.runner.post_process_annotation", lambda args: {"ok": True}
+    )
+
+    runner.check_batch_status()  # adopt -> download -> recover, all real
+
+    correct = config.ai_results_dir / "7W55" / model_run_subdir("gemini-2.5-pro") / "run_1.json"
+    wrong = config.ai_results_dir / "7W55" / model_run_subdir(None) / "run_1.json"
+    assert correct.exists(), "recover must use the sidecar model, not default/"
+    assert not wrong.exists()
+    assert json.loads(correct.read_text())["_provenance"]["model_requested"] == "gemini-2.5-pro"

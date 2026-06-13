@@ -144,6 +144,25 @@ GEMINI_MAX_WORKERS: int = 10
 # so a re-submission after a long-failed batch doesn't embed a dead fileUri.
 GEMINI_FILE_TTL_HOURS: int = 47
 
+# Cap on the number of generation requests packed into one submitted batch job.
+# The full corpus (thousands of structures x GEMINI_DEFAULT_RUNS runs) is far
+# more than one job should carry: an oversized submission risks being rejected
+# wholesale with no per-chunk retry, and one huge job is the most likely to sit
+# in the queue past the provider's 48-hour expiry. Outstanding requests are
+# split into jobs of at most this many requests, never splitting a single PDB's
+# runs across jobs (so 200 ~= 20 PDBs at the default 10 runs each). Tunable.
+GEMINI_BATCH_MAX_REQUESTS: int = 200
+
+# Batch jobs are tracked in a registry (state/batch_jobs.json) keyed by job
+# name, so a sharded submission's multiple jobs are all tracked and recovered
+# (the legacy single-file pointer could hold only one). Bumped if the shape
+# of a registry entry changes.
+BATCH_REGISTRY_VERSION: int = 1
+BATCH_STATUS_SUBMITTED: str = "submitted"
+BATCH_STATUS_DOWNLOADED: str = "downloaded"
+BATCH_STATUS_RECOVERED: str = "recovered"
+BATCH_STATUS_FAILED: str = "failed"
+
 # ---------------------------------------------------------------------------
 # Watcher polling configuration
 # ---------------------------------------------------------------------------
@@ -202,6 +221,7 @@ class WorkspaceConfig:
     targets_file: Path
     download_log_file: Path
     current_batch_job_file: Path
+    batch_jobs_registry_file: Path
     uploaded_files_registry_file: Path
     default_prompt_file: Path
 
@@ -269,6 +289,7 @@ def get_config() -> WorkspaceConfig:
         targets_file=workspace / "targets.txt",
         download_log_file=state_dir / "download_log.json",
         current_batch_job_file=state_dir / "current_batch_job.txt",
+        batch_jobs_registry_file=state_dir / "batch_jobs.json",
         uploaded_files_registry_file=state_dir / "uploaded_files_registry.json",
         default_prompt_file=workspace / "prompts" / "v5.md",
     )
