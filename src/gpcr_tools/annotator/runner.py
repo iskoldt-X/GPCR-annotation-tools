@@ -23,7 +23,13 @@ from gpcr_tools.annotator.schema import ANNOTATION_TOOL
 from gpcr_tools.code_version import get_code_version
 from gpcr_tools.config import (
     ANNOTATOR_FUNCTION_NAME,
+    BATCH_REGISTRY_VERSION,
+    BATCH_STATUS_DOWNLOADED,
+    BATCH_STATUS_FAILED,
+    BATCH_STATUS_RECOVERED,
+    BATCH_STATUS_SUBMITTED,
     GEMINI_BASE_BACKOFF,
+    GEMINI_BATCH_MAX_REQUESTS,
     GEMINI_DEFAULT_RUNS,
     GEMINI_FILE_TTL_HOURS,
     GEMINI_MAX_RETRIES,
@@ -58,6 +64,157 @@ def _registry_fresh_uri(entry: Any, now: datetime) -> str | None:
             if age < timedelta(hours=GEMINI_FILE_TTL_HOURS):
                 return str(uri)
     return None
+
+
+def _safe_job_name(job_name: str) -> str:
+    """Filesystem-safe token for a provider job name (names contain '/')."""
+    return job_name.replace("/", "_")
+
+
+def _load_job_registry(config: Any) -> dict[str, Any]:
+    """Return the batch-job registry, or a fresh empty one.
+
+    The registry (``state/batch_jobs.json``) tracks every submitted batch job
+    keyed by job name, so a sharded submission's multiple jobs are all
+    trackable and recoverable. Tolerant: a missing or corrupt file yields an
+    empty registry rather than raising.
+    """
+    reg_file = config.batch_jobs_registry_file
+    if reg_file.exists():
+        loaded: Any = None
+        try:
+            loaded = json.loads(reg_file.read_text())
+        except (json.JSONDecodeError, OSError):
+            loaded = None
+        if isinstance(loaded, dict) and isinstance(loaded.get("jobs"), dict):
+            return loaded
+    return {"version": BATCH_REGISTRY_VERSION, "jobs": {}}
+
+
+def _save_job_registry(config: Any, registry: dict[str, Any]) -> None:
+    """Persist the job registry atomically (tmp + os.replace)."""
+    reg_file = config.batch_jobs_registry_file
+    os.makedirs(reg_file.parent, exist_ok=True)
+    tmp = reg_file.with_suffix(".tmp")
+    with open(tmp, "w") as f:
+        json.dump(registry, f, indent=2)
+    os.replace(tmp, reg_file)
+
+
+def _register_job(config: Any, entry: dict[str, Any]) -> None:
+    """Insert or replace one job entry, keyed by ``entry['job_name']``."""
+    registry = _load_job_registry(config)
+    registry["jobs"][entry["job_name"]] = entry
+    _save_job_registry(config, registry)
+
+
+def _update_job_status(config: Any, job_name: str, **fields: Any) -> None:
+    """Patch fields on one job entry (no-op if the job is unknown)."""
+    registry = _load_job_registry(config)
+    entry = registry["jobs"].get(job_name)
+    if entry is None:
+        return
+    entry.update(fields)
+    _save_job_registry(config, registry)
+
+
+def _chunk_request_groups(
+    groups: list[list[dict[str, Any]]], max_per_chunk: int
+) -> list[list[dict[str, Any]]]:
+    """Pack per-PDB request *groups* into chunks of at most *max_per_chunk*.
+
+    A single PDB's runs are never split across chunks; a group larger than the
+    cap becomes its own (over-cap) chunk rather than being divided.
+    """
+    chunks: list[list[dict[str, Any]]] = []
+    chunk: list[dict[str, Any]] = []
+    for reqs in groups:
+        if chunk and len(chunk) + len(reqs) > max_per_chunk:
+            chunks.append(chunk)
+            chunk = []
+        chunk.extend(reqs)
+        if len(chunk) >= max_per_chunk:
+            chunks.append(chunk)
+            chunk = []
+    if chunk:
+        chunks.append(chunk)
+    return chunks
+
+
+def _submit_batch_chunk(
+    config: Any,
+    client: Any,
+    *,
+    model_name: str,
+    prompt_id: str | None,
+    chunk_requests: list[dict[str, Any]],
+    chunk_index: int,
+    chunk_count: int,
+    detect_advisory_by_pdb: dict[str, list[str]],
+    created_at: str,
+) -> str:
+    """Submit one chunk as a batch job and register it; return the job name.
+
+    Raises on upload/create failure so the caller can isolate a single chunk's
+    failure; the temp JSONL is always cleaned up.
+    """
+    os.makedirs(config.pipeline_runs_dir, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", delete=False, suffix=".jsonl") as f:
+        for req in chunk_requests:
+            f.write(json.dumps(req) + "\n")
+        tmp_jsonl = Path(f.name)
+
+    try:
+        batch_src_file = client.files.upload(
+            file=str(tmp_jsonl), config={"mime_type": "application/jsonl"}
+        )
+        if not batch_src_file.name:
+            raise ValueError("Uploaded file has no name")
+
+        batch_job = client.batches.create(model=model_name, src=batch_src_file.name)
+        if not batch_job.name:
+            raise ValueError("Created batch job has no name")
+        logger.info(
+            "Batch chunk %d/%d submitted: %s (%d requests)",
+            chunk_index + 1,
+            chunk_count,
+            batch_job.name,
+            len(chunk_requests),
+        )
+
+        # The registry carries the provenance (model / prompt / code_version /
+        # advisories) that recover_batch stamps onto each result, so a job's
+        # results are always attributed to the model that produced them, with
+        # no dependence on a shared sidecar a later submission could overwrite.
+        _register_job(
+            config,
+            {
+                "job_name": batch_job.name,
+                "status": BATCH_STATUS_SUBMITTED,
+                "model_requested": model_name,
+                "prompt": prompt_id,
+                "code_version": get_code_version(),
+                "chunk_index": chunk_index,
+                "chunk_count": chunk_count,
+                "request_count": len(chunk_requests),
+                "created_at": created_at,
+                "raw_output_file": None,
+                "recovered_at": None,
+                "detect_advisory": detect_advisory_by_pdb,
+            },
+        )
+
+        # Back-compat: keep the single-file pointer to the most recent job so a
+        # rollback to pre-registry code still finds a job to poll. The registry
+        # is authoritative; this mirror is deprecated.
+        tmp_job_file = config.current_batch_job_file.with_suffix(".tmp")
+        with open(tmp_job_file, "w") as fj:
+            fj.write(batch_job.name)
+        os.replace(tmp_job_file, config.current_batch_job_file)
+        return str(batch_job.name)
+    finally:
+        if tmp_jsonl.exists():
+            os.remove(tmp_jsonl)
 
 
 def run_single_pdb(
@@ -223,7 +380,7 @@ def build_and_submit_batch(
 
     # Prepare batch requests
     now = datetime.now(UTC)
-    requests = []
+    request_groups: list[list[dict[str, Any]]] = []
     registry = {}
 
     # Check if uploaded files registry exists
@@ -288,8 +445,11 @@ def build_and_submit_batch(
         )
         tool_for_pdb = build_tool_for_signals(ANNOTATION_TOOL, detect_signals)
 
-        # We need to construct the request dict for the batch API
-        # The schema for the batch API contents is identical to generate_content
+        # We need to construct the request dict for the batch API.
+        # The schema for the batch API contents is identical to generate_content.
+        # Requests are grouped per PDB so chunking never splits one structure's
+        # runs across batch jobs.
+        pdb_requests: list[dict[str, Any]] = []
         for n in runs_to_do:
             req_id = f"{pdb_id}__run_{n:02d}"
 
@@ -318,7 +478,7 @@ def build_and_submit_batch(
                 ]
             }
 
-            requests.append(
+            pdb_requests.append(
                 {
                     # Per-request identifier echoed back in the output ("key", not
                     # "id"). The model is set once at the batch-job level below;
@@ -332,135 +492,153 @@ def build_and_submit_batch(
                 }
             )
 
+        if pdb_requests:
+            request_groups.append(pdb_requests)
+
     # Save updated registry
     tmp_reg = reg_file.with_suffix(".tmp")
     with open(tmp_reg, "w") as f:
         json.dump(registry, f, indent=2)
     os.replace(tmp_reg, reg_file)
 
-    if not requests:
+    total_requests = sum(len(group) for group in request_groups)
+    if not total_requests:
         logger.info("No batch requests to submit. All done!")
         return
 
-    # Write JSONL
-    os.makedirs(config.pipeline_runs_dir, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", delete=False, suffix=".jsonl") as f:
-        for req in requests:
-            f.write(json.dumps(req) + "\n")
-        tmp_jsonl = Path(f.name)
-
-    try:
-        # Upload JSONL to Gemini
-        batch_src_file = client.files.upload(
-            file=str(tmp_jsonl), config={"mime_type": "application/jsonl"}
-        )
-        if not batch_src_file.name:
-            raise ValueError("Uploaded file has no name")
-        logger.info("Uploaded batch JSONL source: %s", batch_src_file.name)
-
-        # Submit batch
-        batch_job = client.batches.create(model=model_name, src=batch_src_file.name)
-        if not batch_job.name:
-            raise ValueError("Created batch job has no name")
-        logger.info("Batch submitted successfully! Job Name: %s", batch_job.name)
-
-        # Save job name
-        tmp_job_file = config.current_batch_job_file.with_suffix(".tmp")
-        with open(tmp_job_file, "w") as f:
-            f.write(batch_job.name)
-        os.replace(tmp_job_file, config.current_batch_job_file)
-
-        # Record this job's provenance under a filename keyed to the job, so
-        # recover_batch can stamp each result with the model/prompt of the job
-        # that actually produced it. A single shared file would be overwritten
-        # by the next submission and re-attribute an earlier job's results to
-        # the wrong model (and the wrong per-model output directory).
-        safe_name = batch_job.name.replace("/", "_")
-        batch_prov_file = config.pipeline_runs_dir / f"_batch_provenance_{safe_name}.json"
-        tmp_prov = batch_prov_file.with_suffix(".tmp")
-        with open(tmp_prov, "w") as f:
-            json.dump(
-                {
-                    "model_requested": model_name,
-                    "prompt": prompt_id,
-                    "code_version": get_code_version(),
-                    "detect_advisory": detect_advisory_by_pdb,
-                },
-                f,
-                indent=2,
+    # Shard into jobs of at most GEMINI_BATCH_MAX_REQUESTS requests so one
+    # oversized submission can't be rejected wholesale or sit in the queue past
+    # the provider's 48-hour expiry. Each PDB's runs stay within a single job.
+    chunks = _chunk_request_groups(request_groups, GEMINI_BATCH_MAX_REQUESTS)
+    submitted = 0
+    for chunk_index, chunk in enumerate(chunks):
+        try:
+            _submit_batch_chunk(
+                config,
+                client,
+                model_name=model_name,
+                prompt_id=prompt_id,
+                chunk_requests=chunk,
+                chunk_index=chunk_index,
+                chunk_count=len(chunks),
+                detect_advisory_by_pdb=detect_advisory_by_pdb,
+                created_at=now.isoformat(),
             )
-        os.replace(tmp_prov, batch_prov_file)
-
-    finally:
-        if tmp_jsonl.exists():
-            os.remove(tmp_jsonl)
+            submitted += 1
+        except Exception as exc:
+            # One chunk's failure must not lose the chunks already submitted:
+            # each is registered the moment it is created and recovered
+            # independently, and the remaining outstanding runs are simply
+            # re-chunked on the next run (completed runs are skipped).
+            logger.error(
+                "Batch chunk %d/%d failed to submit: %s", chunk_index + 1, len(chunks), exc
+            )
+    logger.info("Submitted %d/%d batch chunk(s).", submitted, len(chunks))
 
 
 def check_batch_status() -> None:
-    """Poll the Gemini Batch API for the current job and download results when complete."""
+    """Poll the Gemini Batch API for all tracked jobs and download finished ones."""
     config = get_config()
-    job_file = config.current_batch_job_file
+    client = get_client()
 
-    if not job_file.exists():
+    registry = _load_job_registry(config)
+
+    # Migration: a workspace from before the registry has only the single-file
+    # pointer. Adopt that in-flight job so it is tracked and recovered like any
+    # other (model/prompt are back-filled from its sidecar at recover time).
+    if not registry["jobs"] and config.current_batch_job_file.exists():
+        legacy_name = config.current_batch_job_file.read_text().strip()
+        if legacy_name:
+            _register_job(
+                config,
+                {
+                    "job_name": legacy_name,
+                    "status": BATCH_STATUS_SUBMITTED,
+                    "model_requested": None,
+                    "prompt": None,
+                    "code_version": None,
+                    "chunk_index": 0,
+                    "chunk_count": 1,
+                    "request_count": None,
+                    "created_at": None,
+                    "raw_output_file": None,
+                    "recovered_at": None,
+                    "detect_advisory": {},
+                },
+            )
+            registry = _load_job_registry(config)
+
+    pending = [e for e in registry["jobs"].values() if e.get("status") == BATCH_STATUS_SUBMITTED]
+    if not pending:
         logger.info("No active batch job found in state.")
         return
-
-    with open(job_file) as f:
-        job_name = f.read().strip()
-
-    client = get_client()
-    try:
-        job = client.batches.get(name=job_name)
-    except Exception as e:
-        logger.error("Failed to get batch job %s: %s", job_name, e)
-        return
-
-    state = job.state.name if job.state else ""
-    logger.info("Batch Job %s is in state: %s", job_name, state)
 
     # The SDK exposes terminal states as JOB_STATE_* on ``job.state.name``.
     # Some terminal states carry results to download; others do not.
     succeeded_states = ("JOB_STATE_SUCCEEDED", "JOB_STATE_PARTIALLY_SUCCEEDED")
     failed_states = ("JOB_STATE_FAILED", "JOB_STATE_CANCELLED", "JOB_STATE_EXPIRED")
 
-    if state in failed_states:
-        expired_note = (
-            " -- it ran or waited past the provider's 48-hour limit; resubmit or split the batch"
-            if state == "JOB_STATE_EXPIRED"
-            else ""
-        )
-        logger.error(
-            "Batch job %s ended without results (%s)%s: %s",
-            job_name,
-            state,
-            expired_note,
-            job.error,
-        )
-        return
+    downloaded_any = False
+    for entry in pending:
+        job_name = entry["job_name"]
+        try:
+            job = client.batches.get(name=job_name)
+        except Exception as e:
+            logger.error("Failed to get batch job %s: %s", job_name, e)
+            continue
 
-    if state not in succeeded_states:
-        logger.info(
-            "Batch job %s is not finished yet (state %s); try again later.", job_name, state
-        )
-        return
+        state = job.state.name if job.state else ""
+        logger.info("Batch Job %s is in state: %s", job_name, state)
 
-    if not (job.dest and job.dest.file_name):
-        logger.error("Batch job %s reported %s but exposed no result file.", job_name, state)
-        return
+        if state in failed_states:
+            expired_note = (
+                " -- it ran or waited past the provider's 48-hour limit; resubmit or split the batch"
+                if state == "JOB_STATE_EXPIRED"
+                else ""
+            )
+            logger.error(
+                "Batch job %s ended without results (%s)%s: %s",
+                job_name,
+                state,
+                expired_note,
+                job.error,
+            )
+            _update_job_status(config, job_name, status=BATCH_STATUS_FAILED)
+            continue
 
-    logger.info("Batch has completed. Downloading results...")
-    try:
-        os.makedirs(config.pipeline_runs_dir, exist_ok=True)
-        safe_name = job_name.replace("/", "_")
-        raw_out_file = config.pipeline_runs_dir / f"raw_output_{safe_name}.jsonl"
-        logger.info("Downloading %s to %s", job.dest.file_name, raw_out_file)
-        content = client.files.download(file=job.dest.file_name)
-        with open(raw_out_file, "wb") as f_out:
-            f_out.write(content)
-        logger.info("Download complete. Running recovery to parse results.")
+        if state not in succeeded_states:
+            logger.info(
+                "Batch job %s is not finished yet (state %s); try again later.", job_name, state
+            )
+            continue
+
+        if not (job.dest and job.dest.file_name):
+            logger.error("Batch job %s reported %s but exposed no result file.", job_name, state)
+            continue
+
+        try:
+            os.makedirs(config.pipeline_runs_dir, exist_ok=True)
+            raw_out_file = config.pipeline_runs_dir / f"raw_output_{_safe_job_name(job_name)}.jsonl"
+            logger.info("Downloading %s to %s", job.dest.file_name, raw_out_file)
+            content = client.files.download(file=job.dest.file_name)
+            with open(raw_out_file, "wb") as f_out:
+                f_out.write(content)
+            _update_job_status(
+                config, job_name, status=BATCH_STATUS_DOWNLOADED, raw_output_file=str(raw_out_file)
+            )
+            downloaded_any = True
+        except Exception as e:  # surface any download failure without crashing
+            logger.error("Failed to download batch results for %s: %s", job_name, e)
+
+    # Recover whenever any downloaded-but-not-yet-recovered job exists -- not
+    # only the ones downloaded this round -- so a crash between a download and
+    # its recovery is healed on the next poll rather than stranding the result.
+    registry = _load_job_registry(config)
+    if downloaded_any or any(
+        e.get("status") == BATCH_STATUS_DOWNLOADED for e in registry["jobs"].values()
+    ):
+        logger.info("Download(s) complete. Running recovery to parse results.")
         recover_batch()
-    except Exception as e:  # surface any download/parse failure without crashing
-        logger.error("Failed to download batch results: %s", e)
 
 
 def recover_batch() -> None:
@@ -472,11 +650,21 @@ def recover_batch() -> None:
         logger.info("No pipeline runs directory found.")
         return
 
+    registry = _load_job_registry(config)
+    # Map a downloaded raw-output filename to its authoritative job entry, so
+    # each result is attributed to the model/prompt of the job that produced
+    # it -- not a shared sidecar a later submission may have overwritten.
+    by_raw = {
+        Path(e["raw_output_file"]).name: e
+        for e in registry["jobs"].values()
+        if e.get("raw_output_file")
+    }
+
     def _load_provenance(raw_file: Path) -> dict:
-        # Match each raw output to its own job's provenance
-        # (raw_output_<job>.jsonl -> _batch_provenance_<job>.json), falling back
-        # to the legacy shared file for outputs downloaded before per-job
-        # provenance existed. Without the per-job match, a stale raw file from
+        # Legacy/migration fallback for raw outputs with no registry entry
+        # (downloaded before the registry existed): match the per-job sidecar
+        # (raw_output_<job>.jsonl -> _batch_provenance_<job>.json), then the
+        # legacy shared file. Without the per-job match, a stale raw file from
         # an earlier job would be stamped with a later job's model.
         job_suffix = raw_file.stem.removeprefix("raw_output_")
         for prov_file in (
@@ -492,7 +680,21 @@ def recover_batch() -> None:
         return {}
 
     for raw_file in runs_dir.glob("raw_output_*.jsonl"):
-        batch_meta = _load_provenance(raw_file)
+        entry = by_raw.get(raw_file.name)
+        batch_meta: dict[str, Any]
+        if entry is not None and entry.get("model_requested"):
+            batch_meta = {
+                "model_requested": entry.get("model_requested"),
+                "prompt": entry.get("prompt"),
+                "code_version": entry.get("code_version"),
+                "detect_advisory": entry.get("detect_advisory") or {},
+            }
+        else:
+            # No registry entry, OR a migration-adopted entry whose real model
+            # lives only in the legacy per-job sidecar (the adopted entry has
+            # model_requested=None). Resolve from the sidecar / shared file so
+            # the result keeps its true model and per-model output directory.
+            batch_meta = _load_provenance(raw_file)
         logger.info("Processing %s...", raw_file.name)
         with open(raw_file) as f:
             for line_no, line in enumerate(f, 1):
@@ -506,6 +708,18 @@ def recover_batch() -> None:
                     # contains "__" doesn't unpack-error and drop the run.
                     pdb_id, _, run_part = req_id.rpartition("__run_")
                     run_num = int(run_part)
+
+                    out_dir = (
+                        config.ai_results_dir
+                        / pdb_id
+                        / model_run_subdir(batch_meta.get("model_requested"))
+                    )
+                    out_file = out_dir / f"run_{run_num}.json"
+                    # Resume-by-existence: never clobber an already-recovered
+                    # run. Makes recover idempotent and immune to a stale or
+                    # re-downloaded raw file overwriting good results.
+                    if out_file.exists():
+                        continue
 
                     response_obj = data.get("response", {})
                     candidates = response_obj.get("candidates") or []
@@ -538,7 +752,7 @@ def recover_batch() -> None:
                                 "model_requested": batch_meta.get("model_requested"),
                                 "model_served": response_obj.get("modelVersion"),
                                 "prompt": batch_meta.get("prompt"),
-                                # From the submission sidecar: the code that built
+                                # From the submission record: the code that built
                                 # and submitted the batch, not the recovery run.
                                 "code_version": batch_meta.get("code_version"),
                                 "detect_advisory": (batch_meta.get("detect_advisory") or {}).get(
@@ -549,14 +763,7 @@ def recover_batch() -> None:
                                 "timestamp": datetime.now(UTC).isoformat(),
                             }
 
-                            out_dir = (
-                                config.ai_results_dir
-                                / pdb_id
-                                / model_run_subdir(batch_meta.get("model_requested"))
-                            )
                             os.makedirs(out_dir, exist_ok=True)
-                            out_file = out_dir / f"run_{run_num}.json"
-
                             tmp_out = out_file.with_suffix(".tmp")
                             with open(tmp_out, "w") as f_out:
                                 json.dump(final_data, f_out, indent=2)
@@ -579,6 +786,14 @@ def recover_batch() -> None:
                         e,
                     )
                     continue
+
+        if entry is not None:
+            _update_job_status(
+                config,
+                entry["job_name"],
+                status=BATCH_STATUS_RECOVERED,
+                recovered_at=datetime.now(UTC).isoformat(),
+            )
 
 
 def discover_annotation_targets(num_runs: int, model_name: str) -> list[str]:
