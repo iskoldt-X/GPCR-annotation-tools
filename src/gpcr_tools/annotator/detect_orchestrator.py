@@ -265,11 +265,19 @@ def build_tool_for_signals(base_tool: types.Tool, signals: list[DetectSignal]) -
     return tool
 
 
-def build_tool_config(signals: list[DetectSignal]) -> types.GenerateContentConfig:
-    """Return the generation config for *signals* (identity ``TOOL_CONFIG`` if no mutation)."""
+def build_tool_config(
+    signals: list[DetectSignal], temperature: float | None = None
+) -> types.GenerateContentConfig:
+    """Return the generation config for *signals* (identity ``TOOL_CONFIG`` if no mutation).
+
+    *temperature* overrides the built-in ``TOOL_CONFIG`` default (0.0) when given;
+    ``None`` keeps the default, so callers that don't set it are unchanged.
+    """
     tool = build_tool_for_signals(ANNOTATION_TOOL, signals)
-    if tool is ANNOTATION_TOOL:
+    if tool is ANNOTATION_TOOL and temperature is None:
         return TOOL_CONFIG
     config = TOOL_CONFIG.model_copy(deep=True)
     config.tools = [tool]
+    if temperature is not None:
+        config.temperature = temperature
     return config

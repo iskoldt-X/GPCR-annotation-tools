@@ -814,3 +814,55 @@ def test_check_batch_status_legacy_recover_uses_sidecar_model(tmp_path, monkeypa
     assert correct.exists(), "recover must use the sidecar model, not default/"
     assert not wrong.exists()
     assert json.loads(correct.read_text())["_provenance"]["model_requested"] == "gemini-2.5-pro"
+
+
+def _capture_batch_jsonl(client):
+    """Patch the client's file upload to capture the batch JSONL content."""
+    captured = {}
+
+    def _upload(file=None, config=None):
+        if str(file).endswith(".jsonl"):
+            captured["jsonl"] = Path(file).read_text()
+        m = MagicMock()
+        m.name = "files/src"
+        m.uri = "u"
+        return m
+
+    client.files.upload.side_effect = _upload
+    return captured
+
+
+def test_build_and_submit_batch_injects_temperature(tmp_path, monkeypatch):
+    """A given temperature is emitted as per-request generationConfig in the JSONL."""
+    _, client = _setup_multi_pdb_batch(tmp_path, monkeypatch, ["7W55"])
+    job = MagicMock()
+    job.name = "batchJobs/j0"
+    client.batches.create.return_value = job
+    captured = _capture_batch_jsonl(client)
+
+    runner.build_and_submit_batch(["7W55"], "Prompt", num_runs=1, temperature=0.7)
+
+    lines = [json.loads(line) for line in captured["jsonl"].splitlines() if line.strip()]
+    assert lines[0]["request"]["generationConfig"] == {"temperature": 0.7}
+
+
+def test_build_and_submit_batch_omits_temperature_by_default(tmp_path, monkeypatch):
+    """Without a temperature, no generationConfig is sent -- behaviour unchanged."""
+    _, client = _setup_multi_pdb_batch(tmp_path, monkeypatch, ["7W55"])
+    job = MagicMock()
+    job.name = "batchJobs/j0"
+    client.batches.create.return_value = job
+    captured = _capture_batch_jsonl(client)
+
+    runner.build_and_submit_batch(["7W55"], "Prompt", num_runs=1)
+
+    lines = [json.loads(line) for line in captured["jsonl"].splitlines() if line.strip()]
+    assert "generationConfig" not in lines[0]["request"]
+
+
+def test_build_tool_config_temperature_override():
+    """The inline generation config keeps 0.0 by default and honours an override."""
+    from gpcr_tools.annotator.detect_orchestrator import build_tool_config
+
+    assert build_tool_config([]).temperature == 0.0
+    assert build_tool_config([], temperature=0.7).temperature == 0.7
