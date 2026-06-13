@@ -22,6 +22,7 @@ from gpcr_tools.detector.heterodimer import detect_class_c_multi_protomer
 from gpcr_tools.detector.ligands import detect_incidental_candidates
 from gpcr_tools.detector.signals import DetectSignal
 from gpcr_tools.detector.site_ref import detect_site_refs
+from gpcr_tools.fetcher.enricher import INCOMPLETE_MARKER_KEY
 from gpcr_tools.validator.cache import SequenceCache
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,17 @@ def run_detect(
         raw = json.loads(enriched_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         logger.warning("[detect] %s: could not read enriched data: %s", pdb_id, exc)
+        return []
+
+    # Enrichment written during a transient API outage carries this top-level
+    # marker. Detecting on it would derive signals from a recoverable gap; skip
+    # and let a re-run of fetch heal the record first.
+    if isinstance(raw, dict) and raw.get(INCOMPLETE_MARKER_KEY):
+        logger.warning(
+            "[detect] %s: enrichment incomplete (transient API gap); skipping — "
+            "re-run fetch to complete enrichment first.",
+            pdb_id,
+        )
         return []
 
     entry = _enriched_entry(raw)

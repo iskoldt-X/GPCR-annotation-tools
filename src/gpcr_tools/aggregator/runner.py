@@ -30,7 +30,7 @@ from gpcr_tools.aggregator.ai_results_loader import (
     load_ai_runs,
     pdb_has_runs,
 )
-from gpcr_tools.aggregator.enriched_loader import load_enriched_data
+from gpcr_tools.aggregator.enriched_loader import enriched_is_incomplete, load_enriched_data
 from gpcr_tools.aggregator.ground_truth import inject_ground_truth
 from gpcr_tools.aggregator.voting import (
     extract_ai_g_protein,
@@ -519,6 +519,17 @@ def aggregate_pdb(
             pdb_id=pdb_id,
             success=False,
             error="Enriched data not available",
+        )
+
+    # An enrichment written during a transient API outage must NOT be aggregated:
+    # consuming it would turn an unresolved (but recoverable) field into an
+    # affirmative answer (e.g. a missing receptor slug → "no GPCR"). Refuse and
+    # signal re-enrichment; a plain re-run of fetch self-heals the record.
+    if enriched_is_incomplete(pdb_id):
+        return AggregateResult(
+            pdb_id=pdb_id,
+            success=False,
+            error="Enrichment incomplete (transient API gap) — re-run fetch to complete it before aggregating",
         )
 
     try:
