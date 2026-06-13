@@ -268,7 +268,7 @@ ANNOTATION_TOOL = types.Tool(
                             "properties": {
                                 "g_protein": {
                                     "type": "object",
-                                    "description": "G-protein heterotrimer details. Omit if not present.",
+                                    "description": "G-protein heterotrimer details. Omit if not present. When only a fragment of the Gα subunit is present — its C-terminal / α5 helix, or a transducer-mimetic peptide that substitutes for the full subunit (e.g. a GαCT peptide) — it still belongs here as the alpha_subunit; record the fragment's UniProt entry name and chain ID in alpha_subunit, and note in the g_protein-level 'note' field that only the C-terminal/α5 fragment is modelled. Do not place such a peptide in ligands or auxiliary_proteins.",
                                     "properties": {
                                         "alpha_subunit": {
                                             "type": "object",
@@ -337,7 +337,7 @@ ANNOTATION_TOOL = types.Tool(
                         },
                         "auxiliary_proteins": {
                             "type": "array",
-                            "description": "List of proteins present for structural, stabilization, or expression reasons that do not themselves modulate receptor activity — crystallization fusions (BRIL / cytochrome b562, T4 lysozyme), stabilizing Fab / nanobody / scFv, and other non-functional, non-signaling proteins. Can be an empty list. Deciding test: if the protein binds the receptor to modulate its activity, put it in ligands; if it is only a structural/stabilization/expression aid, put it here. A stabilizing nanobody is auxiliary; an activating nanobody is a ligand. Read the paper; absent a functional claim, default to auxiliary. (Signaling proteins like G protein and arrestin belong in signaling_partners, not here.)",
+                            "description": "List of proteins present for structural, stabilization, or expression reasons that do not themselves modulate receptor activity — crystallization fusions (BRIL / cytochrome b562, T4 lysozyme), stabilizing Fab / nanobody / scFv, and other non-functional, non-signaling proteins. Can be an empty list. Deciding test: if the protein binds the receptor to modulate its activity, put it in ligands; if it is only a structural/stabilization/expression aid, put it here. A stabilizing nanobody is auxiliary; an activating nanobody is a ligand. Read the paper; absent a functional claim, default to auxiliary. (Signaling proteins like G protein and arrestin belong in signaling_partners, not here — including a Gα-derived C-terminal/α5 or transducer-mimetic peptide, which goes in signaling_partners.g_protein.alpha_subunit.)",
                             "items": {
                                 "type": "object",
                                 "properties": {
