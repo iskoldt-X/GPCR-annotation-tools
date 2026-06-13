@@ -861,8 +861,9 @@ def test_build_and_submit_batch_omits_temperature_by_default(tmp_path, monkeypat
 
 
 def test_build_tool_config_temperature_override():
-    """The inline generation config keeps 0.0 by default and honours an override."""
+    """The inline generation config leaves temperature unset by default (so the
+    model default applies) and honours an explicit override."""
     from gpcr_tools.annotator.detect_orchestrator import build_tool_config
 
-    assert build_tool_config([]).temperature == 0.0
+    assert build_tool_config([]).temperature is None
     assert build_tool_config([], temperature=0.7).temperature == 0.7

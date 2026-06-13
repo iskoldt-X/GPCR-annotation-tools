@@ -159,8 +159,8 @@ def cli() -> None:
         default=None,
         metavar="T",
         help=(
-            "Sampling temperature for generation. Omit to keep the built-in "
-            "default (single mode pins 0.0; batch sends no override)."
+            "Sampling temperature for generation. Omit to use the model's "
+            "default (no override sent, in either single or batch mode)."
         ),
     )
     ann_parser.add_argument(

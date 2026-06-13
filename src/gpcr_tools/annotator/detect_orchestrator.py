@@ -270,8 +270,8 @@ def build_tool_config(
 ) -> types.GenerateContentConfig:
     """Return the generation config for *signals* (identity ``TOOL_CONFIG`` if no mutation).
 
-    *temperature* overrides the built-in ``TOOL_CONFIG`` default (0.0) when given;
-    ``None`` keeps the default, so callers that don't set it are unchanged.
+    *temperature* sets the sampling temperature when given; ``None`` leaves it
+    unset so the model's own default applies (``TOOL_CONFIG`` pins no temperature).
     """
     tool = build_tool_for_signals(ANNOTATION_TOOL, signals)
     if tool is ANNOTATION_TOOL and temperature is None:
