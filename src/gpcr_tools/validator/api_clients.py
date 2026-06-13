@@ -113,21 +113,28 @@ def check_pubchem_existence(
     if cached is not None:
         return cached
 
-    try:
-        url = f"{PUBCHEM_REST_URL}/cid/{clean_cid}/description/JSON"
-        resp = requests.get(url, timeout=TIMEOUT_PUBCHEM_VALIDATION)
-        if resp.status_code == 200:
-            cache.set(key, True)
-            return True
-        if resp.status_code == 404:
-            cache.set(key, False)
-            return False
-        # 5xx / 429 / other: service unavailable, not a verdict -> abstain, no cache.
-        logger.warning("PubChem unavailable (HTTP %s) for '%s'", resp.status_code, cid)
-        return None
-    except (requests.RequestException, OSError) as exc:
-        logger.warning("PubChem API error for '%s': %s", cid, exc)
-        return None
+    url = f"{PUBCHEM_REST_URL}/cid/{clean_cid}/description/JSON"
+    for attempt in range(API_MAX_RETRIES):
+        try:
+            resp = requests.get(url, timeout=TIMEOUT_PUBCHEM_VALIDATION)
+            if resp.status_code == 200:
+                cache.set(key, True)
+                return True
+            if resp.status_code == 404:
+                cache.set(key, False)
+                return False
+            # 5xx / 429 / other: service unavailable, not a verdict. Retry, then
+            # abstain -- never cache a transient status.
+            if attempt == API_MAX_RETRIES - 1:
+                logger.warning("PubChem unavailable (HTTP %s) for '%s'", resp.status_code, cid)
+                return None
+            time.sleep(SLEEP_VALIDATION_RETRY)
+        except (requests.RequestException, OSError) as exc:
+            if attempt == API_MAX_RETRIES - 1:
+                logger.warning("PubChem API error for '%s': %s", cid, exc)
+                return None
+            time.sleep(SLEEP_VALIDATION_RETRY)
+    return None
 
 
 def _normalize_synonym(value: str) -> str:
@@ -185,31 +192,43 @@ def check_pubchem_synonym_match(
         return bool(candidate_keys & synonym_keys)
 
     url = f"{PUBCHEM_REST_URL}/cid/{clean_cid}/synonyms/JSON"
-    try:
-        resp = requests.get(url, timeout=TIMEOUT_PUBCHEM_SYNONYMS)
-    except (requests.RequestException, OSError) as exc:
-        logger.warning("PubChem synonym API error for '%s': %s", cid, exc)
-        return None  # Network abstention -- not a mismatch, not cached.
+    for attempt in range(API_MAX_RETRIES):
+        try:
+            resp = requests.get(url, timeout=TIMEOUT_PUBCHEM_SYNONYMS)
+        except (requests.RequestException, OSError) as exc:
+            # Network abstention -- not a mismatch, not cached. Retry, then abstain.
+            if attempt == API_MAX_RETRIES - 1:
+                logger.warning("PubChem synonym API error for '%s': %s", cid, exc)
+                return None
+            time.sleep(SLEEP_VALIDATION_RETRY)
+            continue
 
-    if resp.status_code == 404:
-        # CID has no synonyms on record: definitive miss, safe to cache.
-        cache.set(clean_cid, [])
-        return False
-    if resp.status_code != 200:
-        logger.warning("PubChem synonym API status %d for '%s'", resp.status_code, cid)
-        return None  # Transient/unexpected status -- abstain, do not cache.
+        if resp.status_code == 404:
+            # CID has no synonyms on record: definitive miss, safe to cache.
+            cache.set(clean_cid, [])
+            return False
+        if resp.status_code != 200:
+            # Transient/unexpected status -- abstain, do not cache. Retry first.
+            if attempt == API_MAX_RETRIES - 1:
+                logger.warning("PubChem synonym API status %d for '%s'", resp.status_code, cid)
+                return None
+            time.sleep(SLEEP_VALIDATION_RETRY)
+            continue
 
-    try:
-        data = resp.json()
-    except ValueError as exc:
-        logger.warning("PubChem synonym parse error for '%s': %s", cid, exc)
-        return None
+        # HTTP 200 is a definitive verdict. A malformed body will not improve on
+        # retry, so a parse error abstains immediately rather than retrying.
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            logger.warning("PubChem synonym parse error for '%s': %s", cid, exc)
+            return None
 
-    info_list = (data.get("InformationList") or {}).get("Information") or []
-    synonyms: list[str] = info_list[0].get("Synonym") or [] if info_list else []
-    cache.set(clean_cid, synonyms)  # Cache the confirmed (HTTP 200) list only.
-    synonym_keys = {_normalize_synonym(str(s)) for s in synonyms}
-    return bool(candidate_keys & synonym_keys)
+        info_list = (data.get("InformationList") or {}).get("Information") or []
+        synonyms: list[str] = info_list[0].get("Synonym") or [] if info_list else []
+        cache.set(clean_cid, synonyms)  # Cache the confirmed (HTTP 200) list only.
+        synonym_keys = {_normalize_synonym(str(s)) for s in synonyms}
+        return bool(candidate_keys & synonym_keys)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -287,20 +306,37 @@ def fetch_polymer_features(pdb_id: str) -> dict[str, Any] | None:
         "query": GRAPHQL_POLYMER_FEATURES_QUERY,
         "variables": {"id": pdb_id.upper()},
     }
-    try:
-        resp = requests.post(_GRAPHQL_URL, json=payload, timeout=TIMEOUT_RCSB_GRAPHQL_VALIDATION)
-        if resp.status_code != 200:
-            logger.warning("[%s] GraphQL returned status %d", pdb_id, resp.status_code)
+    for attempt in range(API_MAX_RETRIES):
+        try:
+            resp = requests.post(
+                _GRAPHQL_URL, json=payload, timeout=TIMEOUT_RCSB_GRAPHQL_VALIDATION
+            )
+            if resp.status_code != 200:
+                # Transient/unexpected status -- retry, then abstain.
+                if attempt == API_MAX_RETRIES - 1:
+                    logger.warning("[%s] GraphQL returned status %d", pdb_id, resp.status_code)
+                    return None
+                time.sleep(SLEEP_VALIDATION_RETRY)
+                continue
+            data = resp.json()
+            if data.get("errors"):
+                # A GraphQL-level error is a definitive server verdict, not a network
+                # transient; retrying will not change it.
+                logger.warning("[%s] GraphQL returned errors: %s", pdb_id, data["errors"])
+                return None
+            # None-safe: (data.get("data") or {}).get("entry")
+            return (data.get("data") or {}).get("entry")
+        except ValueError as exc:
+            # Malformed body on an HTTP 200 -- a parse failure will not improve on
+            # retry, so abstain immediately.
+            logger.warning("[%s] GraphQL parse error: %s", pdb_id, exc)
             return None
-        data = resp.json()
-        if data.get("errors"):
-            logger.warning("[%s] GraphQL returned errors: %s", pdb_id, data["errors"])
-            return None
-        # None-safe: (data.get("data") or {}).get("entry")
-        return (data.get("data") or {}).get("entry")
-    except (requests.RequestException, OSError, ValueError) as exc:
-        logger.warning("[%s] GraphQL fetch error: %s", pdb_id, exc)
-        return None
+        except (requests.RequestException, OSError) as exc:
+            if attempt == API_MAX_RETRIES - 1:
+                logger.warning("[%s] GraphQL fetch error: %s", pdb_id, exc)
+                return None
+            time.sleep(SLEEP_VALIDATION_RETRY)
+    return None
 
 
 GRAPHQL_POLYMER_ALIGNMENT_QUERY: str = """\
@@ -331,19 +367,36 @@ def fetch_polymer_alignment(
     reference. ``None`` on network / parse failure.
     """
     payload = {"query": GRAPHQL_POLYMER_ALIGNMENT_QUERY, "variables": {"id": pdb_id.upper()}}
-    try:
-        resp = requests.post(
-            RCSB_GRAPHQL_URL, json=payload, timeout=TIMEOUT_RCSB_GRAPHQL_VALIDATION
-        )
-        if resp.status_code != 200:
-            logger.warning("[%s] alignment GraphQL status %d", pdb_id, resp.status_code)
+    data: dict[str, Any] | None = None
+    for attempt in range(API_MAX_RETRIES):
+        try:
+            resp = requests.post(
+                RCSB_GRAPHQL_URL, json=payload, timeout=TIMEOUT_RCSB_GRAPHQL_VALIDATION
+            )
+            if resp.status_code != 200:
+                # Transient/unexpected status -- retry, then abstain.
+                if attempt == API_MAX_RETRIES - 1:
+                    logger.warning("[%s] alignment GraphQL status %d", pdb_id, resp.status_code)
+                    return None
+                time.sleep(SLEEP_VALIDATION_RETRY)
+                continue
+            data = resp.json()
+            if data.get("errors"):
+                # A GraphQL-level error is a definitive server verdict, not a network
+                # transient; retrying will not change it.
+                logger.warning("[%s] alignment GraphQL errors: %s", pdb_id, data["errors"])
+                return None
+            break
+        except ValueError as exc:
+            # Malformed body on an HTTP 200 -- abstain immediately, retry will not help.
+            logger.warning("[%s] alignment GraphQL parse error: %s", pdb_id, exc)
             return None
-        data = resp.json()
-        if data.get("errors"):
-            logger.warning("[%s] alignment GraphQL errors: %s", pdb_id, data["errors"])
-            return None
-    except (requests.RequestException, OSError, ValueError) as exc:
-        logger.warning("[%s] alignment GraphQL fetch error: %s", pdb_id, exc)
+        except (requests.RequestException, OSError) as exc:
+            if attempt == API_MAX_RETRIES - 1:
+                logger.warning("[%s] alignment GraphQL fetch error: %s", pdb_id, exc)
+                return None
+            time.sleep(SLEEP_VALIDATION_RETRY)
+    if data is None:
         return None
 
     entry = (data.get("data") or {}).get("entry") or {}
