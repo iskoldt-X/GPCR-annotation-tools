@@ -266,18 +266,27 @@ def build_tool_for_signals(base_tool: types.Tool, signals: list[DetectSignal]) -
 
 
 def build_tool_config(
-    signals: list[DetectSignal], temperature: float | None = None
+    signals: list[DetectSignal],
+    temperature: float | None = None,
+    thinking_level: str | None = None,
 ) -> types.GenerateContentConfig:
     """Return the generation config for *signals* (identity ``TOOL_CONFIG`` if no mutation).
 
     *temperature* sets the sampling temperature when given; ``None`` leaves it
     unset so the model's own default applies (``TOOL_CONFIG`` pins no temperature).
+    *thinking_level* (one of ``minimal``/``low``/``medium``/``high``) sets the
+    reasoning depth when given; ``None`` leaves it unset so the model's own
+    default (``high``) applies.
     """
     tool = build_tool_for_signals(ANNOTATION_TOOL, signals)
-    if tool is ANNOTATION_TOOL and temperature is None:
+    if tool is ANNOTATION_TOOL and temperature is None and thinking_level is None:
         return TOOL_CONFIG
     config = TOOL_CONFIG.model_copy(deep=True)
     config.tools = [tool]
     if temperature is not None:
         config.temperature = temperature
+    if thinking_level is not None:
+        config.thinking_config = types.ThinkingConfig(
+            thinking_level=types.ThinkingLevel(thinking_level.upper())
+        )
     return config

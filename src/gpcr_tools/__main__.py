@@ -164,6 +164,15 @@ def cli() -> None:
         ),
     )
     ann_parser.add_argument(
+        "--thinking-level",
+        choices=["minimal", "low", "medium", "high"],
+        default=None,
+        help=(
+            "Reasoning depth for generation. Omit to use the model's default "
+            "(high; no override sent, in either single or batch mode)."
+        ),
+    )
+    ann_parser.add_argument(
         "--check-batch",
         action="store_true",
         default=False,
@@ -354,6 +363,7 @@ def cli() -> None:
                     num_runs=args.runs,
                     batch=args.batch,
                     temperature=args.temperature,
+                    thinking_level=args.thinking_level,
                 )
             except FileNotFoundError as exc:
                 print(f"Error: {exc}", file=sys.stderr)

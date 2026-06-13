@@ -89,6 +89,57 @@ def test_build_and_submit_batch(tmp_path, monkeypatch):
     assert config.current_batch_job_file.read_text() == "batchJobs/mock_job_name"
 
 
+def _capture_first_batch_request(tmp_path, monkeypatch, **batch_kwargs):
+    """Run build_and_submit_batch with mocked I/O and return the first request
+    object from the uploaded JSONL (the exact wire payload sent to the Batch API).
+    """
+    monkeypatch.setenv("GPCR_ENRICHED_PATH", str(tmp_path / "enriched"))
+    monkeypatch.setenv("GPCR_PAPERS_PATH", str(tmp_path / "papers"))
+    monkeypatch.setenv("GPCR_AI_RESULTS_PATH", str(tmp_path / "ai_results"))
+    monkeypatch.setenv("GPCR_STATE_PATH", str(tmp_path / "state"))
+    reset_config()
+    config = get_config()
+    (tmp_path / "state").mkdir()
+    config.enriched_dir.mkdir()
+    config.papers_dir.mkdir()
+    pdb_id = "7W55"
+    (config.enriched_dir / f"{pdb_id}.json").write_text("{}")
+    (config.papers_dir / f"{pdb_id}.pdf").write_text("%PDF")
+
+    captured: dict[str, str] = {}
+
+    def capturing_upload(*, file, **kwargs):
+        # The JSONL upload is the one we want; read it before the caller deletes it.
+        if str(file).endswith(".jsonl"):
+            captured["jsonl"] = Path(file).read_text()
+        m = MagicMock()
+        m.uri, m.name = "http://mock.uri", "mock/uploaded_file"
+        return m
+
+    mock_client = MagicMock()
+    mock_client.files.upload.side_effect = capturing_upload
+    mock_client.batches.create.return_value.name = "batchJobs/mock_job_name"
+    monkeypatch.setattr("gpcr_tools.annotator.runner.get_client", lambda: mock_client)
+    monkeypatch.setattr("gpcr_tools.annotator.runner.compress_pdf_if_needed", lambda a, b: a)
+
+    runner.build_and_submit_batch([pdb_id], "Prompt", num_runs=1, **batch_kwargs)
+    return json.loads(captured["jsonl"].splitlines()[0])["request"]
+
+
+def test_batch_payload_injects_thinking_level(tmp_path, monkeypatch):
+    """A set thinking level reaches the per-request generationConfig as the
+    camelCase thinkingConfig.thinkingLevel the REST Batch API expects."""
+    req = _capture_first_batch_request(tmp_path, monkeypatch, thinking_level="minimal")
+    assert req["generationConfig"]["thinkingConfig"] == {"thinkingLevel": "MINIMAL"}
+
+
+def test_batch_payload_omits_generation_config_by_default(tmp_path, monkeypatch):
+    """With no temperature and no thinking level, no generationConfig is sent --
+    behaviour is byte-for-byte unchanged from before either override existed."""
+    req = _capture_first_batch_request(tmp_path, monkeypatch)
+    assert "generationConfig" not in req
+
+
 def test_recover_batch(tmp_path, monkeypatch):
     """Test recovering JSONL responses into run_n.json files."""
     monkeypatch.setenv("GPCR_STATE_PATH", str(tmp_path / "state"))

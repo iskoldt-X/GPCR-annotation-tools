@@ -226,6 +226,7 @@ def run_single_pdb(
     model_name: str | None = None,
     prompt_id: str | None = None,
     temperature: float | None = None,
+    thinking_level: str | None = None,
 ) -> None:
     """Run annotation for a single PDB entry using parallel Gemini calls.
 
@@ -278,7 +279,9 @@ def run_single_pdb(
             parts = build_prompt_parts(
                 pdb_id, enriched_data, prompt_text, detect_signals=detect_signals
             )
-            run_config = build_tool_config(detect_signals, temperature=temperature)
+            run_config = build_tool_config(
+                detect_signals, temperature=temperature, thinking_level=thinking_level
+            )
             contents: list[Any] = [*parts, uploaded_file]
 
             def do_run(run_num: int) -> None:
@@ -374,6 +377,7 @@ def build_and_submit_batch(
     model_name: str | None = None,
     prompt_id: str | None = None,
     temperature: float | None = None,
+    thinking_level: str | None = None,
 ) -> None:
     """Build a JSONL payload for all *targets* and submit it to the Gemini Batch API."""
     model_name = model_name or get_gemini_model_name()
@@ -481,16 +485,21 @@ def build_and_submit_batch(
             }
 
             # Per-request payload. The model is set once at the batch-job level;
-            # repeating it per request is rejected as a mismatch. A temperature,
-            # however, is per-request (generationConfig) -- omitted entirely when
-            # not set, so the default behaviour is unchanged.
+            # repeating it per request is rejected as a mismatch. Temperature and
+            # thinking level, however, are per-request (generationConfig) -- each
+            # omitted entirely when not set, so the default behaviour is unchanged.
             request_payload: dict[str, Any] = {
                 "contents": contents_batch,
                 "tools": [tool_dict],
                 "toolConfig": {"functionCallingConfig": {"mode": "ANY"}},
             }
+            generation_config: dict[str, Any] = {}
             if temperature is not None:
-                request_payload["generationConfig"] = {"temperature": temperature}
+                generation_config["temperature"] = temperature
+            if thinking_level is not None:
+                generation_config["thinkingConfig"] = {"thinkingLevel": thinking_level.upper()}
+            if generation_config:
+                request_payload["generationConfig"] = generation_config
 
             # "key" (not "id") is echoed back in the output for correlation.
             pdb_requests.append({"key": req_id, "request": request_payload})
@@ -830,6 +839,7 @@ def run_annotation_stage(
     num_runs: int = GEMINI_DEFAULT_RUNS,
     batch: bool = False,
     temperature: float | None = None,
+    thinking_level: str | None = None,
 ) -> None:
     """Resolve targets / prompt / model and run annotation (single or batch).
 
@@ -877,6 +887,7 @@ def run_annotation_stage(
             model_name=model_name,
             prompt_id=prompt_id,
             temperature=temperature,
+            thinking_level=thinking_level,
         )
         return
 
@@ -904,4 +915,5 @@ def run_annotation_stage(
             model_name=model_name,
             prompt_id=prompt_id,
             temperature=temperature,
+            thinking_level=thinking_level,
         )

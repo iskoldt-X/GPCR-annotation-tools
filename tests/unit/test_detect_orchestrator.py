@@ -453,3 +453,18 @@ class TestBuildToolConfig:
         assert cfg is not TOOL_CONFIG
         assert cfg.tools[0] is not ANNOTATION_TOOL
         assert TOOL_CONFIG.tools[0] is ANNOTATION_TOOL  # base config untouched
+
+    def test_thinking_level_unset_leaves_base_config_identity(self) -> None:
+        # No signal mutation and no thinking level -> the pinned base config, so
+        # the model's own default reasoning depth applies (no override sent).
+        assert build_tool_config([]) is TOOL_CONFIG
+        assert build_tool_config([], thinking_level=None) is TOOL_CONFIG
+
+    def test_thinking_level_sets_thinking_config_leaving_base_unchanged(self) -> None:
+        from google.genai import types
+
+        cfg = build_tool_config([], thinking_level="low")
+        assert cfg is not TOOL_CONFIG
+        assert cfg.thinking_config is not None
+        assert cfg.thinking_config.thinking_level == types.ThinkingLevel.LOW
+        assert TOOL_CONFIG.thinking_config is None  # base config untouched
