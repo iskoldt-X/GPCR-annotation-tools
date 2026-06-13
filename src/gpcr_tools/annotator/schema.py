@@ -450,9 +450,12 @@ PHARMACOLOGICAL_ROLE_CHECK_SCHEMA = types.Schema(
     },
 )
 
+# No temperature override here: the default model is tuned to run at its own
+# default temperature, and pinning a low value can trigger reasoning loops or
+# degrade quality on complex inputs. Leaving it unset uses the model default;
+# callers may still set one explicitly (annotate --temperature).
 TOOL_CONFIG = types.GenerateContentConfig(
     tools=[ANNOTATION_TOOL],
-    temperature=0.0,
     tool_config=types.ToolConfig(
         function_calling_config=types.FunctionCallingConfig(mode="ANY")  # type: ignore[arg-type]
     ),
