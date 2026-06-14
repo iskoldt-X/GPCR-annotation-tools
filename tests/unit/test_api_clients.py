@@ -12,7 +12,11 @@ from unittest.mock import MagicMock, patch
 
 import requests
 
-from gpcr_tools.config import API_MAX_RETRIES
+from gpcr_tools.config import (
+    API_MAX_RETRIES,
+    SLEEP_VALIDATION_RETRY,
+    VALIDATION_RETRY_BACKOFF_FACTOR,
+)
 from gpcr_tools.validator.api_clients import (
     check_pubchem_existence,
     check_pubchem_synonym_match,
@@ -202,3 +206,25 @@ class TestCheckPubchemSynonymMatchRetry:
         assert check_pubchem_synonym_match("5288826", ["Morphine"], cache) is None
         assert mock_get.call_count == 1
         assert not cache.has("5288826")
+
+
+def test_validation_retry_uses_exponential_backoff(monkeypatch: object) -> None:
+    """Transient failures back off geometrically (1s, 3s, ...) between retries
+    rather than three rapid-fire 1s waits, so a rate-limit/congestion spike gets a
+    widening recovery gap. The terminal attempt does not sleep, and nothing is cached.
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr("gpcr_tools.validator.api_clients.time.sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr(
+        "gpcr_tools.validator.api_clients.requests.get",
+        MagicMock(side_effect=requests.RequestException("boom")),
+    )
+    cache = _FakeCache()
+    assert check_pubchem_existence("5462471", cache) is None
+    # One sleep per attempt except the last; each grows by VALIDATION_RETRY_BACKOFF_FACTOR.
+    expected = [
+        SLEEP_VALIDATION_RETRY * VALIDATION_RETRY_BACKOFF_FACTOR**i
+        for i in range(API_MAX_RETRIES - 1)
+    ]
+    assert sleeps == expected
+    assert "pubchem:5462471" not in cache

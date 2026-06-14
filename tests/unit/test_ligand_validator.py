@@ -640,6 +640,7 @@ class TestMultipleAgonists:
         assert not self._agonist_warnings(ligands)
 
 
+@patch("gpcr_tools.validator.api_clients.time.sleep", lambda *_: None)
 class TestCheckPubChemSynonymMatch:
     """The synonym gate confirms a CID actually names the reported molecule.
 
@@ -747,6 +748,7 @@ class TestCheckPubChemSynonymMatch:
         assert cache.get("888") == ["ExampleDrug"]
 
 
+@patch("gpcr_tools.validator.api_clients.time.sleep", lambda *_: None)
 class TestKeylessPubChemGate:
     """The validator gates a model-supplied CID only for keyless ligands (no matched
     chemical component), blanking a wrong CID and abstaining on network failure; a

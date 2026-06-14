@@ -45,6 +45,7 @@ from gpcr_tools.config import (
     SLEEP_VALIDATION_RETRY,
     STRUCTURE_CACHE_SUBDIR,
     TIMEOUT_RCSB_STRUCTURE,
+    VALIDATION_RETRY_BACKOFF_FACTOR,
 )
 
 logger = logging.getLogger(__name__)
@@ -138,12 +139,12 @@ def fetch_structure(pdb_id: str, cache_dir: Path) -> Path | None:
                     "[geometry] %s: coordinates unavailable (HTTP %s)", pdb_id, resp.status_code
                 )
                 return None
-            time.sleep(SLEEP_VALIDATION_RETRY)
+            time.sleep(SLEEP_VALIDATION_RETRY * VALIDATION_RETRY_BACKOFF_FACTOR**attempt)
         except (requests.RequestException, OSError) as exc:
             if attempt == API_MAX_RETRIES - 1:
                 logger.warning("[geometry] %s: could not download coordinates: %s", pdb_id, exc)
                 return None
-            time.sleep(SLEEP_VALIDATION_RETRY)
+            time.sleep(SLEEP_VALIDATION_RETRY * VALIDATION_RETRY_BACKOFF_FACTOR**attempt)
     if resp is None or resp.status_code != 200:
         return None
     subdir.mkdir(parents=True, exist_ok=True)
