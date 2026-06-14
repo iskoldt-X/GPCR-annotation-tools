@@ -1,8 +1,9 @@
 """Multi-tier PDF downloader for GPCR papers.
 
-Resolves the DOI (recovering it from the citation table / a title search when
-the primary citation lacks one), then tries candidate PDF URLs as a true
-fallback chain -- a URL that resolves but yields a non-PDF (an HTML challenge)
+Trusts ONLY the DOI RCSB tags on the primary citation (no title-search or
+citation-table recovery -- attaching the wrong paper is worse than none), then
+tries candidate PDF URLs as a true fallback chain -- a URL that resolves but
+yields a non-PDF (an HTML challenge)
 or a 403/404 does not end the search, only an exhausted chain marks the paper
 paywalled:
   CrossRef metadata — the article's PMID and a direct publisher PDF link
@@ -21,7 +22,6 @@ import contextlib
 import json
 import logging
 import os
-import re
 import tempfile
 import time
 from datetime import UTC, datetime
@@ -274,102 +274,6 @@ def _resolve_pmcid(doi: str | None, pmid: str | None, session: requests.Session)
     return None
 
 
-_TITLE_TOKEN_RE = re.compile(r"[a-z0-9]+")
-# Only true function words are dropped. Domain words (structure/crystal/cryo/em)
-# are kept ON PURPOSE: they discriminate "Cryo-EM structure of X" from "Crystal
-# structure of X", so two different papers on the same target do not collide.
-_TITLE_STOPWORDS = frozenset(
-    {"a", "an", "the", "of", "in", "on", "to", "and", "or", "for", "with", "by"}
-)
-_TITLE_CONTAINMENT_MIN = 0.85
-
-
-def _title_tokens(text: str) -> set[str]:
-    return {t for t in _TITLE_TOKEN_RE.findall(text.lower()) if t not in _TITLE_STOPWORDS}
-
-
-def _crossref_item_year(item: dict[str, Any]) -> int | None:
-    """Best-effort publication year from a CrossRef work item."""
-    for key in ("published", "issued", "published-print", "published-online", "created"):
-        parts = (item.get(key) or {}).get("date-parts") or []
-        if parts and parts[0] and parts[0][0]:
-            try:
-                return int(parts[0][0])
-            except (TypeError, ValueError):
-                continue  # this field's year is unparseable; try the next one
-    return None
-
-
-def _fetch_doi_from_title(
-    title: str, session: requests.Session, expected_year: Any = None
-) -> str | None:
-    """Recover a DOI from a paper title via CrossRef bibliographic search.
-
-    Accepts the top hit only when (a) the two titles are near-identical in BOTH
-    directions (symmetric containment >= 0.85 over content tokens) AND (b) the
-    publication year matches the expected year within one (when both are known).
-    This rejects companion/series papers and same-target/different-year papers,
-    because attaching the WRONG paper is worse than none.
-    """
-    want = _title_tokens(title)
-    if len(want) < 3:  # too few content tokens to disambiguate safely
-        return None
-    try:
-        want_year = int(expected_year) if expected_year else None
-    except (TypeError, ValueError):
-        want_year = None
-    params = {"query.bibliographic": title, "rows": "1"}
-    try:
-        response = session.get(CROSSREF_API_URL, params=params, timeout=TIMEOUT_CROSSREF)
-        if response.status_code == 200:
-            items = (response.json().get("message") or {}).get("items") or []
-            if items:
-                got = _title_tokens(" ".join(items[0].get("title") or []))
-                overlap = len(want & got)
-                if not (
-                    got
-                    and overlap / len(want) >= _TITLE_CONTAINMENT_MIN
-                    and overlap / len(got) >= _TITLE_CONTAINMENT_MIN
-                ):
-                    return None
-                got_year = _crossref_item_year(items[0])
-                # Reject a title match whose year is off by >1 (a different paper,
-                # e.g. a re-determination/series). Kept deliberately tight: a rare
-                # legitimate print-vs-online >1y gap fails closed (-> paywalled,
-                # hand-droppable), which is far safer than attaching a wrong paper.
-                if want_year and got_year and abs(got_year - want_year) > 1:
-                    return None
-                doi = items[0].get("DOI")
-                return str(doi) if doi else None
-    except (requests.exceptions.RequestException, ValueError) as exc:
-        logger.warning("[CrossRef title] Failed for %r: %s", title[:60], exc)
-    return None
-
-
-def _recover_missing_doi(
-    entry_data: dict[str, Any], pmid: Any, session: requests.Session
-) -> tuple[str | None, Any]:
-    """Best-effort DOI recovery when the primary citation carries none.
-
-    Uses ONLY the ``citation`` row tagged ``id == "primary"`` (the structure's own
-    paper) -- never another row, which is a CITED reference and would attach the
-    wrong paper. Reads that row's DOI/PubMed, then falls back to a CrossRef title
-    search (gated by a year match). Returns ``(doi, pmid)``.
-    """
-    citations = [c for c in (entry_data.get("citation") or []) if isinstance(c, dict)]
-    primary = next((c for c in citations if c.get("id") == "primary"), None)
-    if not primary:
-        return None, pmid
-    doi = primary.get("pdbx_database_id_DOI")
-    pmid = pmid or primary.get("pdbx_database_id_PubMed")
-    if doi:
-        return str(doi), pmid
-    title = primary.get("title")
-    if title:
-        return _fetch_doi_from_title(str(title), session, expected_year=primary.get("year")), pmid
-    return None, pmid
-
-
 def _download_file(url: str, output_path: Path, session: requests.Session) -> bool:
     """Download a file from *url* to *output_path* with streaming."""
     try:
@@ -446,13 +350,18 @@ def download_paper_for_pdb(
     # Resumability
     if final_pdf.exists() and not force:
         logger.info("[%s] PDF already exists, skipping", pdb_id)
+        # Preserve any identifiers a prior run already resolved -- the log is
+        # full-replace, so nulling them here would lose the DOI that same-paper
+        # sibling grouping (manual workflow Phase 1) depends on across re-runs.
+        prior = _read_download_log().get(pdb_id)
+        prior = prior if isinstance(prior, dict) else {}
         entry = {
             "status": DL_STATUS_SKIPPED_EXISTS,
             "source": None,
             "file_path": str(final_pdf),
-            "doi": None,
-            "pmid": None,
-            "pmcid": None,
+            "doi": prior.get("doi"),
+            "pmid": prior.get("pmid"),
+            "pmcid": prior.get("pmcid"),
             "timestamp": now,
         }
         _update_download_log(pdb_id, entry)
@@ -504,12 +413,9 @@ def download_paper_for_pdb(
     pmcid: str | None = None
 
     if not doi:
-        # No DOI on the primary citation -- try the already-fetched citation[]
-        # table and a CrossRef title search before giving up; many entries have a
-        # published paper RCSB simply did not tag with a DOI.
-        doi, pmid = _recover_missing_doi(entry_data, pmid, sess)
-
-    if not doi:
+        # Trust ONLY the DOI RCSB itself tags on the primary citation. No title
+        # search / heuristic recovery: attaching the wrong paper is worse than
+        # none, so a missing DOI falls straight through to the manual workflow.
         logger.info("[%s] No DOI found", pdb_id)
         entry = {
             "status": DL_STATUS_FAILED_NO_DOI,

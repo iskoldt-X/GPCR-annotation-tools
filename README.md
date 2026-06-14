@@ -174,9 +174,33 @@ gpcr-tools fetch --force                # Re-fetch existing entries
 Download open-access papers with tiered fallback (Unpaywall → PMC OA → abstract).
 
 ```bash
-gpcr-tools fetch-papers                 # All targets, with watch mode for paywalled papers
-gpcr-tools fetch-papers --auto-only     # Skip watch mode (for CI/scripting)
+gpcr-tools fetch-papers                 # Auto-download OA, then manual workflow for paywalled
+gpcr-tools fetch-papers --auto-only     # Auto-download only, skip the manual step (CI/scripting)
+gpcr-tools fetch-papers --watch-only    # Skip the auto retry; go straight to the manual step
 gpcr-tools fetch-papers 8TII           # Single PDB
+```
+
+After the auto phase, the papers the open-access tiers couldn't fetch are handled
+**one at a time**: first, any paper already downloaded is copied to its same-DOI
+sibling structures (one paper often deposits several PDBs); then, for each
+remaining paper, the tool prints its DOI link and **watches `papers/` for the PDF
+you drop** — the dropped file is renamed to the correct `{PDB}.pdf` automatically
+(it knows which one, because it processes one paper at a time), and replicated to
+that paper's other structures. Press Ctrl+C anytime to stop; resume with
+`--watch-only`.
+
+Under Docker, run it interactively (so the prompts work and the folder is shared);
+open each printed DOI link in your own browser, download the PDF, and save it into
+the `papers/` folder of your mounted workspace on the host:
+
+```bash
+docker run --rm -it \
+  -v ~/gpcr_workspace:/workspace \
+  -e GPCR_EMAIL_FOR_APIS="you@example.com" \
+  ghcr.io/protwis/gpcr-annotation-tools fetch-papers
+# or, to skip the auto retry of already-paywalled papers:
+#   ... fetch-papers --watch-only
+# then save each downloaded PDF into ~/gpcr_workspace/papers/ (any filename)
 ```
 
 ### `gpcr-tools annotate`

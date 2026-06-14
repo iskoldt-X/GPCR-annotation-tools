@@ -11,11 +11,9 @@ import pytest
 
 from gpcr_tools.papers.downloader import (
     _fetch_crossref_metadata,
-    _fetch_doi_from_title,
     _fetch_pmc_s3_pdf_url,
     _fetch_unpaywall_pdf_url,
     _read_download_log,
-    _recover_missing_doi,
     _resolve_pmcid,
     _update_download_log,
     download_paper_for_pdb,
@@ -225,94 +223,6 @@ class TestResolvePmcid:
         mock_session.get.assert_not_called()
 
 
-class TestFetchDoiFromTitle:
-    def _session(self, title: str, year: int | None = None) -> MagicMock:
-        mock_session = MagicMock()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        item: dict[str, Any] = {"DOI": "10.1/found", "title": [title]}
-        if year is not None:
-            item["issued"] = {"date-parts": [[year]]}
-        mock_resp.json.return_value = {"message": {"items": [item]}}
-        mock_session.get.return_value = mock_resp
-        return mock_session
-
-    def test_strong_match_returns_doi(self) -> None:
-        title = "Structure of the human serotonin 5-HT2A receptor complex"
-        assert _fetch_doi_from_title(title, self._session(title)) == "10.1/found"
-
-    def test_year_mismatch_rejected(self) -> None:
-        # Identical title but a publication year far from the expected one means a
-        # different paper (e.g. a re-determination / series) -- must be rejected.
-        title = "Structure of the human serotonin 5-HT2A receptor complex"
-        sess = self._session(title, year=2015)
-        assert _fetch_doi_from_title(title, sess, expected_year=2023) is None
-
-    def test_year_match_within_one_accepted(self) -> None:
-        title = "Structure of the human serotonin 5-HT2A receptor complex"
-        sess = self._session(title, year=2023)
-        assert _fetch_doi_from_title(title, sess, expected_year=2022) == "10.1/found"
-
-    def test_different_method_titles_do_not_collide(self) -> None:
-        # Domain words are no longer stopwords, so cryo-EM vs crystal of the same
-        # target are distinguished and the wrong one is rejected.
-        query = "Cryo-EM structure of the human GLP-1 receptor"
-        hit = "Crystal structure of the human GLP-1 receptor"
-        assert _fetch_doi_from_title(query, self._session(hit)) is None
-
-    def test_weak_match_returns_none(self) -> None:
-        query = "Structure of the human serotonin 5-HT2A receptor complex"
-        hit = "Crystal packing of an unrelated bacterial transporter protein"
-        assert _fetch_doi_from_title(query, self._session(hit)) is None
-
-    def test_short_title_returns_none(self) -> None:
-        # Too few tokens to disambiguate safely -- never queries.
-        mock_session = MagicMock()
-        assert _fetch_doi_from_title("GPCR study", mock_session) is None
-        mock_session.get.assert_not_called()
-
-    def test_companion_paper_rejected(self) -> None:
-        # A near-duplicate companion/series paper must NOT be accepted: the query
-        # tokens are a subset of the hit's, so symmetric containment fails.
-        # Attaching the wrong paper is worse than attaching none.
-        query = "Structure of the dopamine D2 receptor"
-        hit = "Structure of the dopamine D2 receptor bound to risperidone and a nanobody"
-        assert _fetch_doi_from_title(query, self._session(hit)) is None
-
-
-class TestRecoverMissingDoi:
-    def test_recovers_doi_from_citation_table(self) -> None:
-        entry = {"citation": [{"id": "primary", "pdbx_database_id_DOI": "10.2/cit"}]}
-        doi, _pmid = _recover_missing_doi(entry, None, MagicMock())
-        assert doi == "10.2/cit"
-
-    def test_falls_back_to_title_search(self) -> None:
-        entry = {"citation": [{"id": "primary", "title": "A distinctive receptor structure paper"}]}
-        with patch(
-            "gpcr_tools.papers.downloader._fetch_doi_from_title", return_value="10.3/title"
-        ) as m:
-            doi, _pmid = _recover_missing_doi(entry, None, MagicMock())
-        assert doi == "10.3/title"
-        m.assert_called_once()
-
-    def test_no_citation_returns_none(self) -> None:
-        doi, pmid = _recover_missing_doi({"citation": []}, 42, MagicMock())
-        assert doi is None and pmid == 42
-
-    def test_non_primary_citation_is_not_used(self) -> None:
-        # Regression: a citation table with only CITED references (no row tagged
-        # "primary") must NOT yield a DOI -- those are other papers, and using one
-        # would attach the wrong paper. (Previously a citations[0] fallback did.)
-        entry = {
-            "citation": [
-                {"id": "1", "pdbx_database_id_DOI": "10.9/reference-not-ours"},
-                {"id": "2", "pdbx_database_id_DOI": "10.9/another-reference"},
-            ]
-        }
-        doi, _pmid = _recover_missing_doi(entry, None, MagicMock())
-        assert doi is None
-
-
 class TestUnpaywallPdfUrl:
     def test_returns_pdf_url(self) -> None:
         mock_session = MagicMock()
@@ -351,6 +261,22 @@ class TestDownloadPaperForPdb:
         (papers_workspace / "papers" / "7W55.pdf").write_text("fake pdf")
         result = download_paper_for_pdb("7W55", email="test@example.com")
         assert result["status"] == "skipped_already_downloaded"
+
+    def test_skip_exists_preserves_prior_identifiers(self, papers_workspace: Path) -> None:
+        """Re-running when the PDF already exists must keep the DOI a prior run
+        resolved -- same-paper sibling grouping in the manual workflow depends on
+        it surviving across runs (the log is full-replace)."""
+        from gpcr_tools.papers.downloader import _read_download_log, _update_download_log
+
+        _update_download_log(
+            "7W55",
+            {"status": "success_pdf_downloaded", "doi": "10.1/keep", "pmid": "999", "pmcid": None},
+        )
+        (papers_workspace / "papers" / "7W55.pdf").write_text("fake pdf")
+        result = download_paper_for_pdb("7W55", email="test@example.com")
+        assert result["status"] == "skipped_already_downloaded"
+        assert result["doi"] == "10.1/keep"  # not nulled
+        assert _read_download_log()["7W55"]["doi"] == "10.1/keep"
 
     @patch(
         "gpcr_tools.papers.downloader._fetch_unpaywall_pdf_url",
@@ -516,31 +442,23 @@ class TestDownloadPaperForPdb:
         assert result["status"] == "success_pdf_downloaded"
         assert result["pmcid"] == "PMC789"  # NOT PMC999999 from the enriched field
 
-    def test_no_doi_recovered_from_citation_table(self, papers_workspace: Path) -> None:
-        # No DOI on the primary citation, but the citation[] table carries one:
-        # it must be recovered rather than giving up as failed_no_doi.
+    def test_citation_table_doi_is_not_consulted(self, papers_workspace: Path) -> None:
+        # We trust ONLY the DOI RCSB tags on rcsb_primary_citation. A DOI sitting
+        # in the citation[] table (but absent from the primary citation) is NOT
+        # recovered -- it falls through to failed_no_doi, hand-droppable later.
         enriched = {
             "data": {
                 "entry": {
                     "rcsb_id": "9NOD",
                     "rcsb_primary_citation": {},
-                    "citation": [{"id": "primary", "pdbx_database_id_DOI": "10.1038/recovered"}],
+                    "citation": [{"id": "primary", "pdbx_database_id_DOI": "10.1038/ignored"}],
                 }
             }
         }
         (papers_workspace / "enriched" / "9NOD.json").write_text(json.dumps(enriched))
-        with (
-            patch(
-                "gpcr_tools.papers.downloader._fetch_crossref_metadata",
-                return_value={"pmid": None, "crossref_pdf_url": None},
-            ),
-            patch("gpcr_tools.papers.downloader._fetch_unpaywall_pdf_url", return_value=None),
-            patch("gpcr_tools.papers.downloader._resolve_pmcid", return_value=None),
-        ):
-            result = download_paper_for_pdb("9NOD", email="test@example.com")
-        # DOI was recovered, so it proceeds past failed_no_doi to paywalled.
-        assert result["status"] == "fallback_paywalled"
-        assert result["doi"] == "10.1038/recovered"
+        result = download_paper_for_pdb("9NOD", email="test@example.com")
+        assert result["status"] == "failed_no_doi"
+        assert result["doi"] is None
 
     def test_genuinely_no_doi_stays_failed_no_doi(self, papers_workspace: Path) -> None:
         enriched = {

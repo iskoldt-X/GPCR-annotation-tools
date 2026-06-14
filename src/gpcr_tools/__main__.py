@@ -92,6 +92,16 @@ def cli() -> None:
         help="Skip watch mode for paywalled papers (for CI/scripting).",
     )
     fp_parser.add_argument(
+        "--watch-only",
+        action="store_true",
+        default=False,
+        help=(
+            "Skip the auto-download retry and go straight to watch mode for the "
+            "papers already marked paywalled in the download log. Watches ALL "
+            "paywalled entries; any pdb_id / --targets argument is ignored."
+        ),
+    )
+    fp_parser.add_argument(
         "--force",
         action="store_true",
         default=False,
@@ -333,12 +343,19 @@ def cli() -> None:
         )
 
     elif args.command == "fetch-papers":
+        if args.auto_only and args.watch_only:
+            print(
+                "Error: --auto-only and --watch-only are mutually exclusive.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         from gpcr_tools.papers.runner import run_fetch_papers
 
         run_fetch_papers(
             pdb_id=args.pdb_id,
             targets_file=args.targets,
             auto_only=args.auto_only,
+            watch_only=args.watch_only,
             force=args.force,
         )
 
