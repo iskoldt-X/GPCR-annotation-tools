@@ -47,6 +47,7 @@ def run_fetch_papers(
     pdb_id: str | None = None,
     targets_file: str | None = None,
     auto_only: bool = False,
+    watch_only: bool = False,
     force: bool = False,
 ) -> None:
     """Execute the fetch-papers pipeline.
@@ -55,7 +56,24 @@ def run_fetch_papers(
       1. ``pdb_id`` — single PDB
       2. ``targets_file`` — explicit file path
       3. Default — scan ``enriched/`` for PDBs missing papers
+
+    *watch_only* skips the auto-download retry entirely and goes straight to watch
+    mode for the papers already marked paywalled in the download log -- useful when
+    a prior run already established which papers are paywalled and you only want to
+    drop the manually-fetched PDFs (no email or network needed).
     """
+    if watch_only:
+        log = _read_download_log()
+        if not _get_pending_paywalled(log):
+            print(
+                "No paywalled papers recorded in the download log "
+                "(run a normal fetch-papers first).",
+                file=sys.stderr,
+            )
+            return
+        run_watcher(log)
+        return
+
     # Fail fast: require email
     email = os.environ.get("GPCR_EMAIL_FOR_APIS")
     if not email:
@@ -123,9 +141,8 @@ def run_fetch_papers(
         file=sys.stderr,
     )
 
-    # Watch mode (unless --auto-only)
+    # Manual paper workflow (unless --auto-only)
     if not auto_only:
         log = _read_download_log()
-        paywalled = _get_pending_paywalled(log)
-        if paywalled:
-            run_watcher(paywalled)
+        if _get_pending_paywalled(log):
+            run_watcher(log)

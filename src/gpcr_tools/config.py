@@ -178,11 +178,6 @@ BATCH_STATUS_FAILED: str = "failed"
 WATCHER_POLL_INTERVAL: float = 2.0
 WATCHER_STABILITY_CHECKS: int = 2
 WATCHER_STABILITY_INTERVAL: float = 1.0
-# Give a matching-but-not-yet-ingestable file (mid-download, momentarily
-# invalid) several poll attempts before giving up, instead of abandoning it
-# after one try. The counter resets whenever the file's size changes (i.e. it
-# is still downloading), so only a genuinely stuck file is eventually skipped.
-WATCHER_MAX_INGEST_ATTEMPTS: int = 5
 
 # ---------------------------------------------------------------------------
 # Workspace contract
