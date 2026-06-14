@@ -78,6 +78,17 @@ class TestCheckUniprotExistence:
         assert check_uniprot_existence("oprm_human", cache) is None
         assert "uniprot:oprm_human" not in cache
 
+    @patch("gpcr_tools.validator.api_clients.requests.head")
+    def test_400_is_malformed_query_not_retried_not_cached(self, mock_head: MagicMock) -> None:
+        # HTTP 400 = the query itself is malformed (e.g. a comma-joined multi-slug
+        # receptor name). The service is fine, so retrying repeats the rejection:
+        # abstain immediately (return None), do NOT retry, and never cache it.
+        mock_head.return_value = _resp(400)
+        cache = _FakeCache()
+        assert check_uniprot_existence("grm2_human, grm7_human", cache) is None
+        assert mock_head.call_count == 1
+        assert "uniprot:grm2_human, grm7_human" not in cache
+
 
 @patch("gpcr_tools.validator.api_clients.time.sleep", lambda *_: None)
 class TestCheckPubchemExistence:
@@ -194,6 +205,17 @@ class TestCheckPubchemSynonymMatchRetry:
         assert check_pubchem_synonym_match("5288826", ["Morphine"], cache) is False
         assert mock_get.call_count == 1
         assert cache.get("5288826") == []
+
+    @patch("gpcr_tools.validator.api_clients.requests.get")
+    def test_400_is_malformed_query_not_retried_not_cached(self, mock_get: MagicMock) -> None:
+        # HTTP 400 = malformed query, not a transient outage: abstain immediately
+        # (None), do NOT retry, never cache. (This function's status checks live
+        # outside its try block, so it's worth covering separately.)
+        mock_get.return_value = _synonym_resp(400)
+        cache = _SynonymCache()
+        assert check_pubchem_synonym_match("5288826", ["Morphine"], cache) is None
+        assert mock_get.call_count == 1
+        assert not cache.has("5288826")
 
     @patch("gpcr_tools.validator.api_clients.requests.get")
     def test_parse_error_on_200_is_not_retried(self, mock_get: MagicMock) -> None:
