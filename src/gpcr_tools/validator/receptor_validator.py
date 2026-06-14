@@ -51,6 +51,12 @@ def validate_receptor_identity(
     # chain_id can be comma-separated (e.g. "B, F" for homodimers)
     ai_chains = [c.strip() for c in ai_chain.split(",") if c.strip()]
 
+    # uniprot_entry_name can likewise be comma-joined when the model crams an
+    # obligate heterodimer's two receptor slugs into the single field (e.g.
+    # "grm2_human, grm7_human"). Split it the same way as chain_id so a real
+    # heterodimer is matched per-slug rather than mistaken for one absent name.
+    ai_uniprots = [u.strip() for u in ai_uniprot.split(",") if u.strip()]
+
     # Traverse polymer entities to collect slugs for every reported chain
     polymer_entities = enriched_entry.get("polymer_entities") or []
 
@@ -133,7 +139,7 @@ def validate_receptor_identity(
     # all-or-nothing clash that destructively blocked legitimate heterodimers. (A
     # low-severity "heteromer carries an unconfirmed second receptor" note is a
     # follow-up for the AI-gated phase, once real model chain_id behaviour is known.)
-    matched_chains = [c for c, s in chains_with_slugs.items() if ai_uniprot in s]
+    matched_chains = [c for c, s in chains_with_slugs.items() if any(u in s for u in ai_uniprots)]
 
     if not chains_with_slugs:
         # No chain carried any slug at all -> nothing to validate against. Two

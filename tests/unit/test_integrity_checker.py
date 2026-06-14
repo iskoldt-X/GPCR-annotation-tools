@@ -245,6 +245,28 @@ class TestFakeUniProt:
             warnings = validate_all("TEST", ai_data, enriched, cache=cache)
         assert not any("Fake UniProt" in w for w in warnings)
 
+    def test_comma_joined_uniprot_checked_per_slug(self, tmp_path: Path) -> None:
+        # A comma-joined heterodimer receptor name must be looked up one slug at a
+        # time, never as the joined string (which is not a real UniProt ID and would
+        # spuriously fail to resolve).
+        cache = ValidationCache(tmp_path / "cache.json")
+        ai_data: dict[str, Any] = {
+            "receptor_info": {"uniprot_entry_name": "grm2_human, grm7_human"}
+        }
+        seen: list[str] = []
+
+        def _record(uid: str, _cache: Any) -> bool:
+            seen.append(uid)
+            return True
+
+        with patch(
+            "gpcr_tools.validator.integrity_checker.check_uniprot_existence",
+            side_effect=_record,
+        ):
+            warnings = validate_all("7EPD", ai_data, {}, cache=cache)
+        assert seen == ["grm2_human", "grm7_human"]  # each slug separately, never joined
+        assert not any("API_UNAVAILABLE" in w or "Fake UniProt" in w for w in warnings)
+
     def test_api_unavailable_warning(self, tmp_path: Path) -> None:
         cache = ValidationCache(tmp_path / "cache.json")
         ai_data: dict[str, Any] = {"receptor_info": {"uniprot_entry_name": "test_human"}}

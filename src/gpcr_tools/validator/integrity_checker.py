@@ -168,25 +168,28 @@ def validate_all(
                                     f"Ghost Chain at '{path}': '{c}' not in PDB Source."
                                 )
 
-            # Check 2: Fake UniProt
+            # Check 2: Fake UniProt. The receptor field may comma-join an obligate
+            # heterodimer's two slugs ("grm2_human, grm7_human"); check each slug
+            # separately so a joined value is not looked up as one (non-existent) ID.
             if "uniprot_entry_name" in node:
                 uid = node["uniprot_entry_name"]
                 if uid and isinstance(uid, str) and uid.lower() not in EMPTY_VALUES:
-                    if "_" not in uid:
-                        warnings.append(
-                            f"Invalid Format at '{path}': '{uid}' (Expected: name_species)"
-                        )
-                    elif cache is not None:
-                        result = check_uniprot_existence(uid, cache)
-                        if result is False:
+                    for one_uid in (u.strip() for u in uid.split(",") if u.strip()):
+                        if "_" not in one_uid:
                             warnings.append(
-                                f"Fake UniProt ID at '{path}': '{uid}' does not exist in UniProtKB."
+                                f"Invalid Format at '{path}': '{one_uid}' (Expected: name_species)"
                             )
-                        elif result is None:
-                            warnings.append(
-                                f"{ALERT_PREFIX_API_UNAVAILABLE} at '{path}': "
-                                f"Could not verify UniProt ID '{uid}'."
-                            )
+                        elif cache is not None:
+                            result = check_uniprot_existence(one_uid, cache)
+                            if result is False:
+                                warnings.append(
+                                    f"Fake UniProt ID at '{path}': '{one_uid}' does not exist in UniProtKB."
+                                )
+                            elif result is None:
+                                warnings.append(
+                                    f"{ALERT_PREFIX_API_UNAVAILABLE} at '{path}': "
+                                    f"Could not verify UniProt ID '{one_uid}'."
+                                )
 
             # Check 3: Fake PubChem
             if "pubchem_id" in node:
