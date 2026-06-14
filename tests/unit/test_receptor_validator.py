@@ -68,6 +68,58 @@ class TestUniprotClash:
         assert _WARNING_REGEX.search(warnings[0]) is not None
 
 
+class TestCommaJoinedHeterodimer:
+    """A Class C heterodimer where the model crammed both receptor slugs into the
+    single uniprot_entry_name field ('grm2_human, grm7_human', chains 'A, B').
+    Each slug genuinely sits on one reported chain, so this must MATCH -- not raise
+    a false UNIPROT_CLASH (the comma-join variant the earlier single-slug fix did
+    not cover)."""
+
+    def test_comma_joined_both_present_matches(self) -> None:
+        data: dict[str, Any] = {
+            "receptor_info": {
+                "uniprot_entry_name": "grm2_human, grm7_human",
+                "chain_id": "A, B",
+            }
+        }
+        enriched = _make_enriched(
+            [_make_entity(["A"], ["grm2_human"]), _make_entity(["B"], ["grm7_human"])]
+        )
+        warnings = validate_receptor_identity("7EPD", data, enriched)
+        assert data["receptor_info"]["validation_status"] == VALIDATION_RECEPTOR_MATCH
+        assert not any("UNIPROT_CLASH" in w for w in warnings)
+
+    def test_comma_joined_none_present_still_clashes(self) -> None:
+        # Genuine-fusion-mask protection preserved: if NEITHER joined slug is on any
+        # reported chain, it is still a clash.
+        data: dict[str, Any] = {
+            "receptor_info": {
+                "uniprot_entry_name": "grm2_human, grm7_human",
+                "chain_id": "A",
+            }
+        }
+        enriched = _make_enriched([_make_entity(["A"], ["5ht2a_human"])])
+        warnings = validate_receptor_identity("TEST", data, enriched)
+        assert data["receptor_info"]["validation_status"] == VALIDATION_UNIPROT_CLASH
+        assert any("UNIPROT_CLASH" in w for w in warnings)
+
+    def test_comma_joined_one_real_one_fake_matches_on_real(self) -> None:
+        # Leniency by design (two-layer defence): if at least one joined slug is
+        # genuinely on a reported chain, identity is MATCHED here. Catching a
+        # hallucinated second slug is the integrity checker's job (per-slug UniProtKB
+        # lookup), not this structural-presence validator's.
+        data: dict[str, Any] = {
+            "receptor_info": {
+                "uniprot_entry_name": "grm2_human, hallucinated_human",
+                "chain_id": "A, B",
+            }
+        }
+        enriched = _make_enriched([_make_entity(["A"], ["grm2_human"])])
+        warnings = validate_receptor_identity("TEST", data, enriched)
+        assert data["receptor_info"]["validation_status"] == VALIDATION_RECEPTOR_MATCH
+        assert not any("UNIPROT_CLASH" in w for w in warnings)
+
+
 class TestMissingChain:
     def test_chain_not_found(self) -> None:
         data: dict[str, Any] = {
