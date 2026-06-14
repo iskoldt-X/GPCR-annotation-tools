@@ -83,7 +83,10 @@ TIMEOUT_UNIPROT_FASTA: int = 10
 
 TIMEOUT_PUBCHEM_CID: int = 20
 TIMEOUT_PUBCHEM_SYNONYMS: int = 60
-TIMEOUT_PUBCHEM_VALIDATION: int = 5
+# PubChem's /description endpoint routinely takes 4-6s, so a tight timeout leaves
+# almost no headroom and times out on any latency blip (or under a request burst).
+# 15s matches the RCSB GraphQL validation timeout; the synonyms timeout is already 60s.
+TIMEOUT_PUBCHEM_VALIDATION: int = 15
 
 TIMEOUT_CROSSREF: int = 15
 TIMEOUT_UNPAYWALL: int = 15
@@ -99,6 +102,11 @@ TIMEOUT_RCSB_STRUCTURE: int = 60  # coordinate files are larger than metadata re
 SLEEP_NCBI_RATE_LIMIT: float = 0.4
 SLEEP_RCSB_POST_REQUEST: float = 1.0
 SLEEP_VALIDATION_RETRY: float = 1.0
+# Exponential backoff between validation retries: the nth retry waits
+# SLEEP_VALIDATION_RETRY * VALIDATION_RETRY_BACKOFF_FACTOR**attempt (1s, 3s, ...),
+# so a transient rate-limit/congestion spike gets a widening gap to recover rather
+# than three rapid-fire retries that all hit the same throttle.
+VALIDATION_RETRY_BACKOFF_FACTOR: int = 3
 SLEEP_GEMINI_429: float = 5.0
 
 # ---------------------------------------------------------------------------

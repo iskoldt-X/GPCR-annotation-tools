@@ -44,6 +44,7 @@ from gpcr_tools.config import (
     SLEEP_VALIDATION_RETRY,
     TIMEOUT_UNIPROT_FASTA,
     UNIPROT_REST_URL,
+    VALIDATION_RETRY_BACKOFF_FACTOR,
 )
 from gpcr_tools.validator.cache import SequenceCache
 
@@ -173,13 +174,13 @@ def get_sequence_from_uniprot(
                 )
                 cache.mark_unavailable(accession)
                 return None
-            time.sleep(SLEEP_VALIDATION_RETRY)
+            time.sleep(SLEEP_VALIDATION_RETRY * VALIDATION_RETRY_BACKOFF_FACTOR**attempt)
         except (requests.RequestException, OSError) as exc:
             if attempt == API_MAX_RETRIES - 1:
                 logger.warning("UniProt FASTA fetch error for '%s': %s", accession, exc)
                 cache.mark_unavailable(accession)
                 return None
-            time.sleep(SLEEP_VALIDATION_RETRY)
+            time.sleep(SLEEP_VALIDATION_RETRY * VALIDATION_RETRY_BACKOFF_FACTOR**attempt)
 
     return None
 

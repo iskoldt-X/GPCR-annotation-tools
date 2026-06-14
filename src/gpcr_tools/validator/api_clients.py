@@ -24,6 +24,7 @@ from gpcr_tools.config import (
     TIMEOUT_RCSB_GRAPHQL_VALIDATION,
     TIMEOUT_UNIPROT_VALIDATION,
     UNIPROT_REST_URL,
+    VALIDATION_RETRY_BACKOFF_FACTOR,
 )
 from gpcr_tools.validator.cache import ValidationCache
 
@@ -83,12 +84,12 @@ def check_uniprot_existence(
                     "UniProt unavailable (HTTP %s) for '%s'", resp.status_code, entry_name
                 )
                 return None
-            time.sleep(SLEEP_VALIDATION_RETRY)
+            time.sleep(SLEEP_VALIDATION_RETRY * VALIDATION_RETRY_BACKOFF_FACTOR**attempt)
         except (requests.RequestException, OSError) as exc:
             if attempt == API_MAX_RETRIES - 1:
                 logger.warning("UniProt API error for '%s': %s", entry_name, exc)
                 return None
-            time.sleep(SLEEP_VALIDATION_RETRY)
+            time.sleep(SLEEP_VALIDATION_RETRY * VALIDATION_RETRY_BACKOFF_FACTOR**attempt)
     return None
 
 
@@ -128,12 +129,12 @@ def check_pubchem_existence(
             if attempt == API_MAX_RETRIES - 1:
                 logger.warning("PubChem unavailable (HTTP %s) for '%s'", resp.status_code, cid)
                 return None
-            time.sleep(SLEEP_VALIDATION_RETRY)
+            time.sleep(SLEEP_VALIDATION_RETRY * VALIDATION_RETRY_BACKOFF_FACTOR**attempt)
         except (requests.RequestException, OSError) as exc:
             if attempt == API_MAX_RETRIES - 1:
                 logger.warning("PubChem API error for '%s': %s", cid, exc)
                 return None
-            time.sleep(SLEEP_VALIDATION_RETRY)
+            time.sleep(SLEEP_VALIDATION_RETRY * VALIDATION_RETRY_BACKOFF_FACTOR**attempt)
     return None
 
 
@@ -200,7 +201,7 @@ def check_pubchem_synonym_match(
             if attempt == API_MAX_RETRIES - 1:
                 logger.warning("PubChem synonym API error for '%s': %s", cid, exc)
                 return None
-            time.sleep(SLEEP_VALIDATION_RETRY)
+            time.sleep(SLEEP_VALIDATION_RETRY * VALIDATION_RETRY_BACKOFF_FACTOR**attempt)
             continue
 
         if resp.status_code == 404:
@@ -212,7 +213,7 @@ def check_pubchem_synonym_match(
             if attempt == API_MAX_RETRIES - 1:
                 logger.warning("PubChem synonym API status %d for '%s'", resp.status_code, cid)
                 return None
-            time.sleep(SLEEP_VALIDATION_RETRY)
+            time.sleep(SLEEP_VALIDATION_RETRY * VALIDATION_RETRY_BACKOFF_FACTOR**attempt)
             continue
 
         # HTTP 200 is a definitive verdict. A malformed body will not improve on
@@ -316,7 +317,7 @@ def fetch_polymer_features(pdb_id: str) -> dict[str, Any] | None:
                 if attempt == API_MAX_RETRIES - 1:
                     logger.warning("[%s] GraphQL returned status %d", pdb_id, resp.status_code)
                     return None
-                time.sleep(SLEEP_VALIDATION_RETRY)
+                time.sleep(SLEEP_VALIDATION_RETRY * VALIDATION_RETRY_BACKOFF_FACTOR**attempt)
                 continue
             data = resp.json()
             if data.get("errors"):
@@ -335,7 +336,7 @@ def fetch_polymer_features(pdb_id: str) -> dict[str, Any] | None:
             if attempt == API_MAX_RETRIES - 1:
                 logger.warning("[%s] GraphQL fetch error: %s", pdb_id, exc)
                 return None
-            time.sleep(SLEEP_VALIDATION_RETRY)
+            time.sleep(SLEEP_VALIDATION_RETRY * VALIDATION_RETRY_BACKOFF_FACTOR**attempt)
     return None
 
 
@@ -378,7 +379,7 @@ def fetch_polymer_alignment(
                 if attempt == API_MAX_RETRIES - 1:
                     logger.warning("[%s] alignment GraphQL status %d", pdb_id, resp.status_code)
                     return None
-                time.sleep(SLEEP_VALIDATION_RETRY)
+                time.sleep(SLEEP_VALIDATION_RETRY * VALIDATION_RETRY_BACKOFF_FACTOR**attempt)
                 continue
             data = resp.json()
             if data.get("errors"):
@@ -395,7 +396,7 @@ def fetch_polymer_alignment(
             if attempt == API_MAX_RETRIES - 1:
                 logger.warning("[%s] alignment GraphQL fetch error: %s", pdb_id, exc)
                 return None
-            time.sleep(SLEEP_VALIDATION_RETRY)
+            time.sleep(SLEEP_VALIDATION_RETRY * VALIDATION_RETRY_BACKOFF_FACTOR**attempt)
     if data is None:
         return None
 
