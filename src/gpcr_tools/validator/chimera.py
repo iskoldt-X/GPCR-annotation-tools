@@ -165,6 +165,14 @@ def get_sequence_from_uniprot(
                 # Definitive: the accession does not exist. Abstain (no useful
                 # "empty sequence" to cache), do not retry.
                 return None
+            if resp.status_code == 400:
+                # Bad Request: a malformed accession, not a transient outage. Abstain
+                # immediately without retry (and without marking unavailable -- the
+                # service is fine, the query was not).
+                logger.warning(
+                    "UniProt FASTA rejected query (HTTP 400) for '%s' (malformed?)", accession
+                )
+                return None
             # 5xx / 429 / other: service unavailable, not a verdict. Retry, then abstain.
             if attempt == API_MAX_RETRIES - 1:
                 logger.warning(

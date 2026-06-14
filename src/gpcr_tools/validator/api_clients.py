@@ -77,6 +77,16 @@ def check_uniprot_existence(
             if resp.status_code == 404:
                 cache.set(key, False)
                 return False
+            if resp.status_code == 400:
+                # Bad Request: the query itself is malformed (e.g. a joined multi-slug
+                # name like "a_human, b_human"). The service is fine; retrying the same
+                # query just repeats the rejection. Abstain immediately -- we cannot know
+                # existence from a malformed query -- and never cache it.
+                logger.warning(
+                    "UniProt rejected query (HTTP 400) for '%s' (malformed entry name?)",
+                    entry_name,
+                )
+                return None
             # 5xx / 429 / other: the service is unavailable, not a verdict that the
             # entry is absent. Retry, then abstain -- never cache a transient status.
             if attempt == API_MAX_RETRIES - 1:
@@ -124,6 +134,11 @@ def check_pubchem_existence(
             if resp.status_code == 404:
                 cache.set(key, False)
                 return False
+            if resp.status_code == 400:
+                # Bad Request: a malformed query, not a transient outage. Abstain
+                # immediately without retry; never cache it.
+                logger.warning("PubChem rejected query (HTTP 400) for '%s' (malformed?)", cid)
+                return None
             # 5xx / 429 / other: service unavailable, not a verdict. Retry, then
             # abstain -- never cache a transient status.
             if attempt == API_MAX_RETRIES - 1:
@@ -208,6 +223,11 @@ def check_pubchem_synonym_match(
             # CID has no synonyms on record: definitive miss, safe to cache.
             cache.set(clean_cid, [])
             return False
+        if resp.status_code == 400:
+            # Bad Request: a malformed query, not a transient outage. Abstain
+            # immediately without retry; never cache it.
+            logger.warning("PubChem synonym rejected query (HTTP 400) for '%s' (malformed?)", cid)
+            return None
         if resp.status_code != 200:
             # Transient/unexpected status -- abstain, do not cache. Retry first.
             if attempt == API_MAX_RETRIES - 1:
@@ -312,6 +332,11 @@ def fetch_polymer_features(pdb_id: str) -> dict[str, Any] | None:
             resp = requests.post(
                 _GRAPHQL_URL, json=payload, timeout=TIMEOUT_RCSB_GRAPHQL_VALIDATION
             )
+            if resp.status_code == 400:
+                # Bad Request: a malformed query, not a transient outage -- retrying
+                # repeats the rejection. Abstain immediately.
+                logger.warning("[%s] GraphQL rejected query (HTTP 400)", pdb_id)
+                return None
             if resp.status_code != 200:
                 # Transient/unexpected status -- retry, then abstain.
                 if attempt == API_MAX_RETRIES - 1:
@@ -374,6 +399,11 @@ def fetch_polymer_alignment(
             resp = requests.post(
                 RCSB_GRAPHQL_URL, json=payload, timeout=TIMEOUT_RCSB_GRAPHQL_VALIDATION
             )
+            if resp.status_code == 400:
+                # Bad Request: a malformed query, not a transient outage -- retrying
+                # repeats the rejection. Abstain immediately.
+                logger.warning("[%s] alignment GraphQL rejected query (HTTP 400)", pdb_id)
+                return None
             if resp.status_code != 200:
                 # Transient/unexpected status -- retry, then abstain.
                 if attempt == API_MAX_RETRIES - 1:
