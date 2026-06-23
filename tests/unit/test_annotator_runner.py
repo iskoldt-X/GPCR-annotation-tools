@@ -1298,6 +1298,142 @@ def test_packing_keeps_same_paper_pdbs_together(tmp_path, monkeypatch):
     assert keys.index("CCC") - keys.index("AAA") == 1 or keys.index("AAA") - keys.index("CCC") == 1
 
 
+# ---------------------------------------------------------------------------
+# Bounded retry around the Files-API PDF upload (transient vs fatal split)
+# ---------------------------------------------------------------------------
+
+
+def test_upload_retries_transient_then_succeeds(tmp_path, monkeypatch):
+    """A transient upload failure (5xx) is retried; once it succeeds the PDB is
+    still submitted, so a hiccup no longer silently drops a structure."""
+    from google.genai.errors import ServerError
+
+    config, client = _setup_multi_pdb_batch(tmp_path, monkeypatch, ["7W55"])
+    client.batches.create.return_value.name = "batchJobs/j0"
+    # Don't actually sleep through the backoff.
+    monkeypatch.setattr("gpcr_tools.annotator.runner.time.sleep", lambda *_: None)
+
+    good = MagicMock()
+    good.uri, good.name = "u", "files/pdf-7w55"
+    jsonl = MagicMock()
+    jsonl.uri, jsonl.name = "src", "files/jsonl"
+
+    calls = {"pdf": 0}
+
+    def _upload(*, file, **kwargs):
+        if str(file).endswith(".jsonl"):
+            return jsonl
+        calls["pdf"] += 1
+        if calls["pdf"] == 1:
+            raise ServerError(503, {"error": {"message": "unavailable"}})
+        return good
+
+    client.files.upload.side_effect = _upload
+
+    runner.build_and_submit_batch(["7W55"], "Prompt", num_runs=1)
+
+    # The PDF upload was attempted at least twice (one transient failure + retry),
+    # and the job was submitted with the recovered upload.
+    assert calls["pdf"] >= 2
+    assert client.batches.create.call_count == 1
+    registry = json.loads(config.uploaded_files_registry_file.read_text())
+    assert registry["7W55"]["uri"] == "u"
+
+
+def test_upload_retries_429_then_succeeds(tmp_path, monkeypatch):
+    """A 429 rate-limit surfaces as a ClientError, but ``e.code != 429`` is False,
+    so it must fall through to RETRY (not abstain like a fatal 4xx). Once it
+    succeeds the PDB is still submitted."""
+    from google.genai.errors import ClientError
+
+    config, client = _setup_multi_pdb_batch(tmp_path, monkeypatch, ["7W55"])
+    client.batches.create.return_value.name = "batchJobs/j0"
+    # Don't actually sleep through the backoff.
+    monkeypatch.setattr("gpcr_tools.annotator.runner.time.sleep", lambda *_: None)
+
+    good = MagicMock()
+    good.uri, good.name = "u", "files/pdf-7w55"
+    jsonl = MagicMock()
+    jsonl.uri, jsonl.name = "src", "files/jsonl"
+
+    calls = {"pdf": 0}
+
+    def _upload(*, file, **kwargs):
+        if str(file).endswith(".jsonl"):
+            return jsonl
+        calls["pdf"] += 1
+        if calls["pdf"] == 1:
+            raise ClientError(429, {"error": {"message": "rate limited"}})
+        return good
+
+    client.files.upload.side_effect = _upload
+
+    runner.build_and_submit_batch(["7W55"], "Prompt", num_runs=1)
+
+    # The 429 was RETRIED (not treated as a fatal 4xx abstain): the PDF upload
+    # was attempted at least twice and the job was created.
+    assert calls["pdf"] >= 2
+    assert client.batches.create.call_count == 1
+    registry = json.loads(config.uploaded_files_registry_file.read_text())
+    assert registry["7W55"]["uri"] == "u"
+
+
+def test_upload_exhaustion_drops_pdb_and_warns(tmp_path, monkeypatch, caplog):
+    """When every upload attempt fails transiently, the PDB is dropped, NO job is
+    created, NO generation request is sent, and the drop is logged as a warning
+    naming the consequence."""
+    import logging
+
+    from google.genai.errors import ServerError
+
+    config, client = _setup_multi_pdb_batch(tmp_path, monkeypatch, ["7W55"])
+    monkeypatch.setattr("gpcr_tools.annotator.runner.time.sleep", lambda *_: None)
+
+    def _upload(*, file, **kwargs):
+        raise ServerError(503, {"error": {"message": "still unavailable"}})
+
+    client.files.upload.side_effect = _upload
+
+    with caplog.at_level(logging.WARNING, logger="gpcr_tools.annotator.runner"):
+        runner.build_and_submit_batch(["7W55"], "Prompt", num_runs=1)
+
+    # No batch job: nothing was submitted, so no billed generation requests.
+    assert client.batches.create.call_count == 0
+    assert not config.batch_jobs_registry_file.exists()
+    # The drop is surfaced as a warning naming the consequence.
+    drop_warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "dropped from this batch" in r.getMessage()
+    ]
+    assert drop_warnings, "the silent drop must be logged as a warning"
+
+
+def test_upload_fatal_4xx_aborts_without_retry(tmp_path, monkeypatch):
+    """A fatal 4xx (ClientError, code != 429) won't change on retry: exactly ONE
+    upload attempt is made, then the PDB is skipped (no job)."""
+    from google.genai.errors import ClientError
+
+    config, client = _setup_multi_pdb_batch(tmp_path, monkeypatch, ["7W55"])
+    monkeypatch.setattr("gpcr_tools.annotator.runner.time.sleep", lambda *_: None)
+
+    calls = {"pdf": 0}
+
+    def _upload(*, file, **kwargs):
+        calls["pdf"] += 1
+        raise ClientError(400, {"error": {"message": "bad request"}})
+
+    client.files.upload.side_effect = _upload
+
+    runner.build_and_submit_batch(["7W55"], "Prompt", num_runs=1)
+
+    # A fatal 4xx is not retried -- exactly one upload attempt, and the PDB is
+    # skipped so no job is created.
+    assert calls["pdf"] == 1
+    assert client.batches.create.call_count == 0
+    assert not config.batch_jobs_registry_file.exists()
+
+
 def test_storage_helpers(tmp_path, monkeypatch):
     """resolve_doi / canonical_pdf_name / sanitize_doi behave as documented."""
     from gpcr_tools.config import sanitize_doi

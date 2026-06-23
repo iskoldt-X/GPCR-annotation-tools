@@ -234,10 +234,22 @@ def _run_auto_accept(target_pdb: str | None) -> None:
         print("auto-accept: nothing to process", file=sys.stderr)
         return
 
+    from gpcr_tools.config import AGG_STATUS_SKIPPED
+    from gpcr_tools.validator.gating import is_pdb_gated
+
     for pdb_id in pending_pdbs:
-        main_data, _controversies, _validation = load_pdb_data(pdb_id)
+        main_data, controversies, validation = load_pdb_data(pdb_id)
         if not main_data:
             update_processed_log(pdb_id, "failed")
+            continue
+
+        # A gated PDB needs a human; mirror the interactive UI, which disables
+        # accept-all when any source gates. Skip it rather than silently accepting.
+        oligo = main_data.get("oligomer_analysis")
+        if is_pdb_gated(validation, oligo, controversies):
+            log_audit_trail(pdb_id, "*", "auto_accept_skip_gated", "N/A", "SKIPPED")
+            update_processed_log(pdb_id, AGG_STATUS_SKIPPED)
+            print(f"auto-accept: SKIPPED {pdb_id} (gated; needs review)", file=sys.stderr)
             continue
 
         log_audit_trail(pdb_id, "*", "auto_accept", "N/A", "ACCEPTED")

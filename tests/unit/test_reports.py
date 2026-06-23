@@ -29,6 +29,19 @@ def _write_validation(cfg: Any, pdb: str, **fields: Any) -> None:
     (vdir / f"{pdb}_validation.json").write_text(json.dumps(fields), encoding="utf-8")
 
 
+def _write_aggregated(cfg: Any, pdb: str, **fields: Any) -> None:
+    """Write a sibling aggregated/<PDB>.json (where oligomer_analysis lives)."""
+    cfg.aggregated_dir.mkdir(parents=True, exist_ok=True)
+    (cfg.aggregated_dir / f"{pdb}.json").write_text(json.dumps(fields), encoding="utf-8")
+
+
+def _write_voting_log(cfg: Any, pdb: str, records: list) -> None:
+    """Write a sibling aggregated/logs/<PDB>_voting_log.json (a JSON list)."""
+    logs_dir = cfg.aggregated_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    (logs_dir / f"{pdb}_voting_log.json").write_text(json.dumps(records), encoding="utf-8")
+
+
 class TestPdfCoverage:
     def test_empty(self, cfg: Any) -> None:
         assert "no download log" in reports.report_pdf_coverage()
@@ -257,3 +270,212 @@ class TestRunManifest:
         rendered = reports._render_id_list(ids, limit=10)
         assert "+50 more" in rendered
         assert reports._render_id_list([]) == "(none)"
+
+
+class TestReconciliation:
+    """Account for every target by subtraction; surface a silently-dropped PDB."""
+
+    def test_upload_failed_signature_flagged(self, cfg: Any) -> None:
+        """A target whose PDF is on disk but produced zero run dirs is the
+        upload-failed-then-dropped signature: it lands in
+        ``no_runs_with_pdf_present`` with unaccounted_count == 1."""
+        _write_targets(cfg, ["GOOD", "LOST"])
+        _write_runs(cfg, "GOOD", "m", 10)  # completed in full
+        cfg.papers_dir.mkdir(parents=True, exist_ok=True)
+        # LOST has a PDF on disk but never produced an AI run directory.
+        (cfg.papers_dir / "LOST.pdf").write_text("%PDF", encoding="utf-8")
+        recon = reports.build_run_manifest(model_name="m", num_runs=10)["reconciliation"]
+        assert recon["unaccounted_count"] == 1
+        assert recon["by_reason"]["no_runs_with_pdf_present"] == ["LOST"]
+
+    def test_zero_run_distinct_from_incomplete(self, cfg: Any) -> None:
+        """A zero-run dropped PDB is reconciliation-unaccounted, NOT counted as a
+        ran-but-incomplete PDB (incomplete is strictly 0 < runs < expected)."""
+        _write_targets(cfg, ["PART", "LOST"])
+        _write_runs(cfg, "PART", "m", 3)  # incomplete, has run dir
+        cfg.papers_dir.mkdir(parents=True, exist_ok=True)
+        (cfg.papers_dir / "LOST.pdf").write_text("%PDF", encoding="utf-8")
+        manifest = reports.build_run_manifest(model_name="m", num_runs=10)
+        # PART is incomplete (so accounted), LOST is the unaccounted drop.
+        assert manifest["run_counts"]["incomplete_count"] == 1
+        assert {i["pdb_id"] for i in manifest["run_counts"]["incomplete"]} == {"PART"}
+        recon = manifest["reconciliation"]
+        assert recon["unaccounted_count"] == 1
+        assert recon["by_reason"]["no_runs_with_pdf_present"] == ["LOST"]
+
+    def test_genuine_no_pdf_not_double_counted(self, cfg: Any) -> None:
+        """A genuine no-PDF target stays ONLY in no_pdf and is fully accounted —
+        reconciliation must not also flag it as unaccounted."""
+        _write_targets(cfg, ["NOPDF"])
+        _write_download_log(cfg, {"NOPDF": {"status": "failed_no_doi", "file_path": None}})
+        cfg.papers_dir.mkdir(parents=True, exist_ok=True)  # no PDF on disk
+        manifest = reports.build_run_manifest(model_name="m", num_runs=10)
+        assert manifest["no_pdf"]["by_reason"]["failed_no_doi"] == ["NOPDF"]
+        assert manifest["reconciliation"]["unaccounted_count"] == 0
+
+    def test_clean_run_invariant_zero_unaccounted(self, cfg: Any) -> None:
+        """The clean-run invariant: targets = full + incomplete + no_pdf (union),
+        so unaccounted_count == 0 (mirrors the 40-target clean reference run)."""
+        _write_targets(cfg, ["FULL1", "FULL2", "NOPDF"])
+        _write_runs(cfg, "FULL1", "m", 10)
+        _write_runs(cfg, "FULL2", "m", 10)
+        _write_download_log(cfg, {"NOPDF": {"status": "failed_no_doi", "file_path": None}})
+        cfg.papers_dir.mkdir(parents=True, exist_ok=True)
+        recon = reports.build_run_manifest(model_name="m", num_runs=10)["reconciliation"]
+        assert recon["unaccounted_count"] == 0
+        assert recon["by_reason"] == {}
+
+    def test_batch_job_failed_reason(self, cfg: Any) -> None:
+        """A zero-run leftover that is a member of a FAILED batch job and is not
+        otherwise PDF-present is labelled ``batch_job_failed``.
+
+        Its paper was downloaded under the canonical DOI name, so the no-PDF
+        section (which resolves via the download log) does NOT count it as
+        missing — yet it produced no runs because its job died."""
+        from gpcr_tools.config import sanitize_doi
+
+        _write_targets(cfg, ["DEAD"])
+        _write_download_log(cfg, {"DEAD": {"status": "success_pdf_downloaded", "doi": "10.1/x"}})
+        cfg.papers_dir.mkdir(parents=True, exist_ok=True)
+        # The PDF exists under its canonical DOI name (resolvable only via the log).
+        (cfg.papers_dir / f"{sanitize_doi('10.1/x')}.pdf").write_text("%PDF", encoding="utf-8")
+        cfg.batch_jobs_registry_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg.batch_jobs_registry_file.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "jobs": {
+                        "batchJobs/x": {
+                            "job_name": "batchJobs/x",
+                            "status": "failed",
+                            "detect_advisory": {"DEAD": []},
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        recon = reports.build_run_manifest(model_name="m", num_runs=10)["reconciliation"]
+        assert recon["unaccounted_count"] == 1
+        assert recon["by_reason"]["batch_job_failed"] == ["DEAD"]
+
+    def test_bare_no_runs_else_branch(self, cfg: Any) -> None:
+        """A zero-run leftover with NO resolvable PDF and not in a failed job
+        falls to the bare ``no_runs`` label (the else branch). Exercised via the
+        helper directly: through the full manifest a no-PDF target is caught by
+        the no-PDF section, so this fallback is reached only on an inconsistency
+        between the two sections — pin it so the branch is covered."""
+        recon = reports._manifest_reconciliation(
+            cfg,
+            targets={"pdb_ids": ["BARE"]},
+            no_pdf={"by_reason": {}},
+            run_counts={"expected_runs": 10, "per_pdb": {}, "incomplete": []},
+        )
+        assert recon["unaccounted_count"] == 1
+        assert recon["by_reason"]["no_runs"] == ["BARE"]
+
+    def test_doi_only_pdf_leftover_is_pdf_present(self, cfg: Any) -> None:
+        """A leftover whose ONLY on-disk paper is the canonical DOI-named file
+        (DOI resolvable only via the download log) is correctly seen as
+        PDF-present -> ``no_runs_with_pdf_present``. Pins the log-aware fix: a
+        non-log-aware resolve would miss the DOI and mislabel it ``no_runs``."""
+        from gpcr_tools.config import sanitize_doi
+
+        _write_targets(cfg, ["DROP"])
+        # DOI lives only in the download log (no enriched metadata), so the DOI
+        # is resolvable only by passing the log to resolve_pdf_path.
+        _write_download_log(cfg, {"DROP": {"status": "success_pdf_downloaded", "doi": "10.9/z"}})
+        cfg.papers_dir.mkdir(parents=True, exist_ok=True)
+        (cfg.papers_dir / f"{sanitize_doi('10.9/z')}.pdf").write_text("%PDF", encoding="utf-8")
+        # No failed job, no run dirs: the upload-failed-then-dropped signature.
+        recon = reports.build_run_manifest(model_name="m", num_runs=10)["reconciliation"]
+        assert recon["unaccounted_count"] == 1
+        assert recon["by_reason"]["no_runs_with_pdf_present"] == ["DROP"]
+
+    def test_unaccounted_in_md_and_cli_summary(self, cfg: Any) -> None:
+        """The Unaccounted line appears in both the Markdown report and the CLI
+        summary, so a curator sees the drop count without opening the JSON."""
+        _write_targets(cfg, ["LOST"])
+        cfg.papers_dir.mkdir(parents=True, exist_ok=True)
+        (cfg.papers_dir / "LOST.pdf").write_text("%PDF", encoding="utf-8")
+        manifest = reports.build_run_manifest(model_name="m", num_runs=10)
+        md = reports.render_run_manifest_md(manifest)
+        assert "## Unaccounted" in md
+        assert "no_runs_with_pdf_present" in md
+        assert "LOST" in md
+        out = reports.report_run_manifest()
+        assert "Unaccounted: 1" in out
+
+
+class TestManifestQualityAllSourcesGate:
+    """The acceptable/gated split now reflects all three gating sources, not just
+    the validation log: an oligomer-only or voting-only finding gates a PDB even
+    when its own validation log is empty (the 4ZWJ / 2G87 bug). A truly-clean PDB
+    with no sibling artifacts still resolves to acceptable (tolerate-absence)."""
+
+    def test_oligomer_only_gates_4zwj_shape(self, cfg: Any) -> None:
+        # Empty validation log; the gating finding lives only in the aggregated
+        # oligomer analysis (OLIGOMER_DISAGREEMENT). Today the validation log is
+        # clean, yet the curator is stopped -- so the manifest must gate it too.
+        _write_validation(cfg, "4ZWJ", critical_warnings=[], algo_conflicts=[])
+        _write_aggregated(
+            cfg,
+            "4ZWJ",
+            oligomer_analysis={
+                "chain_id_override": {"applied": False},
+                "alerts": [
+                    {"type": "OLIGOMER_DISAGREEMENT", "message": "[OLIGOMER_DISAGREEMENT] confirm"}
+                ],
+                "all_gpcr_chains": [{"7tm_status": "COMPLETE"}],
+            },
+        )
+        q = reports.build_run_manifest(model_name="m", num_runs=10)["quality"]
+        assert q["gated"] == ["4ZWJ"]
+        assert q["acceptable"] == []
+        # The typed breakdown still reflects only the (empty) validation log.
+        assert q["warning_types"] == {}
+
+    def test_multi_copy_ligand_gates_2g87_shape(self, cfg: Any) -> None:
+        _write_validation(cfg, "2G87", critical_warnings=[], algo_conflicts=[])
+        _write_aggregated(
+            cfg,
+            "2G87",
+            oligomer_analysis={
+                "chain_id_override": {"applied": False},
+                "alerts": [
+                    {"type": "CONFIRMED_OLIGOMER", "message": "[CONFIRMED_OLIGOMER] matched"},
+                    {
+                        "type": "MULTI_COPY_LIGAND",
+                        "message": "[MULTI_COPY_LIGAND] at 'ligands[PLM]'",
+                    },
+                ],
+                "all_gpcr_chains": [{"7tm_status": "COMPLETE"}],
+            },
+        )
+        q = reports.build_run_manifest(model_name="m", num_runs=10)["quality"]
+        assert q["gated"] == ["2G87"]
+
+    def test_voting_controversy_gates(self, cfg: Any) -> None:
+        # Empty validation log, no oligomer findings, but a gating voting
+        # controversy (no explicit gating flag -> default True).
+        _write_validation(cfg, "VOTE", critical_warnings=[], algo_conflicts=[])
+        _write_voting_log(cfg, "VOTE", [{"path": "ligands[RET].name", "all_votes": {}}])
+        q = reports.build_run_manifest(model_name="m", num_runs=10)["quality"]
+        assert q["gated"] == ["VOTE"]
+
+    def test_minority_omission_alone_does_not_gate(self, cfg: Any) -> None:
+        # A minority-omission advisory (gating=False) is the only finding -> the
+        # PDB stays acceptable (advisory only).
+        _write_validation(cfg, "ADV", critical_warnings=[], algo_conflicts=[])
+        _write_voting_log(cfg, "ADV", [{"path": "ligands[X].name", "gating": False}])
+        q = reports.build_run_manifest(model_name="m", num_runs=10)["quality"]
+        assert q["acceptable"] == ["ADV"]
+        assert q["gated"] == []
+
+    def test_truly_clean_pdb_acceptable_with_no_siblings(self, cfg: Any) -> None:
+        # No aggregated record, no voting log, empty validation log: tolerate
+        # absence -> nothing gates -> acceptable.
+        _write_validation(cfg, "CLEAN", critical_warnings=[], algo_conflicts=[])
+        q = reports.build_run_manifest(model_name="m", num_runs=10)["quality"]
+        assert q["acceptable"] == ["CLEAN"]
+        assert q["gated"] == []

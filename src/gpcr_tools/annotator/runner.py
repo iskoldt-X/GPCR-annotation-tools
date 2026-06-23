@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from google.genai.errors import APIError
+from google.genai.errors import APIError, ClientError, ServerError
 
 from gpcr_tools.annotator.detect_orchestrator import build_tool_config, build_tool_for_signals
 from gpcr_tools.annotator.gemini_client import get_client
@@ -37,6 +37,8 @@ from gpcr_tools.config import (
     GEMINI_FILE_TTL_HOURS,
     GEMINI_MAX_RETRIES,
     GEMINI_MAX_WORKERS,
+    GEMINI_UPLOAD_BASE_BACKOFF,
+    GEMINI_UPLOAD_MAX_RETRIES,
     SLEEP_GEMINI_429,
     UPLOAD_DEDUP,
     get_config,
@@ -125,16 +127,44 @@ def _resolve_upload(
         else:
             return cached_uri, cached.get("name")
 
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        tmp_pdf = Path(tmp_dir) / f"{pdb_id}_compressed.pdf"
-        try:
-            actual_pdf = compress_pdf_if_needed(pdf_file, tmp_pdf)
-            uploaded_file = client.files.upload(
-                file=str(actual_pdf), config={"mime_type": "application/pdf"}
-            )
-        except Exception as e:
-            logger.error("[%s] Failed to upload PDF: %s", pdb_id, e)
-            return None, None
+    # Bounded retry around the compress + Files-API upload: a transient upload
+    # failure (5xx, a 429 rate-limit, or a network / compression hiccup) would
+    # otherwise drop this structure from the batch entirely. Exponential backoff
+    # mirrors the generation-retry idiom in ``do_run`` below. A fatal 4xx
+    # (ClientError, code != 429) won't change on retry, so abstain immediately —
+    # the same HTTP-400-abstains convention the validator API clients follow.
+    uploaded_file = None
+    # Seeded so the post-loop error log can never raise NameError if the retry
+    # budget were ever configured to 0 (the loop body would then never run).
+    last_exc: Exception = RuntimeError("no upload attempted")
+    for attempt in range(GEMINI_UPLOAD_MAX_RETRIES):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_pdf = Path(tmp_dir) / f"{pdb_id}_compressed.pdf"
+            try:
+                actual_pdf = compress_pdf_if_needed(pdf_file, tmp_pdf)
+                uploaded_file = client.files.upload(
+                    file=str(actual_pdf), config={"mime_type": "application/pdf"}
+                )
+                break
+            except ClientError as e:
+                if e.code != 429:
+                    # A fatal client error (e.g. HTTP 400) will not change on
+                    # retry — abstain now rather than burning the backoff budget.
+                    logger.error("[%s] Failed to upload PDF: %s", pdb_id, e)
+                    return None, None
+                last_exc = e
+            except ServerError as e:
+                # Provider 5xx — service unavailable, not a verdict. Retry.
+                last_exc = e
+            except Exception as e:
+                # Generic transient failure: a 429 surfaced as a bare APIError, or
+                # a network / OSError / compression hiccup. Fall through to retry.
+                last_exc = e
+        if attempt < GEMINI_UPLOAD_MAX_RETRIES - 1:
+            time.sleep(GEMINI_UPLOAD_BASE_BACKOFF * (2**attempt))
+    if uploaded_file is None:
+        logger.error("[%s] Failed to upload PDF: %s", pdb_id, last_exc)
+        return None, None
 
     # Stamp the REAL upload time (not the submit-time ``now``) so the TTL check
     # measures the file's actual age; record the deletable file ``name``, the DOI,
@@ -687,6 +717,16 @@ def build_and_submit_batch(
             client, config, registry, upload_key, pdb_id, pdf_file, doi, now
         )
         if not pdf_uri:
+            # The upload exhausted its retries (or hit a fatal error): this
+            # structure produced no requests, so it would silently vanish from
+            # the batch. Name the consequence so the loss is visible — it will be
+            # re-attempted on the next annotate pass (completed runs are skipped).
+            logger.warning(
+                "[%s] PDF upload failed after retries; this structure produced no AI "
+                "results and was dropped from this batch; it will be re-attempted on "
+                "the next annotate pass.",
+                pdb_id,
+            )
             continue
 
         detect_signals = load_detect_signals(pdb_id)

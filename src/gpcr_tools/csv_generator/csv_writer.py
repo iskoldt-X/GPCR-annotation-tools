@@ -192,15 +192,17 @@ def transform_for_csv(pdb_id: str, data: dict) -> dict[str, list[dict[str, str]]
     partners = data.get("signaling_partners") or {}
     if partners.get("g_protein"):
         gp = partners["g_protein"]
-        alpha_chain = _primary_chain((gp.get("alpha_subunit") or {}).get("chain_id"))
+        alpha = gp.get("alpha_subunit") or {}
+        alpha_chain = _primary_chain(alpha.get("chain_id"))
         beta_chain = _primary_chain((gp.get("beta_subunit") or {}).get("chain_id"))
         gamma_chain = _primary_chain((gp.get("gamma_subunit") or {}).get("chain_id"))
         rows_map["g_proteins.csv"].append(
             {
                 "PDB": pdb_id,
-                "Alpha_UniProt": sanitize_value(
-                    (gp.get("alpha_subunit") or {}).get("uniprot_entry_name")
-                ),
+                # The deposited/voted alpha slug, unchanged. The alpha5-derived
+                # functional coupling identity and the modelled backbone scaffold
+                # are exported as the distinct trailing columns below.
+                "Alpha_UniProt": sanitize_value(alpha.get("uniprot_entry_name")),
                 "Alpha_ChainID": alpha_chain,
                 "Alpha_label_asym_id": map_label_asym_id(alpha_chain, label_map),
                 "Beta_UniProt": sanitize_value(
@@ -214,6 +216,8 @@ def transform_for_csv(pdb_id: str, data: dict) -> dict[str, list[dict[str, str]]
                 "Gamma_ChainID": gamma_chain,
                 "Gamma_label_asym_id": map_label_asym_id(gamma_chain, label_map),
                 "Note": sanitize_value(gp.get("note")),
+                "Alpha_functional_coupling": sanitize_value(alpha.get("functional_coupling")),
+                "Alpha_backbone": sanitize_value(alpha.get("backbone")),
             }
         )
 

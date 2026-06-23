@@ -8,8 +8,10 @@ import csv
 from dataclasses import replace
 from unittest.mock import patch
 
+from gpcr_tools.aggregator.runner import _prune_excluded_buffer_ligands
 from gpcr_tools.config import (
     CSV_SCHEMA,
+    VALIDATION_EXCLUDED_BUFFER,
     VALIDATION_GHOST_LIGAND,
     VALIDATION_MATCHED_SMALL_MOLECULE,
 )
@@ -71,9 +73,15 @@ class TestGpcrdbColumnContract:
             "Gamma_ChainID",
             "Note",
         )
-        assert {"Alpha_label_asym_id", "Beta_label_asym_id", "Gamma_label_asym_id"} <= set(
-            CSV_SCHEMA["g_proteins.csv"][8:]
-        )
+        # The label_asym_id columns and the alpha5 functional-coupling / backbone
+        # columns are appended after the positional contract, never inserted.
+        assert {
+            "Alpha_label_asym_id",
+            "Beta_label_asym_id",
+            "Gamma_label_asym_id",
+            "Alpha_functional_coupling",
+            "Alpha_backbone",
+        } <= set(CSV_SCHEMA["g_proteins.csv"][8:])
 
     def test_arrestins_core_columns(self):
         assert CSV_SCHEMA["arrestins.csv"][:4] == ("PDB", "UniProt", "ChainID", "Note")
@@ -174,6 +182,27 @@ class TestTransformForCSV:
         assert row["Beta_UniProt"] == "gbb1_human"
         assert row["Gamma_UniProt"] == "gbg2_human"
 
+    def test_g_protein_functional_coupling_and_backbone_columns(self, sample_pdb_data):
+        # The aggregator records the alpha5 functional coupling identity and the
+        # modelled backbone scaffold as distinct fields on the alpha subunit; the
+        # CSV exports them as trailing columns while Alpha_UniProt stays the
+        # deposited slug.
+        data = copy.deepcopy(sample_pdb_data)
+        alpha = data["signaling_partners"]["g_protein"]["alpha_subunit"]
+        alpha["functional_coupling"] = "gnaq_human"
+        alpha["backbone"] = "gnas2_human"
+        row = transform_for_csv("TEST1", data)["g_proteins.csv"][0]
+        assert row["Alpha_UniProt"] == "gnas2_human"
+        assert row["Alpha_functional_coupling"] == "gnaq_human"
+        assert row["Alpha_backbone"] == "gnas2_human"
+
+    def test_g_protein_new_columns_blank_when_absent(self, sample_pdb_data):
+        # When the aggregator left functional_coupling unset (family mismatch /
+        # off-roster), the column is blank rather than a stray "None".
+        row = transform_for_csv("TEST1", sample_pdb_data)["g_proteins.csv"][0]
+        assert row["Alpha_functional_coupling"] == ""
+        assert row["Alpha_backbone"] == ""
+
     def test_g_protein_chain_collapses_multivalue(self, sample_pdb_data):
         # Redundant complexes in the asymmetric unit give a multi-chain subunit
         # value ("C, D"); it collapses to the primary complex's chain.
@@ -199,6 +228,26 @@ class TestTransformForCSV:
         )
         names = [r["Name"] for r in transform_for_csv("TEST1", data)["ligands.csv"]]
         assert "Apo" not in names
+        assert "Adenosine" in names
+
+    def test_excluded_buffer_pruned_upstream_yields_no_ligand_row(self, sample_pdb_data):
+        # Belt-and-suspenders: a BOG / NAG-shaped EXCLUDED_BUFFER ligand is dropped
+        # upstream by the aggregator's prune helper, so it never reaches the CSV
+        # transform and produces no ligands.csv row -- the bona-fide ligand stays.
+        data = copy.deepcopy(sample_pdb_data)
+        data["ligands"].append(
+            {
+                "name": "n-octyl-beta-D-glucoside",
+                "chem_comp_id": "BOG",
+                "chain_id": "A",
+                "type": "small-molecule",
+                "role": {"value": "Cofactor"},
+                "validation_status": VALIDATION_EXCLUDED_BUFFER,
+            }
+        )
+        _prune_excluded_buffer_ligands(data)
+        names = [r["Name"] for r in transform_for_csv("TEST1", data)["ligands.csv"]]
+        assert "n-octyl-beta-D-glucoside" not in names
         assert "Adenosine" in names
 
     def test_nanobody_dispatch(self, sample_pdb_data):

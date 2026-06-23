@@ -37,6 +37,7 @@ from gpcr_tools.csv_generator.validation_display import (
     display_validation_alert,
     get_relevant_validation_warnings,
 )
+from gpcr_tools.validator.gating import has_gating_controversy as _controversy_gates
 
 
 def _resolve_list_key_field(path: str) -> str | None:
@@ -119,8 +120,11 @@ def has_gating_controversy(controversies: dict) -> bool:
     controversy (a near-tie / genuine disagreement) still gates. The advisory
     records remain in the controversy map so they stay visible during review;
     this helper only excludes them from the accept-all gating decision.
+
+    Delegates to the shared gating predicate so the curator UI, the auto-accept
+    pass, and the run manifest decide controversy gating identically.
     """
-    return any(c.get("gating", True) for c in controversies.values())
+    return _controversy_gates(controversies)
 
 
 def has_downstream_controversy(path_prefix: str, controversies: dict) -> bool:

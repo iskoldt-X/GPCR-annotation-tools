@@ -152,6 +152,15 @@ GEMINI_MAX_WORKERS: int = 10
 # so a re-submission after a long-failed batch doesn't embed a dead fileUri.
 GEMINI_FILE_TTL_HOURS: int = 47
 
+# Bounded retry for the paper-PDF upload to the FREE Files API (this retries the
+# upload step, not the billed generation): a transient upload failure would
+# otherwise silently drop a structure from the batch (no requests, no results).
+# Backoff is exponential: GEMINI_UPLOAD_BASE_BACKOFF * (2 ** attempt). The loop
+# sleeps only BETWEEN attempts, so at 3 attempts it waits ~2/4s across 3 attempts
+# (two sleeps; none after the final attempt).
+GEMINI_UPLOAD_MAX_RETRIES: int = 3
+GEMINI_UPLOAD_BASE_BACKOFF: float = 2.0
+
 # Cap on the number of generation requests packed into one submitted batch job.
 # The full corpus (thousands of structures x GEMINI_DEFAULT_RUNS runs) is far
 # more than one job should carry: an oversized submission risks being rejected
@@ -990,6 +999,28 @@ CHIMERA_SUBTYPE_INSEPARABLE_SET: str = "inseparable_set"
 CHIMERA_SUBTYPE_FAMILY_ONLY: str = "family_only"
 CHIMERA_SUBTYPE_LOW_CONFIDENCE: str = "low_confidence"
 
+# Aggregator-owned provenance marker recorded on the G-alpha alpha-subunit:
+# how far the reported subtype was verified. Pure provenance for the curator and
+# downstream consumer; it never gates accept-all.
+#   RESOLVED          the alpha5 window resolves a single subtype on its own.
+#   FAMILY_VERIFIED   the alpha5 confirms the coupling family and the model's
+#                     subtype is family-consistent (the alpha5 cannot separate
+#                     the subtype, so the specific member follows the model's
+#                     construct-name reading within a verified family).
+#   CONSTRUCT_NAME    neither family nor subtype was verified against the alpha5
+#                     (the family disagreed, the alpha5 was inconclusive, or no
+#                     model subtype was offered); the subtype, if any, rests on
+#                     the model's construct-name reading alone.
+SUBTYPE_BASIS_RESOLVED: str = "resolved"
+SUBTYPE_BASIS_FAMILY_VERIFIED: str = "family-verified"
+SUBTYPE_BASIS_CONSTRUCT_NAME: str = "construct-name-only"
+
+# Honest fallback for the modelled-backbone (scaffold) slug when the structure's
+# G-alpha entity carries no attached UniProt accession, so the scaffold identity
+# cannot be read from the deposition. Recorded rather than silently dropped, so a
+# missing backbone is visible as an explicit "unknown" in provenance.
+CHIMERA_BACKBONE_UNKNOWN: str = "unknown"
+
 # Coupling-family labels.
 G_FAMILY_GS: str = "Gs"
 G_FAMILY_GIO: str = "Gi/o"
@@ -1369,6 +1400,13 @@ CSV_SCHEMA: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
             "Alpha_label_asym_id",
             "Beta_label_asym_id",
             "Gamma_label_asym_id",
+            # Appended, never inserted: the downstream build reads the leading
+            # columns positionally (PDB..Note), so these go at the end.
+            # Alpha_UniProt keeps the model's deposited/voted slug unchanged; the
+            # alpha5-derived functional coupling identity and the modelled backbone
+            # scaffold are recorded as distinct trailing columns.
+            "Alpha_functional_coupling",
+            "Alpha_backbone",
         ),
         "arrestins.csv": ("PDB", "UniProt", "ChainID", "Note", "label_asym_id"),
         "fusion_proteins.csv": ("PDB", "Name"),

@@ -43,6 +43,7 @@ from gpcr_tools.config import (
     A5_SUBTYPE_FAMILY,
     AGG_STATUS_COMPLETED,
     AGG_STATUS_FAILED,
+    ALERT_MULTI_COPY_LIGAND,
     ALERT_PREFIX_ALGO_WARNING,
     ALERT_PREFIX_ALPHA5_GRAFT,
     ALERT_PREFIX_API_UNAVAILABLE,
@@ -51,6 +52,7 @@ from gpcr_tools.config import (
     ALERT_PREFIX_TIE_BREAKER_ALIGNED,
     ALERT_PREFIX_TIE_BREAKER_OVERRIDE,
     ALERT_PREFIX_UNRECOGNISED_G_ALPHA,
+    CHIMERA_BACKBONE_UNKNOWN,
     CHIMERA_STATUS_NO_G_PROTEIN,
     CHIMERA_STATUS_SKIPPED,
     CHIMERA_STATUS_SUCCESS,
@@ -59,6 +61,10 @@ from gpcr_tools.config import (
     FULL_G_ALPHA_CANDIDATES,
     LOW_CONFIDENCE_LEVELS,
     POLYMER_FEATURES_CACHE_NAME,
+    SUBTYPE_BASIS_CONSTRUCT_NAME,
+    SUBTYPE_BASIS_FAMILY_VERIFIED,
+    SUBTYPE_BASIS_RESOLVED,
+    VALIDATION_EXCLUDED_BUFFER,
     get_config,
 )
 from gpcr_tools.detector.signals import (
@@ -163,6 +169,83 @@ def _warn_on_unrecognised_g_alpha(best_run_data: dict[str, Any]) -> list[str]:
     ]
 
 
+def _prune_excluded_buffer_ligands(best_run_data: dict[str, Any]) -> None:
+    """Drop excluded-buffer ligands from the aggregated record, in place.
+
+    A ligand the validator tagged ``EXCLUDED_BUFFER`` (a crystallization
+    detergent / cryo-additive / matrix lipid such as BOG or NAG) is not a
+    functional GPCR ligand and must not reach the final aggregated record,
+    the curator, or the CSV export. It is removed here, at the aggregation
+    layer, so every downstream consumer sees one consistent ligand list.
+
+    A single, narrow rescue keeps a genuinely-functional incidental molecule:
+    a dual-use lipid (e.g. palmitate) the model explicitly judged a real ligand
+    carries ``pharmacological_role_check.is_functional_ligand == True`` and is
+    kept. The rescue uses an ``is True`` identity test on purpose -- a null /
+    missing / ``False`` verdict means "not assessed" or "not functional" and
+    does NOT rescue.
+
+    The predicate is the validation status ALONE. A molecule that actually
+    matched a real component is tagged ``MATCHED_SMALL_MOLECULE`` (not
+    ``EXCLUDED_BUFFER``), so a matched lipid is never dropped here -- testing
+    component-id membership instead would wrongly drop it.
+
+    When a dropped component had a ``MULTI_COPY_LIGAND`` oligomer alert, that
+    alert is pruned too, so the record stays self-consistent (no alert points
+    at a ligand that no longer exists).
+    """
+    ligands = best_run_data.get("ligands")
+    if not isinstance(ligands, list):
+        return
+
+    kept: list[Any] = []
+    dropped_comp_ids: set[str] = set()
+    for lig in ligands:
+        if isinstance(lig, dict) and _is_excluded_buffer_drop(lig):
+            comp_id = lig.get("chem_comp_id")
+            if isinstance(comp_id, str) and comp_id.strip():
+                dropped_comp_ids.add(comp_id.strip())
+            continue
+        kept.append(lig)
+    best_run_data["ligands"] = kept
+
+    if not dropped_comp_ids:
+        return
+
+    # Keep the oligomer record self-consistent: a MULTI_COPY_LIGAND alert names
+    # its component in the path 'ligands[{comp_id}]'; once that component is
+    # dropped the alert dangles, so remove it. Other alert types are untouched.
+    oligomer = best_run_data.get("oligomer_analysis")
+    if not isinstance(oligomer, dict):
+        return
+    alerts = oligomer.get("alerts")
+    if not isinstance(alerts, list):
+        return
+    dropped_paths = {f"ligands[{comp_id}]" for comp_id in dropped_comp_ids}
+    oligomer["alerts"] = [
+        alert
+        for alert in alerts
+        if not (
+            isinstance(alert, dict)
+            and alert.get("type") == ALERT_MULTI_COPY_LIGAND
+            and any(path in str(alert.get("message", "")) for path in dropped_paths)
+        )
+    ]
+
+
+def _is_excluded_buffer_drop(lig: dict[str, Any]) -> bool:
+    """True if *lig* is an excluded buffer that is NOT rescued as functional.
+
+    Drop condition: ``validation_status == EXCLUDED_BUFFER`` AND the model did
+    not explicitly judge it a functional ligand (``is True`` identity rescue).
+    """
+    if lig.get("validation_status") != VALIDATION_EXCLUDED_BUFFER:
+        return False
+    prc = lig.get("pharmacological_role_check")
+    rescued = isinstance(prc, dict) and prc.get("is_functional_ligand") is True
+    return not rescued
+
+
 def _build_validation_report(
     pdb_id: str,
     best_run_data: dict[str, Any],
@@ -246,8 +329,30 @@ def _build_validation_report(
         a5_tail = chimera_result.get("a5_tail") or "N/A"
         ai_family = A5_SUBTYPE_FAMILY.get(ai_uniprot) if ai_uniprot else None
 
+        # The functional coupling identity and the modelled backbone scaffold are
+        # now two distinct fields. The alpha5 helix is the receptor-coupling
+        # determinant, so it defines the FUNCTIONAL identity; the scaffold the
+        # construct was built on is recorded separately and never substitutes for
+        # it. The functional_coupling slug follows the most reliable source per
+        # branch below:
+        #   - alpha5 RESOLVED a single subtype -> the detector's resolved slug
+        #     (reliable; it stands even when the model voted differently, in which
+        #     case the [TIE-BREAKER OVERRIDE] still fires to gate the disagreement).
+        #   - alpha5 reached only FAMILY (inseparable set the alpha5 cannot split)
+        #     AND the model's slug is family-consistent -> the model's slug, since
+        #     the detector cannot pin the member here (family-correct is
+        #     functionally correct).
+        #   - otherwise (family mismatch / absent / off-roster model slug) -> left
+        #     unset so the accompanying [TIE-BREAKER OVERRIDE] / [UNRECOGNISED
+        #     G-ALPHA] conflict drives the manual review.
+        family_verified = ai_family is not None and family is not None and ai_family == family
+        functional_coupling: str | None = None
+
         if subtype is not None:
-            # The alpha5 resolves to a single subtype.
+            # The alpha5 resolves to a single subtype: store the detector's
+            # resolved slug (the reliable source), independent of the model's vote.
+            functional_coupling = subtype
+            subtype_basis = SUBTYPE_BASIS_RESOLVED
             if ai_uniprot and ai_uniprot != subtype:
                 report["algo_conflicts"].append(
                     f"{ALERT_PREFIX_TIE_BREAKER_OVERRIDE} at 'chimera_analysis': "
@@ -260,6 +365,7 @@ def _build_validation_report(
                     f"alpha5 '{a5_tail}' resolves G-alpha to '{subtype}'."
                 )
         elif resolution == CHIMERA_SUBTYPE_LOW_CONFIDENCE:
+            subtype_basis = SUBTYPE_BASIS_CONSTRUCT_NAME
             report["detector_notes"].append(
                 f"{ALERT_PREFIX_ALGO_WARNING} at 'chimera_analysis': "
                 f"alpha5 match is weak (best window score "
@@ -267,6 +373,7 @@ def _build_validation_report(
             )
         elif ai_family and family and ai_family != family:
             # The model's family disagrees with the alpha5 coupling family.
+            subtype_basis = SUBTYPE_BASIS_CONSTRUCT_NAME
             report["algo_conflicts"].append(
                 f"{ALERT_PREFIX_TIE_BREAKER_OVERRIDE} at 'chimera_analysis': "
                 f"alpha5 '{a5_tail}' indicates the {family} family, but the model "
@@ -274,18 +381,38 @@ def _build_validation_report(
             )
         elif family:
             # Family is confident but the subtype cannot be told apart by the
-            # alpha5; route the subtype to a human rather than forcing a member.
+            # alpha5. When the off-roster slugs are non-human orthologs the call is
+            # NOT an inseparable-subtype problem -- it is a species-mapping one, so
+            # say so honestly rather than implying the subtype is ambiguous. Either
+            # way the subtype is routed to a human rather than forced to a member.
+            # The detector could not pin the member, so when the model's slug is
+            # family-consistent it carries the functional coupling here.
+            if family_verified:
+                functional_coupling = ai_uniprot
+                subtype_basis = SUBTYPE_BASIS_FAMILY_VERIFIED
+            else:
+                subtype_basis = SUBTYPE_BASIS_CONSTRUCT_NAME
             members = ", ".join(candidate_set) or "indistinguishable subtypes"
-            report["critical_warnings"].append(
-                f"{ALERT_PREFIX_CHIMERIC_REVIEW} at "
-                f"'signaling_partners.g_protein.alpha_subunit': alpha5 confirms the "
-                f"{family} family but cannot distinguish the subtype ({members}); "
-                f"confirm manually."
-            )
+            off_roster = [s for s in candidate_set if s not in _RECOGNISED_G_ALPHA_SLUGS]
+            if off_roster:
+                report["critical_warnings"].append(
+                    f"{ALERT_PREFIX_CHIMERIC_REVIEW} at "
+                    f"'signaling_partners.g_protein.alpha_subunit': alpha5 indicates a "
+                    f"non-human ortholog of the {family} family ({members}); confirm "
+                    f"the species / GPCRdb mapping."
+                )
+            else:
+                report["critical_warnings"].append(
+                    f"{ALERT_PREFIX_CHIMERIC_REVIEW} at "
+                    f"'signaling_partners.g_protein.alpha_subunit': alpha5 confirms the "
+                    f"{family} family but cannot distinguish the subtype ({members}); "
+                    f"confirm manually."
+                )
         else:
             # The best match spans more than one coupling family or an
             # unrecognised slug, so even the family is undetermined. Never leave
             # this silent: surface it as a conflict for manual resolution.
+            subtype_basis = SUBTYPE_BASIS_CONSTRUCT_NAME
             members = ", ".join(candidate_set) or "no recognised subtype"
             report["algo_conflicts"].append(
                 f"{ALERT_PREFIX_ALGO_WARNING} at 'chimera_analysis': "
@@ -293,22 +420,42 @@ def _build_validation_report(
                 f"({members}); G-alpha identity cannot be determined automatically."
             )
 
+        # Record the two distinct identities (plus provenance) on the alpha
+        # subunit. These are aggregator-OWNED outputs -- the model never fills
+        # them; the functional slug was chosen per branch above (the detector's
+        # resolved subtype when the alpha5 pinned one, else the model's
+        # family-matching slug). The backbone is always recorded for provenance,
+        # independent of whether it differs from the alpha5: when the entity
+        # carries no attached UniProt (e.g. a G-alpha deposited without an
+        # accession) it falls back to an explicit "unknown" rather than being
+        # silently dropped.
+        alpha_block = g_protein.get("alpha_subunit")
+        if isinstance(alpha_block, dict):
+            # functional_coupling may be set even while a [TIE-BREAKER OVERRIDE]
+            # review conflict is active (by design): the stored value is the best
+            # determination (the detector's resolved subtype), while the conflict
+            # still drives the curator's confirmation of the model/detector split.
+            if functional_coupling is not None:
+                alpha_block["functional_coupling"] = functional_coupling
+            alpha_block["backbone"] = (
+                chimera_result.get("backbone_slug") or CHIMERA_BACKBONE_UNKNOWN
+            )
+            alpha_block["subtype_basis"] = subtype_basis
+
         # alpha5-graft: the engineered scaffold differs from the functional
-        # alpha5 (~6% of G-alpha structures). Record the backbone for provenance
-        # (export still collapses to the functional identity) and note it --
-        # informational, not a conflict: the alpha5 helix is the principal
-        # receptor-coupling determinant, so it defines the G-alpha identity.
+        # alpha5 (~6% of G-alpha structures). Note it -- informational, not a
+        # conflict: the alpha5 helix is the principal receptor-coupling
+        # determinant, so it defines the G-alpha identity, while the scaffold the
+        # construct was built on is recorded separately on the alpha subunit above.
         if chimera_result.get("is_alpha5_graft"):
             backbone_slug = chimera_result.get("backbone_slug")
             backbone_family = chimera_result.get("backbone_family")
-            g_block = (best_run_data.get("signaling_partners") or {}).get("g_protein")
-            if isinstance(g_block, dict):
-                g_block["chimera_backbone"] = f"{backbone_slug} ({backbone_family} scaffold)"
             report["detector_notes"].append(
                 f"{ALERT_PREFIX_ALPHA5_GRAFT} at "
                 f"'signaling_partners.g_protein.alpha_subunit': alpha5-graft chimera "
-                f"-- backbone {backbone_slug} ({backbone_family}), functional alpha5 "
-                f"= {family}; identity follows the alpha5 per convention."
+                f"-- backbone {backbone_slug or CHIMERA_BACKBONE_UNKNOWN} "
+                f"({backbone_family}), functional alpha5 = {family}; identity follows "
+                f"the alpha5 per convention."
             )
     elif status == CHIMERA_STATUS_NO_G_PROTEIN:
         if ai_uniprot and str(ai_uniprot).lower() not in EMPTY_VALUES:
@@ -490,6 +637,7 @@ def aggregate_pdb(
         8. Oligomer analysis
         9. Compute discrepancies
         10. Chimera analysis
+        10b. Prune excluded-buffer ligands
         11. Assemble validation report
         12. Atomic write block
 
@@ -607,6 +755,19 @@ def aggregate_pdb(
         }
         if not skip_api_checks and sequence_cache is not None:
             chimera_result = get_chimera_analysis(pdb_id, enriched, sequence_cache)
+
+        # 10b. Prune excluded-buffer ligands (BOG / NAG / detergents) from the
+        # record so they never reach the aggregated JSON, the curator, or the CSV
+        # -- a genuinely-functional incidental lipid the model judged real is
+        # kept. Must run BEFORE the validation report (step 11). The only emitter
+        # of numeric ligands[N] paths is the integrity checker's generic list
+        # recursion (integrity_checker.validate_all, run inside
+        # _build_validation_report); those positional indices, which curate parses
+        # into index cleanups, are correct only if the aggregated ligand list is
+        # already pruned. (The ghost-ligand, oligomer, and voting warnings instead
+        # key on comp id -- ligands[<comp_id>] -- so they are position-stable and
+        # not the reason for this ordering.)
+        _prune_excluded_buffer_ligands(best_run_data)
 
         # 11. Assemble validation report
         v_cache = validation_cache if not skip_api_checks else None

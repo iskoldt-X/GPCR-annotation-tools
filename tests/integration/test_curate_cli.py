@@ -7,6 +7,7 @@ Covers:
 - full CLI subprocess flow (init → fixture → auto-accept → verify)
 """
 
+import copy
 import csv
 import json
 import os
@@ -104,6 +105,55 @@ class TestAutoAccept:
         main(auto_accept=True)  # must not raise
 
         assert not get_config().processed_log_file.exists()
+
+    def test_gated_pdb_is_skipped_not_accepted(self, initialized_workspace, sample_pdb_data):
+        """A gated PDB (here: an oligomer gating finding, with an empty validation
+        log) must be SKIPPED by auto-accept, not silently written -- mirroring the
+        interactive UI, which disables accept-all when any source gates.
+
+        The clean fixture (TEST1) is still accepted, so only the gated PDB is
+        held back: it is absent from structures.csv, the audit shows the skip, and
+        its processed-log status is 'skipped'."""
+        from gpcr_tools.config import AGG_STATUS_SKIPPED
+
+        gated = copy.deepcopy(sample_pdb_data)
+        gated["oligomer_analysis"] = {
+            "chain_id_override": {"applied": False},
+            "alerts": [
+                {
+                    "type": "OLIGOMER_DISAGREEMENT",
+                    "message": "[OLIGOMER_DISAGREEMENT] at 'receptor_info': confirm state.",
+                }
+            ],
+            "all_gpcr_chains": [{"chain_id": "A", "7tm_status": "COMPLETE"}],
+        }
+        with open(initialized_workspace / "aggregated" / "GATE1.json", "w") as f:
+            json.dump(gated, f)
+        reset_config()
+
+        from gpcr_tools.csv_generator.app import main
+
+        main(auto_accept=True)
+
+        cfg = get_config()
+
+        # The gated PDB is NOT in the CSV; the clean one (TEST1) still is.
+        with open(cfg.csv_output_dir / "structures.csv") as f:
+            pdbs = {row["PDB"] for row in csv.DictReader(f, delimiter="\t")}
+        assert "GATE1" not in pdbs
+        assert "TEST1" in pdbs
+
+        # The audit records the gated skip.
+        audit_file = cfg.audit_output_dir / "audit_trail.jsonl"
+        entries = [json.loads(line) for line in audit_file.read_text().splitlines()]
+        assert any(
+            e["pdb_id"] == "GATE1" and e["action"] == "auto_accept_skip_gated" for e in entries
+        )
+
+        # The processed log marks it skipped (reusing the existing skipped status).
+        log = json.loads(cfg.processed_log_file.read_text())
+        assert log["GATE1"]["status"] == AGG_STATUS_SKIPPED
+        assert log["TEST1"]["status"] == "completed"
 
 
 # -- full CLI subprocess flow ---------------------------------------------

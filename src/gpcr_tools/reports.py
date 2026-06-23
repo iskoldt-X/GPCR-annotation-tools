@@ -173,6 +173,25 @@ def _read_json_dict_at(path: Path) -> dict[str, Any]:
     return _read_json_dict(path)
 
 
+def _read_controversy_map(path: Path) -> dict[str, Any]:
+    """Read a voting log (a JSON list of controversy records) into the same
+    path-keyed map the curator builds: ``{item["path"]: item}``.
+
+    Tolerant of absence or a non-list / malformed file (returns ``{}``), and
+    skips records without a usable ``path`` so one bad entry cannot break the map.
+    """
+    if not path.is_file():
+        return {}
+    data = _read_json(path)
+    if not isinstance(data, list):
+        return {}
+    out: dict[str, Any] = {}
+    for item in data:
+        if isinstance(item, dict) and isinstance(item.get("path"), str):
+            out[item["path"]] = item
+    return out
+
+
 def _warning_type(message: Any) -> str:
     """Category of a validation warning / conflict from its leading ``[TYPE]``.
 
@@ -290,9 +309,85 @@ def _failed_job_pdbs(cfg: Any) -> set[str]:
     return pdbs
 
 
+def _manifest_reconciliation(
+    cfg: Any,
+    targets: dict[str, Any],
+    no_pdf: dict[str, Any],
+    run_counts: dict[str, Any],
+) -> dict[str, Any]:
+    """Account for every target by SUBTRACTION; surface what slipped through.
+
+    A clean run leaves nothing unaccounted: each target either ran to completion
+    (``full``), ran partially (``incomplete``), or never had a PDF (``no_pdf``).
+    A leftover means a target produced no runs yet is not explained by a missing
+    PDF — the silent-drop signature this report exists to catch. Computed from
+    the already-built sections (no re-reading of disk).
+
+    Leftover ids are labelled by reason, most-specific cause first:
+    - ``batch_job_failed`` — it was a member of a FAILED batch job. The job's
+      death is the specific, actionable cause, so it wins even when a PDF is also
+      present on disk.
+    - ``no_runs_with_pdf_present`` — its PDF resolves on disk but it has zero (or
+      no) recorded runs and it is not in a failed job: the upload-failed-then-
+      dropped signature.
+    - ``no_runs`` — anything else (e.g. a target never submitted, no PDF
+      resolvable, not in a failed job).
+    """
+    from gpcr_tools.papers.storage import resolve_pdf_path
+
+    expected = run_counts.get("expected_runs", GEMINI_DEFAULT_RUNS)
+    per_pdb = run_counts.get("per_pdb") or {}
+
+    targets_set = {str(p).upper() for p in targets.get("pdb_ids", [])}
+    full_set = {pdb for pdb, count in per_pdb.items() if count >= expected}
+    incomplete_set = {str(item["pdb_id"]).upper() for item in run_counts.get("incomplete", [])}
+    no_pdf_set: set[str] = set()
+    for ids in (no_pdf.get("by_reason") or {}).values():
+        no_pdf_set.update(str(p).upper() for p in ids)
+
+    unaccounted = sorted(targets_set - (full_set | incomplete_set | no_pdf_set))
+    failed_pdbs = _failed_job_pdbs(cfg)
+    # Resolve the PDF the same way every reader does — log-aware (see
+    # ``_manifest_no_pdf``) — so a leftover whose only on-disk paper is the
+    # canonical DOI-named file is correctly seen as PDF-present. Such a PDB is a
+    # genuine leftover here: ``_manifest_no_pdf`` skips it only as a no-PDF (it
+    # HAS a PDF), so it is not excluded from this section and must be labelled.
+    log = _read_json_dict_at(cfg.download_log_file)
+
+    by_reason: dict[str, list[str]] = {}
+    for pdb in unaccounted:
+        count = per_pdb.get(pdb, 0)
+        # Priority: a dead job is the more specific, actionable cause, so it is
+        # labelled even when a PDF is also present; only then the PDF-present
+        # upload-drop signature; else the bare no-runs leftover.
+        if pdb in failed_pdbs:
+            reason = "batch_job_failed"
+        elif count == 0 and resolve_pdf_path(pdb, log) is not None:
+            reason = "no_runs_with_pdf_present"
+        else:
+            reason = "no_runs"
+        by_reason.setdefault(reason, []).append(pdb)
+    return {
+        "unaccounted_count": len(unaccounted),
+        "by_reason": {reason: ids for reason, ids in sorted(by_reason.items())},
+    }
+
+
 def _manifest_quality(cfg: Any) -> dict[str, Any]:
     """Validation-quality stats: one-click-acceptable vs gated, with a typed
-    breakdown of warning / conflict categories and their counts."""
+    breakdown of warning / conflict categories and their counts.
+
+    The ``warning_types`` / ``conflict_types`` breakdown reflects only the typed
+    warnings recorded in each validation log. The acceptable/gated split is
+    broader: it asks the shared gate (:func:`is_pdb_gated`) the same question the
+    interactive curator answers, so an oligomer-only or voting-only finding gates
+    a PDB even when its validation log is empty. The two therefore need not
+    agree -- a PDB can be gated with no typed warnings of its own (intended, not
+    a discrepancy). This is a read-time fix over the existing aggregated output:
+    nothing is re-aggregated; the next manifest run reflects the back-catalog.
+    """
+    from gpcr_tools.validator.gating import is_pdb_gated
+
     files = _validation_log_files()
     acceptable: list[str] = []
     gated: list[str] = []
@@ -307,9 +402,16 @@ def _manifest_quality(cfg: Any) -> dict[str, Any]:
             warning_types[_warning_type(w)] += 1
         for c in conflicts:
             conflict_types[_warning_type(c)] += 1
-        # One-click-acceptable = nothing gates the curator: no critical warning and
-        # no algo conflict. Anything else is gated (needs a manual look).
-        if warnings or conflicts:
+        # Gate on all three sources, exactly as the curator does. Read the sibling
+        # aggregated record (for oligomer findings) and voting log (for gating
+        # controversies); both are tolerant of absence so a PDB with only a
+        # validation log still resolves.
+        agg = _read_json_dict_at(cfg.aggregated_dir / f"{pdb}.json")
+        oligo = agg.get("oligomer_analysis")
+        controversies = _read_controversy_map(
+            cfg.aggregated_dir / "logs" / f"{pdb}_voting_log.json"
+        )
+        if is_pdb_gated(data, oligo, controversies):
             gated.append(pdb)
         else:
             acceptable.append(pdb)
@@ -351,11 +453,17 @@ def build_run_manifest(
     cfg = get_config()
     model_name = model_name or get_gemini_model_name()
     num_runs = num_runs if num_runs is not None else GEMINI_DEFAULT_RUNS
+    targets = _manifest_targets(cfg)
+    no_pdf = _manifest_no_pdf(cfg)
+    run_counts = _manifest_run_counts(cfg, model_name, num_runs)
     return {
         "provenance": _manifest_provenance(cfg, model_name, num_runs),
-        "targets": _manifest_targets(cfg),
-        "no_pdf": _manifest_no_pdf(cfg),
-        "run_counts": _manifest_run_counts(cfg, model_name, num_runs),
+        "targets": targets,
+        "no_pdf": no_pdf,
+        "run_counts": run_counts,
+        # Account for every target by subtraction; a non-zero count surfaces a
+        # target that slipped through (e.g. an upload-failed, silently dropped PDB).
+        "reconciliation": _manifest_reconciliation(cfg, targets, no_pdf, run_counts),
         "quality": _manifest_quality(cfg),
     }
 
@@ -377,6 +485,7 @@ def render_run_manifest_md(manifest: dict[str, Any]) -> str:
     targets = manifest["targets"]
     no_pdf = manifest["no_pdf"]
     run_counts = manifest["run_counts"]
+    reconciliation = manifest.get("reconciliation", {"unaccounted_count": 0, "by_reason": {}})
     quality = manifest["quality"]
 
     lines: list[str] = [
@@ -421,10 +530,24 @@ def render_run_manifest_md(manifest: dict[str, Any]) -> str:
         lines.append("- (none)")
     lines += [
         "",
+        "## Unaccounted",
+        "",
+        f"{reconciliation['unaccounted_count']} target PDB(s) neither completed, "
+        "incomplete, nor explained by a missing PDF (each should be zero in a clean run):",
+        "",
+    ]
+    if reconciliation["by_reason"]:
+        for reason, ids in reconciliation["by_reason"].items():
+            lines.append(f"- **{reason}** ({len(ids)}): {_render_id_list(ids)}")
+    else:
+        lines.append("- (none)")
+    lines += [
+        "",
         "## Quality",
         "",
         f"{quality['validated_count']} PDB(s) validated.",
-        f"- One-click-acceptable (no critical warnings/conflicts): {quality['acceptable_count']}",
+        f"- One-click-acceptable (no validation, oligomer, or voting gating): "
+        f"{quality['acceptable_count']}",
         f"- Gated (need review): {quality['gated_count']}",
         "",
         "### Critical-warning types",
@@ -481,6 +604,7 @@ def report_run_manifest() -> str:
     targets = manifest.get("targets", {})
     no_pdf = manifest.get("no_pdf", {})
     run_counts = manifest.get("run_counts", {})
+    reconciliation = manifest.get("reconciliation", {})
     quality = manifest.get("quality", {})
     return "\n".join(
         [
@@ -491,6 +615,7 @@ def report_run_manifest() -> str:
             f"  Targets: {targets.get('count', 0)}",
             f"  No PDF / not run: {no_pdf.get('count', 0)}",
             f"  Ran but incomplete: {run_counts.get('incomplete_count', 0)}",
+            f"  Unaccounted: {reconciliation.get('unaccounted_count', 0)}",
             f"  Validated: {quality.get('validated_count', 0)} "
             f"(acceptable {quality.get('acceptable_count', 0)}, "
             f"gated {quality.get('gated_count', 0)})",
