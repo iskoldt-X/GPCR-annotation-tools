@@ -1,0 +1,8 @@
+# Per-checkout extra tokens for the no-local-paths pre-commit hook.
+# Copy this file to scripts/.local-denylist (git-ignored) and list any
+# machine-specific strings you want blocked from commits — one per line,
+# matched as plain substrings. Lines starting with '#' are comments.
+#
+# Example (replace with your own):
+# my-username
+# my-conda-env-name

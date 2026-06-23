@@ -4,7 +4,8 @@ Scope: all human wt GPCR receptors (future-proof for the dominant case) + any
 non-human UniProt accession present in the local corpus (current orthologs).
 Output: {accession: {"c": class, "e": entry_name, "r": {seqnum: [x_label, segment, aa]}}}
 gzipped JSON. Keyed by UniProt accession (what enriched/RCSB-align provides).
-Requires the local GPCRdb DB (gpcrdb-db). Run once; ship the artifact.
+Requires the local GPCRdb DB (gpcrdb-db) and GPCR_CORPUS_DIR set to the corpus
+root. Run once from the repo root; ships to src/gpcr_tools/data/.
 """
 
 import glob
@@ -37,7 +38,11 @@ def psql(sql):
 
 
 # 1. corpus non-human accessions (from enriched GPCR uniprots)
-base = "${GPCR_CORPUS_DIR}"
+base = os.environ.get("GPCR_CORPUS_DIR")
+if not base:
+    raise SystemExit(
+        "Set GPCR_CORPUS_DIR to the corpus root (the directory holding */enriched/*.json)."
+    )
 corpus_accs = set()
 for ep in glob.glob(f"{base}/*/enriched/*.json"):
     try:
@@ -81,7 +86,7 @@ for line in psql(sql).strip().split("\n"):
     rec["r"][seqn] = [xlab or None, seg or None, aa]
     n += 1
 
-out = "/tmp/gpcrdb_generic_numbers.json.gz"
+out = os.environ.get("GPCR_SITE_REF_OUT", "src/gpcr_tools/data/gpcrdb_generic_numbers.json.gz")
 with gzip.open(out, "wt", encoding="utf-8") as f:
     json.dump(table, f, separators=(",", ":"))
 print(f"receptors: {len(table)} | residue rows: {n} | gz size: {os.path.getsize(out) / 1e6:.2f} MB")

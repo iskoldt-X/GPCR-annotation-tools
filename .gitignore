@@ -33,6 +33,9 @@ coverage.xml
 # Ruff
 .ruff_cache/
 
+# Per-checkout extra denylist for the no-local-paths hook (machine-specific tokens)
+scripts/.local-denylist
+
 # Docker
 .docker/
 
