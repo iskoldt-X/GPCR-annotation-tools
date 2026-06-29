@@ -329,7 +329,7 @@ class TestCouplingProtomerEvidence:
         assert block is not None
         assert "chain B" in block
         assert "gabbr2_human" in block
-        assert "G-protein-coupling" in block
+        assert "G protein-coupling" in block
 
     def test_coupling_does_not_leak_raw_summary(self) -> None:
         block = assemble_detect_block([_coupling_advisory()])
@@ -387,12 +387,12 @@ def test_detect_block_golden_snapshot() -> None:
         "=== DETECTOR EVIDENCE (computed before annotation) ===\n"
         "Treat each item below as evidence to weigh against the paper, not as a "
         "settled conclusion:\n"
-        "- G-protein alpha5 analysis: the modelled alpha5 tail 'IKENLKDCGLF' matches "
+        "- G protein alpha5 analysis: the modelled alpha5 tail 'IKENLKDCGLF' matches "
         "the Gi/o family (subtype gnai1_human). Weigh this against the paper before "
         "assigning the G-alpha identity.\n"
         "- This is a Class C receptor structure with more than one GPCR protomer.\n"
         "- Structure geometry shows the G protein engages receptor chain B "
-        "(gabbr2_human); that protomer is the active, G-protein-coupling one — in a "
+        "(gabbr2_human); that protomer is the active, G protein-coupling one — in a "
         "heterodimer not necessarily the agonist-binding protomer. Weigh this against "
         "the paper.\n"
         "- CLR is present; it can be a functional ligand in some structures and an "

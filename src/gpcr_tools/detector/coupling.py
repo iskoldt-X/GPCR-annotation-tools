@@ -130,7 +130,7 @@ def detect_coupling_protomer(
             target_ref=_COUPLING_LOCUS,
             summary=(
                 f"The G protein engages receptor chain {top_chain} ({slug}); that "
-                f"protomer is the G-protein-coupling (active) protomer of the dimer. "
+                f"protomer is the G protein-coupling (active) protomer of the dimer. "
                 f"In a heterodimer this need not be the agonist-binding protomer."
             ),
             payload={

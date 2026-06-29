@@ -114,10 +114,10 @@ ANNOTATION_TOOL = types.Tool(
                                             "type": "string",
                                             "description": (
                                                 "How many GPCR receptor copies form the biological unit, and whether they are the same or different receptors. "
-                                                "Count ONLY the GPCR receptor(s); do NOT count G-protein, arrestin, nanobody, antibody, peptide, or ligand partners — "
+                                                "Count ONLY the GPCR receptor(s); do NOT count G protein, arrestin, nanobody, antibody, peptide, or ligand partners — "
                                                 "they are not receptor protomers. Use the per-chain 7TM status and residue length in the polymer table to tell a true "
                                                 "7TM receptor from a non-receptor partner, and weigh the paper and the (reference-only) author biological assembly.\n"
-                                                "'monomer' = one receptor copy (a single receptor with a G-protein heterotrimer is still 'monomer' — the Gα/β/γ are partners, "
+                                                "'monomer' = one receptor copy (a single receptor with a G protein heterotrimer is still 'monomer' — the Gα/β/γ are partners, "
                                                 "not receptor copies, even when the author assembly is reported as a 'Hetero 5-mer').\n"
                                                 "'homo-dimer' / 'homo-trimer' / 'homo-tetramer' = two / three / four copies of the SAME receptor (e.g. a mGlu2 or CaSR receptor dimer is 'homo-dimer').\n"
                                                 "'hetero-dimer' = two DIFFERENT receptor subunits forming one obligate receptor (e.g. the GABA-B receptor, GBR1 + GBR2).\n"
@@ -174,7 +174,7 @@ ANNOTATION_TOOL = types.Tool(
                         },
                         "ligands": {
                             "type": "array",
-                            "description": "A list of ALL ligands. Must include an 'Apo' entry if no ligand is present. A ligand is any entity — small molecule, peptide, or protein — that binds the receptor and acts on its function (agonist / antagonist / PAM / NAM / allosteric modulator); this includes a functional protein or peptide binder (e.g. a protein agonist such as R-spondin, or an activating antibody/nanobody). A G-protein-derived or transducer-mimetic peptide is not a ligand.",
+                            "description": "A list of ALL ligands. Must include an 'Apo' entry if no ligand is present. A ligand is any entity — small molecule, peptide, or protein — that binds the receptor and acts on its function (agonist / antagonist / PAM / NAM / allosteric modulator); this includes a functional protein or peptide binder (e.g. a protein agonist such as R-spondin, or an activating antibody/nanobody). A G protein-derived or transducer-mimetic peptide is not a ligand.",
                             "items": {
                                 "type": "object",
                                 "properties": {
@@ -331,7 +331,7 @@ ANNOTATION_TOOL = types.Tool(
                             "properties": {
                                 "g_protein": {
                                     "type": "object",
-                                    "description": "G-protein heterotrimer details. Omit if not present. When only a fragment of the Gα subunit is present — its C-terminal / α5 helix, or a transducer-mimetic peptide that substitutes for the full subunit (e.g. a GαCT peptide) — it still belongs here as the alpha_subunit; record the fragment's UniProt entry name and chain ID in alpha_subunit, and note in the g_protein-level 'note' field that only the C-terminal/α5 fragment is modelled. Do not place such a peptide in ligands or auxiliary_proteins.",
+                                    "description": "G protein heterotrimer details. Omit if not present. When only a fragment of the Gα subunit is present — its C-terminal / α5 helix, or a transducer-mimetic peptide that substitutes for the full subunit (e.g. a GαCT peptide) — it still belongs here as the alpha_subunit; record the fragment's UniProt entry name and chain ID in alpha_subunit, and note in the g_protein-level 'note' field that only the C-terminal/α5 fragment is modelled. Do not place such a peptide in ligands or auxiliary_proteins.",
                                     "properties": {
                                         "alpha_subunit": {
                                             "type": "object",

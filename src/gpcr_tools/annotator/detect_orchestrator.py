@@ -87,7 +87,7 @@ def _format_signal(signal: DetectSignal) -> str | None:
         family = payload.get("family") or "?"
         subtype = payload.get("subtype") or "an indistinguishable subtype"
         return (
-            f"G-protein alpha5 analysis: the modelled alpha5 tail '{tail}' matches the "
+            f"G protein alpha5 analysis: the modelled alpha5 tail '{tail}' matches the "
             f"{family} family (subtype {subtype}). Weigh this against the paper before "
             f"assigning the G-alpha identity."
         )
@@ -96,7 +96,7 @@ def _format_signal(signal: DetectSignal) -> str | None:
         slug = payload.get("coupling_slug") or "?"
         return (
             f"Structure geometry shows the G protein engages receptor chain {chain} "
-            f"({slug}); that protomer is the active, G-protein-coupling one — in a "
+            f"({slug}); that protomer is the active, G protein-coupling one — in a "
             f"heterodimer not necessarily the agonist-binding protomer. Weigh this "
             f"against the paper."
         )

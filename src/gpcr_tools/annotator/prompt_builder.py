@@ -156,7 +156,7 @@ def generate_author_assembly_reference(pdb_id: str, enriched_data: dict) -> str:
         "### AUTHOR-DEPOSITED BIOLOGICAL ASSEMBLY (reference only, NOT authoritative)\n"
         f"From the structure authors' biological assembly deposited in the PDB for {pdb_id}. "
         "This is reference information to inform your own judgment, not the answer. It counts "
-        "ALL chains (so a receptor + G-protein complex is reported as a higher-order complex "
+        "ALL chains (so a receptor + G protein complex is reported as a higher-order complex "
         "even though the receptor itself is a monomer), and it can be wrong in either "
         "direction. A 'Homo N-mer' or software-predicted (e.g. PISA) assembly often "
         "reflects crystallographic packing rather than a true biological oligomer, so do "
