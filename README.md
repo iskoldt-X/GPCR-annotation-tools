@@ -61,7 +61,7 @@ Each step is **resumable** and **idempotent** — re-running any command skips a
 
 A coordinate-driven detect stage (built on [gemmi](https://gemmi.readthedocs.io/)) runs before annotation and supplies the model with objective structural **facts** — not computed verdicts — leaving the final judgment to the AI:
 
-- **G-protein coupling subtype** — Identifies the G-alpha subtype by matching the structure's alpha5 C-terminal window against reference sequences; subtypes that share an identical alpha5 helix (an inseparable set) are routed to family-level review instead of guessing one confident subtype.
+- **G protein coupling subtype** — Identifies the G-alpha subtype by matching the structure's alpha5 C-terminal window against reference sequences; subtypes that share an identical alpha5 helix (an inseparable set) are routed to family-level review instead of guessing one confident subtype.
 - **Binding-site geometry** — Each ligand's contacted residues are mapped to GPCRdb generic numbers and segments, with an ANVIL-style membrane-frame fit (oriented from the receptor's own intracellular landmarks: DRY, NPxxY, H8) that reports lipid-facing vs pocket-facing fraction and signed membrane depth. The model infers `site_ref` from these facts plus the paper, with `unknown` a first-class answer.
 - **Dimer coupling protomer** — For an obligate Class C dimer, the protomer the G-alpha actually engages is detected from coordinates and used to pick the dimer's primary chain (e.g. GABA-B's GABBR2 couples while GABBR1 binds the agonist); the partner protomer is recorded.
 - **Incidental-candidate ligands** — Dual-use molecules (cholesterol, palmitate, etc.) are surfaced to the model for a functional-vs-structural judgment rather than being silently dropped.
@@ -90,7 +90,7 @@ A coordinate-driven detect stage (built on [gemmi](https://gemmi.readthedocs.io/
 
 #### Warn-only safety cross-checks (surface, don't rewrite)
 
-A family of checks routes likely mistakes to the review channel that disables one-click accept-all, while leaving the model's answer untouched: role-vs-site contradictions (e.g. an allosteric role at the orthosteric site), mis-filed GPCR protomers evicted from auxiliary proteins (sparing crystallization fusions and soluble partners), co-agonist reminders when multiple agonists are present, BRIL / T4-lysozyme fusion advisories, unannotated non-GPCR polymer chains, hallucinated ligands in ligand-free structures, and unrecognised G-alpha subtypes or G-protein-derived peptides mis-filed as ligands. Assembly-vs-oligomer mismatches are informational, not alerts.
+A family of checks routes likely mistakes to the review channel that disables one-click accept-all, while leaving the model's answer untouched: role-vs-site contradictions (e.g. an allosteric role at the orthosteric site), mis-filed GPCR protomers evicted from auxiliary proteins (sparing crystallization fusions and soluble partners), co-agonist reminders when multiple agonists are present, BRIL / T4-lysozyme fusion advisories, unannotated non-GPCR polymer chains, hallucinated ligands in ligand-free structures, and unrecognised G-alpha subtypes or G protein-derived peptides mis-filed as ligands. Assembly-vs-oligomer mismatches are informational, not alerts.
 
 ### Expert Curation
 
@@ -230,7 +230,7 @@ docker run --rm -it \
 
 ### `gpcr-tools detect`
 
-Pre-annotation structural detection: compute coordinate-driven evidence (G-protein coupling, binding-site geometry, oligomeric state, chimera provenance) for the AI and flag hard cases for review.
+Pre-annotation structural detection: compute coordinate-driven evidence (G protein coupling, binding-site geometry, oligomeric state, chimera provenance) for the AI and flag hard cases for review.
 
 ```bash
 gpcr-tools detect                       # All enriched PDBs (tops up missing/degraded)
@@ -285,7 +285,7 @@ Print an operational report over pipeline outputs.
 ```bash
 gpcr-tools report pdf-coverage          # Paper-PDF outcomes
 gpcr-tools report full-audit            # Validation warnings + chimera conflicts across PDBs
-gpcr-tools report tail-analysis         # G-protein chimera score distribution
+gpcr-tools report tail-analysis         # G protein chimera score distribution
 gpcr-tools report run-manifest          # Per-target accounting (no-PDF / incomplete /
                                         # acceptable / gated, with provenance);
                                         # writes output/run_manifest.{json,md}
@@ -380,7 +380,7 @@ Tab-separated, normalized files ready for database ingestion:
 |------|----------|
 | `structures.csv` | PDB ID, receptor UniProt, method, resolution, state, chain, date, and (for a heterodimer) the partner protomer's UniProt + chain |
 | `ligands.csv` | Ligand names, PubChem IDs, roles, binding-site type (`Site`, from the geometry-informed `site_ref`), entity types, SMILES, InChIKey, sequences, and whether the bound compound is an endogenous ligand (`is_endogenous`, GtoPdb). Incidental molecules the model judged non-functional are omitted. |
-| `g_proteins.csv` | G-protein subunit UniProt IDs and chain assignments |
+| `g_proteins.csv` | G protein subunit UniProt IDs and chain assignments |
 | `arrestins.csv` | Arrestin UniProt IDs and chains |
 | `fusion_proteins.csv` | Fusion protein names |
 | `nanobodies.csv`, `antibodies.csv`, `scfv.csv` | Binding partner names |
@@ -426,8 +426,8 @@ src/gpcr_tools/
 │
 ├── detector/                  # Pre-annotation detect stage (runs before annotate)
 │   ├── signals.py             #   DetectSignal contract (advisory→prompt, review→curator)
-│   ├── gprotein.py            #   G-protein alpha5 identity detector
-│   ├── coupling.py            #   G-protein-coupling protomer of a dimer (geometry)
+│   ├── gprotein.py            #   G protein alpha5 identity detector
+│   ├── coupling.py            #   G protein-coupling protomer of a dimer (geometry)
 │   ├── site_ref.py            #   Ligand binding-site detector (geometry → generic numbers)
 │   ├── geometry.py            #   Dual-role ligand detector (multi-pocket burial)
 │   ├── ligands.py             #   Incidental-candidate ligand detector (cholesterol, palmitate)
@@ -447,7 +447,7 @@ src/gpcr_tools/
 │   └── runner.py              #   12-step orchestration with error isolation
 │
 ├── validator/                 # Cross-validation + enrichment modules
-│   ├── chimera.py             #   G-protein alpha5 identity (sequence matching)
+│   ├── chimera.py             #   G protein alpha5 identity (sequence matching)
 │   ├── receptor_validator.py  #   UniProt identity verification
 │   ├── ligand_validator.py    #   PDB-CCD existence check + endogenous tagging
 │   ├── endogenous.py          #   Endogenous-ligand classifier (GtoPdb table)

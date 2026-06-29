@@ -304,11 +304,11 @@ def _warn_on_g_protein_peptide_as_ligand(
     poly_by_chain: dict[str, dict[str, Any]],
     warnings: list[str],
 ) -> None:
-    """Flag (for the curator) a transducer-derived / G-protein-mimetic peptide that
+    """Flag (for the curator) a transducer-derived / G protein-mimetic peptide that
     the model has filed as a receptor ligand with a functional pocket role.
 
-    A peptide whose chain is a G-protein subunit (its polymer description reads as a
-    G-alpha, or its GPCRdb slug is a G-protein alpha/beta/gamma subunit) is a
+    A peptide whose chain is a G protein subunit (its polymer description reads as a
+    G-alpha, or its GPCRdb slug is a G protein alpha/beta/gamma subunit) is a
     signaling partner, not an agonist. This catches a G-alpha C-terminal /
     transducin-mimetic peptide mislabelled as e.g. role 'Agonist', which would
     otherwise sit next to the genuine small-molecule agonist.

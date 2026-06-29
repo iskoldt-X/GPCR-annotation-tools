@@ -41,7 +41,7 @@ def _first_list_entry(container: Any, key: str) -> dict[str, Any]:
 
 
 def extract_ai_g_protein(data: dict[str, Any]) -> str | None:
-    """Safely extract the G-protein alpha-subunit UniProt entry name.
+    """Safely extract the G protein alpha-subunit UniProt entry name.
 
     Uses the None-safe ``(x.get(k) or {})`` chain at every level so a missing
     or null intermediate node never raises.

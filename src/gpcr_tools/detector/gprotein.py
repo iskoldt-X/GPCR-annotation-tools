@@ -1,4 +1,4 @@
-"""Pre-annotation G-protein identity detector.
+"""Pre-annotation G protein identity detector.
 
 Wraps the alpha5 sequence analysis (``validator.chimera``) into a
 ``DetectSignal``. When the coupling family is found but the subtype cannot be
@@ -28,7 +28,7 @@ def detect_g_protein_identity(
     enriched_entry: dict[str, Any],
     cache: SequenceCache,
 ) -> tuple[list[DetectSignal], bool]:
-    """Emit at most one G-protein identity signal for *enriched_entry*.
+    """Emit at most one G protein identity signal for *enriched_entry*.
 
     A cleanly resolved subtype yields an advisory signal (evidence for the
     prompt). A family-only / indistinguishable / low-confidence result yields a

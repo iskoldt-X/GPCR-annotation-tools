@@ -840,7 +840,7 @@ POLYMER_FEATURES_CACHE_NAME: str = "polymer_features_cache.json"
 # Top-level marker stamped on a detect output that was written while a
 # sequence-based detector transiently failed to fetch a UniProt reference (a
 # timeout or 5xx -- NOT a definitive 404). The detect resume skip recomputes a
-# record carrying this marker (and only such records), so a G-protein identity call
+# record carrying this marker (and only such records), so a G protein identity call
 # degraded by an upstream outage self-heals on a later run, while a structure
 # that legitimately produced no signal carries no marker and is never re-run.
 DETECT_INCOMPLETE_MARKER_KEY: str = "_detect_incomplete"
@@ -919,7 +919,7 @@ MEMBRANE_BAND_MARGIN: float = 3.0
 # excluded from the fraction. Calibration-pending, like the other membrane knobs.
 MEMBRANE_FACING_DEADZONE_COS: float = 0.2
 
-# G-protein coupling protomer (detect stage, geometry). A Class C receptor is an
+# G protein coupling protomer (detect stage, geometry). A Class C receptor is an
 # obligate dimer and only ONE protomer engages the G protein; in a heterodimer
 # that protomer is often NOT the agonist-binding one (GABA-B: GABBR1 binds, GABBR2
 # couples). The G-alpha contacts exactly one receptor chain, so the chain with the
@@ -981,7 +981,7 @@ SITE_REF_MIN_MAPPED_CONTACTS: int = 5
 # the centroid of these receptor cytoplasmic-face residues onto the normal fixes
 # the sign so a ligand's signed depth gains a physical "which side" meaning. This
 # uses the receptor's own 7TM backbone via the shipped generic numbering, so it
-# works for apo / no-G-protein structures too (where a G-alpha reference fails).
+# works for apo / no-G protein structures too (where a G-alpha reference fails).
 # Canonical cytoplasmic-anchor generic numbers: the DRY arginine (3x50) and the
 # NPxxY motif (7x49-7x53), both at the intracellular ends of their helices.
 MEMBRANE_INTRACELLULAR_ANCHOR_GENERIC: frozenset[str] = frozenset(
@@ -1099,8 +1099,8 @@ G_ALPHA_EXCLUDE_KEYWORDS: tuple[str, ...] = (
     "subunit g",
 )
 
-# GPCRdb slug prefixes that mark a heterotrimeric G-protein subunit (alpha, beta,
-# or gamma). A transducer-derived / G-protein-mimetic peptide whose chain carries
+# GPCRdb slug prefixes that mark a heterotrimeric G protein subunit (alpha, beta,
+# or gamma). A transducer-derived / G protein-mimetic peptide whose chain carries
 # one of these slugs is a signaling partner, not a receptor ligand. "gnb" covers
 # G-beta-5 (curated slug gnb5_*), which "gbb" does not. ("gnat" stays for clarity
 # though it is redundant under "gna" for str.startswith.)
@@ -1121,7 +1121,7 @@ OLIGOMER_HETEROMER: str = "HETEROMER"
 # ---------------------------------------------------------------------------
 
 # The AI enum values for the receptor's OWN oligomeric state (counts ONLY GPCR
-# receptor copies, not G-protein/arrestin/nanobody/peptide/ligand partners).
+# receptor copies, not G protein/arrestin/nanobody/peptide/ligand partners).
 # Mirrors annotator/schema.py receptor_info.oligomeric_state.value.enum.
 AI_OLIGOMER_MONOMER: str = "monomer"
 AI_OLIGOMER_HOMO_DIMER: str = "homo-dimer"
@@ -1175,7 +1175,7 @@ ALERT_NO_GPCR: str = "NO_GPCR"
 ALERT_TM_DATA_UNAVAILABLE: str = "TM_DATA_UNAVAILABLE"
 # The AI's receptor oligomeric-state call disagrees with the deterministic
 # receptor-level classifier AT THE RECEPTOR LEVEL (both count GPCR receptors
-# only, never G-protein/peptide/ligand partners): e.g. the AI says 'monomer'
+# only, never G protein/peptide/ligand partners): e.g. the AI says 'monomer'
 # while the classifier resolved >=2 receptor chains (a possible crystallographic
 # copy vs a true oligomer), or the two disagree on copy count or homo/hetero.
 # The classification cannot be settled mechanically here, so route to a curator.
@@ -1236,7 +1236,7 @@ GPCR_SLUG_NEGATIVE_PREFIXES: tuple[str, ...] = (
     "gnaz",
     "gnal",
     "gnat",
-    # G-protein beta/gamma
+    # G protein beta/gamma
     "gbb",
     "gbg",
     # Arrestins, GRKs, RAMPs

@@ -11,7 +11,7 @@ geometry for small-molecule ligands:
 * **pocket residues** -- the receptor residues lining the copy, used to tell two
   copies in different pockets apart from two copies in the same pocket.
 * **partner contact** -- whether the copy also touches a non-receptor protein
-  chain (a G-protein / peptide), a hint that it sits in the active-state pocket.
+  chain (a G protein / peptide), a hint that it sits in the active-state pocket.
 
 Network and parsing failures degrade to ``None`` / an empty result so the detect
 stage never breaks on a missing or unreadable structure.
@@ -73,7 +73,7 @@ class LigandCopyGeometry:
     seq_id: int
     burial: float  # angular coverage in [0, 1]; higher = more enclosed
     pocket_residues: frozenset[tuple[str, int]]  # (gpcr_chain, residue_number)
-    contacts_partner: bool  # touches a non-GPCR protein chain (e.g. a G-protein)
+    contacts_partner: bool  # touches a non-GPCR protein chain (e.g. a G protein)
 
     @property
     def n_pocket_residues(self) -> int:

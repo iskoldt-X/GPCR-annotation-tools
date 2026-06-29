@@ -405,7 +405,7 @@ def _build_label_asym_id_map(
 # ---------------------------------------------------------------------------
 
 
-# Slug prefixes that mark a chain as a signaling partner (G-protein alpha via
+# Slug prefixes that mark a chain as a signaling partner (G protein alpha via
 # "gna", beta "gbb", gamma "gbg", arrestin "arr"); an unannotated chain with one
 # of these is routed to the signaling_partners review block, everything else to
 # auxiliary_proteins. Used only to anchor the alert to the right block.
@@ -471,7 +471,7 @@ def _missed_chain_block(slug: str | None) -> str:
 def collect_ai_claimed_chains(best_run_data: dict[str, Any]) -> set[str]:
     """Union every polymer chain id the annotation claims, across all slots.
 
-    The model can name a chain under the receptor, the G-protein subunits, the
+    The model can name a chain under the receptor, the G protein subunits, the
     arrestin, the auxiliary proteins (nanobody / scFv / RAMP / ...), or a
     polymeric ligand. A chain claimed in any slot counts as annotated.
     """
@@ -813,7 +813,7 @@ def _classifier_receptor_level(
     """Reduce the deterministic classifier to a (count, kind) receptor-level fact.
 
     Counts GPCR RECEPTORS only -- the classifier already excludes
-    G-protein/peptide/ligand partners via the transmembrane gate, so this never
+    G protein/peptide/ligand partners via the transmembrane gate, so this never
     leaks a partner into the count. ``MONOMER`` -> ``(1, None)``;
     ``HOMOMER`` -> ``(count, "homo")``; ``HETEROMER`` -> ``(count, "hetero")``.
     Returns ``None`` for ``NO_GPCR`` (an empty roster already routes via its own
@@ -837,9 +837,9 @@ def _reconcile_ai_oligomer(
     """Cross-check the AI's receptor oligomeric state against the classifier.
 
     Compares RECEPTOR-LEVEL fact to RECEPTOR-LEVEL fact ONLY: both sides count
-    GPCR receptor copies, never G-protein/arrestin/nanobody/peptide/ligand
+    GPCR receptor copies, never G protein/arrestin/nanobody/peptide/ligand
     partners. (The whole RCSB biological assembly -- "Hetero 5-mer" for a
-    receptor+G-protein complex -- is deliberately NOT used here; comparing
+    receptor+G protein complex -- is deliberately NOT used here; comparing
     against it would flag every receptor+transducer complex.)
 
     Returns a routing alert dict when the two disagree, else ``None``. Stays
@@ -913,9 +913,9 @@ def _suggest_primary_protomer(
 ) -> dict[str, Any]:
     """Suggest a primary protomer chain using the rank framework.
 
-    Rank 0: Geometric G-protein coupling protomer (the detect stage measured which
+    Rank 0: Geometric G protein coupling protomer (the detect stage measured which
         protomer the G-alpha engages -- an objective fact that beats the AI guess).
-    Rank 1: G-protein bound (AI's chain if in roster and G-protein present).
+    Rank 1: G protein bound (AI's chain if in roster and G protein present).
     Rank 2: Exclusive ligand-binding chain.
     Rank 3: Best 7TM completeness.
     Rank 4: Longest sequence OR valid AI choice.
@@ -930,7 +930,7 @@ def _suggest_primary_protomer(
     reason = ""
     rank: int | None = None
 
-    # Rank 0: geometric G-protein coupling. Only one protomer of an obligate dimer
+    # Rank 0: geometric G protein coupling. Only one protomer of an obligate dimer
     # couples the G protein, and in a heterodimer it is often NOT the agonist-binding
     # one (GABA-B: GABBR1 binds, GABBR2 couples). The detect stage reads the coupling
     # protomer from the G-alpha interface in the coordinates; that measured fact wins
@@ -940,7 +940,7 @@ def _suggest_primary_protomer(
         reason = f"Rank 0: G-protein coupling protomer (structure geometry) on Chain {primary}"
         rank = 0
 
-    # Rank 1: G-protein bound
+    # Rank 1: G protein bound
     has_gprotein = False
     if signaling_partners:
         if "g_protein" in signaling_partners:
@@ -1295,7 +1295,7 @@ def analyze_oligomer(
     May correct ``receptor_info.chain_id`` and ``uniprot_entry_name``
     when AI is objectively wrong (HALLUCINATION or 7TM_UPGRADE).
 
-    *coupling_chain* is the detect stage's geometric G-protein-coupling protomer (or
+    *coupling_chain* is the detect stage's geometric G protein-coupling protomer (or
     ``None``); when set it is the highest-priority primary-protomer choice.
 
     *polymer_features_cache*, when supplied, serves the transmembrane-helix
@@ -1523,7 +1523,7 @@ def analyze_oligomer(
     # 9c. Receptor-level cross-check: compare the AI's receptor oligomeric state
     # against the deterministic classifier AT THE RECEPTOR LEVEL (both count GPCR
     # receptors only -- never the whole RCSB assembly, which would flag every
-    # receptor+G-protein complex). A disagreement (e.g. AI 'monomer' but the
+    # receptor+G protein complex). A disagreement (e.g. AI 'monomer' but the
     # classifier resolved >=2 receptor chains) is a real ambiguity, so route it.
     # Silent when the AI says 'unknown', when the count is TM-unverified (that
     # already routes via TM_DATA_UNAVAILABLE), and in the normal agreeing case.

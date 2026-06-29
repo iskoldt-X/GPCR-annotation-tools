@@ -114,7 +114,7 @@ def generate_author_assembly_reference(pdb_id: str, enriched_data: dict) -> str:
     being handed a single pre-chosen answer.
 
     Framed explicitly as reference-only and NOT authoritative: the assembly
-    counts every chain (so a receptor + G-protein complex reads as a higher-order
+    counts every chain (so a receptor + G protein complex reads as a higher-order
     "Hetero N-mer" even though the receptor itself is a monomer). All data comes
     from the enriched JSON -- no network call. Returns ``""`` when no assembly
     with a symmetry block is present, so an ordinary structure's prompt only

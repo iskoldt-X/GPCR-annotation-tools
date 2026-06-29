@@ -93,7 +93,7 @@ from gpcr_tools.validator.receptor_validator import validate_receptor_identity
 logger = logging.getLogger(__name__)
 
 # Detect REVIEW signals of these kinds are NOT re-surfaced as critical warnings
-# here: the aggregator re-derives the G-protein review from its own alpha5
+# here: the aggregator re-derives the G protein review from its own alpha5
 # analysis below, with finer severity tuning (low-confidence -> note, not a
 # blocker). Routing the detect copy too would both duplicate the warning and
 # override that tuning. (The deferred chimera-logic consolidation will collapse
@@ -102,7 +102,7 @@ _AGGREGATOR_OWNED_REVIEW_KINDS = frozenset({SIGNAL_CHIMERIC_GPROTEIN})
 
 
 def _coupling_protomer(pdb_id: str) -> str | None:
-    """The geometric G-protein-coupling protomer chain from the detect sidecar, if any.
+    """The geometric G protein-coupling protomer chain from the detect sidecar, if any.
 
     Returns ``None`` when the detect stage did not run, found no G protein, or could
     not resolve a single protomer -- in which case primary selection falls back to the
@@ -144,7 +144,7 @@ _RECOGNISED_G_ALPHA_SLUGS = frozenset(FULL_G_ALPHA_CANDIDATES.values())
 
 
 def _warn_on_unrecognised_g_alpha(best_run_data: dict[str, Any]) -> list[str]:
-    """Flag (for the curator) a G-protein alpha subunit named with a specific slug
+    """Flag (for the curator) a G protein alpha subunit named with a specific slug
     that is NOT in the curated G-alpha candidate set.
 
     The candidate roster is alpha-specific, so this checks the alpha subunit only;
@@ -297,7 +297,7 @@ def _build_validation_report(
     # non-blocking: recorded for the curator, does not gate accept-all.
     report["detector_notes"].extend(detect_crystallization_fusions(enriched_entry))
 
-    # Chimeric G-protein review is driven by the deterministic alpha5 analysis,
+    # Chimeric G protein review is driven by the deterministic alpha5 analysis,
     # NOT the model's optional is_chimeric flag (which the model can silently
     # omit -> a false negative that skips review). The model flag is kept only as
     # a fallback for when the alpha5 was INCONCLUSIVE -- it never ran
@@ -722,7 +722,7 @@ def aggregate_pdb(
 
         # 8. Oligomer analysis (mutates best_run_data — may override chain_id). The
         # detect stage's geometric coupling-protomer signal, when present, selects the
-        # primary protomer (the G-protein coupler) over the AI's chain guess.
+        # primary protomer (the G protein coupler) over the AI's chain guess.
         analyze_oligomer(
             pdb_id,
             best_run_data,

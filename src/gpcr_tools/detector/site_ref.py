@@ -166,7 +166,7 @@ def _intracellular_landmark_centroid(
     skipped. Returns ``None`` if fewer than ``MEMBRANE_MIN_ORIENT_LANDMARKS``
     landmark Cα are located -- an honest abstain rather than a noisy orientation.
     This is universal: it needs only the receptor, so it works for apo /
-    no-G-protein structures where a G-alpha reference is unavailable.
+    no-G protein structures where a G-alpha reference is unavailable.
     """
     table = load_numbering_table()
     model = structure[0]
@@ -320,7 +320,7 @@ def detect_site_refs(
     model = structure[0] if frame is not None else None
     # Orient the (sign-arbitrary) membrane normal so a copy's signed depth gains a
     # physical "which side" meaning -- primary reference is the receptor's own
-    # cytoplasmic-face landmarks (works for apo / no-G-protein structures), with a
+    # cytoplasmic-face landmarks (works for apo / no-G protein structures), with a
     # present G-alpha only as a confirming cross-check. None -> stay unoriented.
     ic_sign: int | None = None
     orientation_note: str | None = None

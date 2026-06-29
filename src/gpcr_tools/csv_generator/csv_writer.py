@@ -26,7 +26,7 @@ def sanitize_value(value: Any) -> str:
 
 
 def _primary_chain(value: Any) -> str:
-    """Collapse a multi-chain G-protein subunit value to a single chain.
+    """Collapse a multi-chain G protein subunit value to a single chain.
 
     A single subunit physically occupies one chain per complex; a multi-value
     field (e.g. ``"C, D"``) means the asymmetric unit holds more than one

@@ -102,7 +102,7 @@ def report_full_audit() -> str:
 
 
 def report_tail_analysis() -> str:
-    """Summarise the G-protein alpha5 identity analysis: the score
+    """Summarise the G protein alpha5 identity analysis: the score
     distribution, status breakdown, and which structures to review.
 
     (The historical report also catalogued alpha5 sequences and candidate
