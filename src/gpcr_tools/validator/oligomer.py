@@ -937,7 +937,7 @@ def _suggest_primary_protomer(
     # over the AI's chain choice. (Computed upstream, no GPCRdb per-structure data.)
     if coupling_chain and coupling_chain in gpcr_roster:
         primary = coupling_chain
-        reason = f"Rank 0: G-protein coupling protomer (structure geometry) on Chain {primary}"
+        reason = f"Rank 0: G protein-coupling protomer (structure geometry) on Chain {primary}"
         rank = 0
 
     # Rank 1: G protein bound
@@ -952,7 +952,7 @@ def _suggest_primary_protomer(
 
     if not primary and has_gprotein and ai_chain and ai_chain in gpcr_roster:
         primary = ai_chain
-        reason = f"Rank 1: G-protein bound — AI-determined active complex on Chain {primary}"
+        reason = f"Rank 1: G protein bound — AI-determined active complex on Chain {primary}"
         rank = 1
 
     # Rank 2: Exclusive ligand binding
@@ -1049,7 +1049,7 @@ def _generate_alerts(
                     f"[{ALERT_HALLUCINATION}] at 'oligomer_analysis': "
                     f"AI selected chain(s) {sorted(non_gpcr)} which are NOT in the GPCR roster "
                     f"(roster: {sorted(roster_keys)}). "
-                    f"The AI may have picked a G-protein, nanobody, or other non-GPCR chain."
+                    f"The AI may have picked a G protein, nanobody, or other non-GPCR chain."
                 ),
             }
         )

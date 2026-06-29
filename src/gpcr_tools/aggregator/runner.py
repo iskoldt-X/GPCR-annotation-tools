@@ -163,7 +163,7 @@ def _warn_on_unrecognised_g_alpha(best_run_data: dict[str, Any]) -> list[str]:
         return []
     return [
         f"{ALERT_PREFIX_UNRECOGNISED_G_ALPHA} at "
-        f"'signaling_partners.g_protein.alpha_subunit': G-protein alpha subunit "
+        f"'signaling_partners.g_protein.alpha_subunit': G protein alpha subunit "
         f"'{slug}' is not a recognised G-alpha candidate (off the curated human "
         f"G-alpha set); verify the subtype/species against the paper."
     ]
@@ -315,7 +315,7 @@ def _build_validation_report(
     if alpha5_inconclusive and g_protein.get("is_chimeric") is True:
         report["critical_warnings"].append(
             f"{ALERT_PREFIX_CHIMERIC_REVIEW} at "
-            f"'signaling_partners.g_protein.alpha_subunit': chimeric G-protein — "
+            f"'signaling_partners.g_protein.alpha_subunit': chimeric G protein — "
             f"confirm the alpha-subunit identity manually."
         )
 
@@ -461,7 +461,7 @@ def _build_validation_report(
         if ai_uniprot and str(ai_uniprot).lower() not in EMPTY_VALUES:
             report["algo_conflicts"].append(
                 f"{ALERT_PREFIX_HALLUCINATION} at 'chimera_analysis': "
-                f"AI found '{ai_uniprot}' but algorithm found NO G-protein "
+                f"AI found '{ai_uniprot}' but algorithm found NO G protein "
                 f"in source PDB."
             )
     elif status != CHIMERA_STATUS_SKIPPED:

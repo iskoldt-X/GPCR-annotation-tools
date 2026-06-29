@@ -271,7 +271,7 @@ class TestTransformForCSV:
         result = transform_for_csv("TEST2", sample_controversy_data)
         assert len(result["structures.csv"]) == 1
         assert result["structures.csv"][0]["Method"] == "X-RAY DIFFRACTION"
-        assert result["g_proteins.csv"] == []  # no g-protein in this fixture
+        assert result["g_proteins.csv"] == []  # no g protein in this fixture
 
     def test_label_asym_id_with_oligomer(self, sample_oligomer_data):
         """Oligomer fixture with label_asym_id_map → mapped values in CSV rows."""
@@ -305,7 +305,7 @@ class TestTransformForCSV:
         assert "MISSED_PROTOMER" in note
 
     def test_g_protein_label_asym_id(self, sample_oligomer_data):
-        """G-protein subunit chain IDs are mapped via label_asym_id_map."""
+        """G protein subunit chain IDs are mapped via label_asym_id_map."""
         result = transform_for_csv("OLIGO1", sample_oligomer_data)
         gp_row = result["g_proteins.csv"][0]
         # label_map: D→A, C→D, E→B

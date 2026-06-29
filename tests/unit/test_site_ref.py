@@ -246,7 +246,7 @@ class TestResolveOrientation:
         monkeypatch.setattr(sr, "_galpha_centroid", lambda *a, **k: galpha)
 
     def test_landmarks_orient_without_g_protein(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Apo / no-G-protein: the receptor's own landmarks at z=-30 orient it.
+        # Apo / no-G protein: the receptor's own landmarks at z=-30 orient it.
         self._patch_references(monkeypatch, gemmi.Position(0.0, 0.0, -30.0), None)
         sign, note = sr._resolve_orientation(object(), _FRAME, {}, {}, set())
         assert sign == -1
@@ -360,7 +360,7 @@ class TestSidePropagation:
     ) -> None:
         # A soft orientation note (e.g. G-alpha vs landmark disagreement) surfaces
         # in the debug log so the cross-check caveat is observable.
-        note = "the G-protein position disagrees with the receptor intracellular landmarks"
+        note = "the G protein position disagrees with the receptor intracellular landmarks"
         with caplog.at_level(logging.DEBUG, logger="gpcr_tools.detector.site_ref"):
             self._run(monkeypatch, tmp_path, ic_sign=-1, note=note)
         assert note in caplog.text

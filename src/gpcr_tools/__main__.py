@@ -332,7 +332,7 @@ def cli() -> None:
         help=(
             "pdf-coverage: paper-PDF outcomes; "
             "full-audit: validation warnings + chimera conflicts across PDBs; "
-            "tail-analysis: G-protein chimera score distribution; "
+            "tail-analysis: G protein chimera score distribution; "
             "run-manifest: write a full run record (output/run_manifest.{json,md})."
         ),
     )

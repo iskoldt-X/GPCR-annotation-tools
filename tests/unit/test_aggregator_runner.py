@@ -90,7 +90,7 @@ def _report(best, monkeypatch):
 
 class TestChimericForcesReview:
     def test_chimeric_g_protein_forces_manual_review(self, monkeypatch):
-        # A chimeric G-protein cannot be resolved from sequence alone, so it
+        # A chimeric G protein cannot be resolved from sequence alone, so it
         # must raise a critical warning (which disables one-click accept-all
         # and surfaces in review) rather than be accepted silently.
         best = {
@@ -165,7 +165,7 @@ class TestChimericForcesReview:
         )
 
     def test_ai_chimeric_flag_suppressed_when_no_g_protein(self, monkeypatch):
-        # The algorithm positively found no G-protein: the hallucination branch
+        # The algorithm positively found no G protein: the hallucination branch
         # owns that case, so the generic chimeric "confirm manually" warning is
         # not also emitted (it would misleadingly ask to confirm an identity that
         # the structure does not contain).
@@ -184,9 +184,9 @@ class TestChimericForcesReview:
         assert not any(
             "confirm the alpha-subunit identity manually" in w for w in report["critical_warnings"]
         )
-        # ...but the hallucination IS surfaced (AI named a G-protein, algo found none).
+        # ...but the hallucination IS surfaced (AI named a G protein, algo found none).
         assert any(
-            "NO G-protein" in c or "no g-protein" in c.lower() for c in report["algo_conflicts"]
+            "NO G protein" in c or "no g protein" in c.lower() for c in report["algo_conflicts"]
         )
 
 

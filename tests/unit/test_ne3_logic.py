@@ -135,7 +135,7 @@ class TestApplyDbTruncation:
         oligo = {
             "primary_protomer_suggestion": {
                 "chain_id": "A",
-                "reason": "G-protein bound",
+                "reason": "G protein bound",
             },
             "all_gpcr_chains": [
                 {"chain_id": "A", "slug": "aa2ar_human"},

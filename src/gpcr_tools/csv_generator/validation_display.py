@@ -54,7 +54,8 @@ def get_relevant_validation_warnings(path: str, validation_data: dict) -> list[s
     if validation_data.get("critical_warnings"):
         for w in validation_data["critical_warnings"]:
             if path in w or (
-                path == "signaling_partners" and ("g_protein" in w or "g-protein" in w.lower())
+                path == "signaling_partners"
+                and ("g_protein" in w or "g-protein" in w.lower() or "g protein" in w.lower())
             ):
                 relevant.append(w)
     # Deduplicate while preserving insertion order for deterministic display.
@@ -154,7 +155,7 @@ def warning_matches_block(entry: dict, block_path: str) -> bool:
         if normalized_block in warn_text:
             return True
         if normalized_block == "signaling_partners" and (
-            "g-protein" in warn_text or "g_protein" in warn_text
+            "g-protein" in warn_text or "g_protein" in warn_text or "g protein" in warn_text
         ):
             return True
     return False

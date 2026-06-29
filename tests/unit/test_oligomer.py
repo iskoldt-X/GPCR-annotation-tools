@@ -2138,7 +2138,7 @@ class TestTmFetchReliability:
 class TestReconcileAiOligomer:
     """Pure receptor-level cross-check: the AI's receptor oligomeric state vs the
     deterministic classifier. Compares receptor count + homo/hetero kind ONLY --
-    never the whole RCSB assembly -- so a receptor + G-protein complex never
+    never the whole RCSB assembly -- so a receptor + G protein complex never
     routes. Routes only on a true receptor-level disagreement."""
 
     # --- The explicit mapping table: AI enum <-> classifier => agree (no alert) ---

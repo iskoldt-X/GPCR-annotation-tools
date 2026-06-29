@@ -137,7 +137,7 @@ class TestDisplayCriticalWarningsSummary:
             {
                 "critical_warnings": [
                     "APO_WITH_LIGANDS at 'ligands': structure is apo but ligands annotated.",
-                    "CHIMERIC G-PROTEIN at 'signaling_partners': fusion detected.",
+                    "CHIMERIC G PROTEIN at 'signaling_partners': fusion detected.",
                 ],
                 "algo_conflicts": ["CONFLICT! AI: 'gnai1' vs Algo: 'gnas2'"],
             }
@@ -145,7 +145,7 @@ class TestDisplayCriticalWarningsSummary:
         out = capsys.readouterr().out
         assert rendered is True
         assert "APO_WITH_LIGANDS" in out
-        assert "CHIMERIC G-PROTEIN" in out
+        assert "CHIMERIC G PROTEIN" in out
         assert "gnai1" in out
         assert "CRITICAL VALIDATION FINDINGS" in out
 
@@ -214,6 +214,16 @@ class TestWarningMatchesBlock:
             "path": None,
             "is_hallucination": True,
             "text": "HALLUCINATION ALERT for signaling_partners g-protein",
+        }
+        assert warning_matches_block(entry, "signaling_partners") is True
+
+    def test_hallucination_spaced_g_protein_spelling_matches(self):
+        # The hardened matcher must also route the spaced "g protein" spelling
+        # (no underscore, no hyphen) to signaling_partners.
+        entry = {
+            "path": None,
+            "is_hallucination": True,
+            "text": "AI found 'gnas2' but algorithm found NO G protein in source PDB",
         }
         assert warning_matches_block(entry, "signaling_partners") is True
 

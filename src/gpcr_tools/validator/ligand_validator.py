@@ -345,7 +345,7 @@ def _warn_on_g_protein_peptide_as_ligand(
         warnings.append(
             f"{ALERT_PREFIX_G_PROTEIN_LIGAND} at 'ligands': ligand '{name}' "
             f"(chain {chain_id}) is described as '{matched_desc}', a "
-            f"G-protein-derived / transducer-mimetic peptide, but is annotated as "
+            f"G protein-derived / transducer-mimetic peptide, but is annotated as "
             f"role '{role}'. Verify it belongs under signaling partners, not as a "
             f"receptor agonist."
         )

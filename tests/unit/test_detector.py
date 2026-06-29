@@ -1,5 +1,5 @@
 """Tests for the pre-annotation detect stage: the signal contract, the
-G-protein identity detector, and the stage runner (persist + reload)."""
+G protein identity detector, and the stage runner (persist + reload)."""
 
 from __future__ import annotations
 

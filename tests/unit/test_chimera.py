@@ -1,8 +1,8 @@
-"""Tests for G-protein alpha5 identity analysis.
+"""Tests for G protein alpha5 identity analysis.
 
 Covers: is_g_alpha_description, calculate_match_score, and get_chimera_analysis
 (resolved subtype, inseparable-set family-only, cross-family-only, low
-confidence, sliding rescue of a displaced alpha5, and the no-G-protein /
+confidence, sliding rescue of a displaced alpha5, and the no-G protein /
 too-short / no-comparison paths).
 """
 
@@ -95,7 +95,7 @@ class TestIsGAlphaDescription:
 
     def test_bare_sequence_alpha5_mimetic_caught(self) -> None:
         """A G-alpha alpha5 C-terminal mimetic deposited under a bare-sequence
-        name (no G-protein wording) is now recognised by its conserved motif."""
+        name (no G protein wording) is now recognised by its conserved motif."""
         assert is_g_alpha_description("ILENLKDVGLF peptide CT2") is True
 
     def test_gi_alpha5_mimetic_caught(self) -> None:

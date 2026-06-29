@@ -130,7 +130,7 @@ def report_tail_analysis() -> str:
             flagged.append((pdb, score))
 
     lines = [
-        f"G-protein alpha5 identity analysis ({len(files)} PDB(s)):",
+        f"G protein alpha5 identity analysis ({len(files)} PDB(s)):",
         "",
         "  Score distribution:",
     ]

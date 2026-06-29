@@ -265,7 +265,7 @@ def _resolve_orientation(
         note = None
         if galpha_sign is not None and galpha_sign != landmark_sign:
             note = (
-                "the G-protein position disagrees with the receptor intracellular "
+                "the G protein position disagrees with the receptor intracellular "
                 "landmarks about which side is cytoplasmic"
             )
         return landmark_sign, note
