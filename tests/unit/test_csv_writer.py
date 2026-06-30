@@ -65,7 +65,7 @@ class TestGpcrdbColumnContract:
     def test_g_proteins_core_columns(self):
         assert CSV_SCHEMA["g_proteins.csv"][:8] == (
             "PDB",
-            "Alpha_UniProt",
+            "Alpha_identity",
             "Alpha_ChainID",
             "Beta_UniProt",
             "Beta_ChainID",
@@ -79,7 +79,7 @@ class TestGpcrdbColumnContract:
             "Alpha_label_asym_id",
             "Beta_label_asym_id",
             "Gamma_label_asym_id",
-            "Alpha_functional_coupling",
+            "Alpha_alpha5_identity",
             "Alpha_backbone",
         } <= set(CSV_SCHEMA["g_proteins.csv"][8:])
 
@@ -177,7 +177,7 @@ class TestTransformForCSV:
         rows = result["g_proteins.csv"]
         assert len(rows) == 1
         row = rows[0]
-        assert row["Alpha_UniProt"] == "gnas2_human"
+        assert row["Alpha_identity"] == "gnas2_human"
         assert row["Alpha_ChainID"] == "G"
         assert row["Beta_UniProt"] == "gbb1_human"
         assert row["Gamma_UniProt"] == "gbg2_human"
@@ -185,22 +185,22 @@ class TestTransformForCSV:
     def test_g_protein_functional_coupling_and_backbone_columns(self, sample_pdb_data):
         # The aggregator records the alpha5 functional coupling identity and the
         # modelled backbone scaffold as distinct fields on the alpha subunit; the
-        # CSV exports them as trailing columns while Alpha_UniProt stays the
+        # CSV exports them as trailing columns while Alpha_identity stays the
         # deposited slug.
         data = copy.deepcopy(sample_pdb_data)
         alpha = data["signaling_partners"]["g_protein"]["alpha_subunit"]
         alpha["functional_coupling"] = "gnaq_human"
         alpha["backbone"] = "gnas2_human"
         row = transform_for_csv("TEST1", data)["g_proteins.csv"][0]
-        assert row["Alpha_UniProt"] == "gnas2_human"
-        assert row["Alpha_functional_coupling"] == "gnaq_human"
+        assert row["Alpha_identity"] == "gnas2_human"
+        assert row["Alpha_alpha5_identity"] == "gnaq_human"
         assert row["Alpha_backbone"] == "gnas2_human"
 
     def test_g_protein_new_columns_blank_when_absent(self, sample_pdb_data):
         # When the aggregator left functional_coupling unset (family mismatch /
         # off-roster), the column is blank rather than a stray "None".
         row = transform_for_csv("TEST1", sample_pdb_data)["g_proteins.csv"][0]
-        assert row["Alpha_functional_coupling"] == ""
+        assert row["Alpha_alpha5_identity"] == ""
         assert row["Alpha_backbone"] == ""
 
     def test_g_protein_chain_collapses_multivalue(self, sample_pdb_data):

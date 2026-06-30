@@ -199,10 +199,10 @@ def transform_for_csv(pdb_id: str, data: dict) -> dict[str, list[dict[str, str]]
         rows_map["g_proteins.csv"].append(
             {
                 "PDB": pdb_id,
-                # The deposited/voted alpha slug, unchanged. The alpha5-derived
-                # functional coupling identity and the modelled backbone scaffold
-                # are exported as the distinct trailing columns below.
-                "Alpha_UniProt": sanitize_value(alpha.get("uniprot_entry_name")),
+                # Alpha_identity = the deposited/voted alpha slug, unchanged. The
+                # alpha5 helix identity (Alpha_alpha5_identity) and the modelled
+                # backbone scaffold (Alpha_backbone) are the distinct trailing columns below.
+                "Alpha_identity": sanitize_value(alpha.get("uniprot_entry_name")),
                 "Alpha_ChainID": alpha_chain,
                 "Alpha_label_asym_id": map_label_asym_id(alpha_chain, label_map),
                 "Beta_UniProt": sanitize_value(
@@ -216,7 +216,7 @@ def transform_for_csv(pdb_id: str, data: dict) -> dict[str, list[dict[str, str]]
                 "Gamma_ChainID": gamma_chain,
                 "Gamma_label_asym_id": map_label_asym_id(gamma_chain, label_map),
                 "Note": sanitize_value(gp.get("note")),
-                "Alpha_functional_coupling": sanitize_value(alpha.get("functional_coupling")),
+                "Alpha_alpha5_identity": sanitize_value(alpha.get("functional_coupling")),
                 "Alpha_backbone": sanitize_value(alpha.get("backbone")),
             }
         )

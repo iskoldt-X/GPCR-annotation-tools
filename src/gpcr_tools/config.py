@@ -1390,7 +1390,7 @@ CSV_SCHEMA: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
         ),
         "g_proteins.csv": (
             "PDB",
-            "Alpha_UniProt",
+            "Alpha_identity",
             "Alpha_ChainID",
             "Beta_UniProt",
             "Beta_ChainID",
@@ -1402,10 +1402,10 @@ CSV_SCHEMA: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
             "Gamma_label_asym_id",
             # Appended, never inserted: the downstream build reads the leading
             # columns positionally (PDB..Note), so these go at the end.
-            # Alpha_UniProt keeps the model's deposited/voted slug unchanged; the
-            # alpha5-derived functional coupling identity and the modelled backbone
-            # scaffold are recorded as distinct trailing columns.
-            "Alpha_functional_coupling",
+            # Alpha_identity keeps the model's deposited/voted slug unchanged; the
+            # alpha5 helix identity (Alpha_alpha5_identity) and the modelled backbone
+            # scaffold (Alpha_backbone) are recorded as distinct trailing columns.
+            "Alpha_alpha5_identity",
             "Alpha_backbone",
         ),
         "arrestins.csv": ("PDB", "UniProt", "ChainID", "Note", "label_asym_id"),

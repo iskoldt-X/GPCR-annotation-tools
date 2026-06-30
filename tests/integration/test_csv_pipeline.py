@@ -65,7 +65,7 @@ class TestCSVPipeline:
             reader = csv.DictReader(f, delimiter="\t")
             rows = list(reader)
         assert len(rows) == 1
-        assert rows[0]["Alpha_UniProt"] == "gnas2_human"
+        assert rows[0]["Alpha_identity"] == "gnas2_human"
 
         update_processed_log("TEST1", "completed")
 
