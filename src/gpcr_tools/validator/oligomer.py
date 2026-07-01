@@ -768,7 +768,7 @@ def correct_binder_names(
             continue
         raw_type = aux.get("type")
         type_value = raw_type.get("value") if isinstance(raw_type, dict) else None
-        if type_value not in BINDER_AUX_TYPE_VALUES:
+        if not isinstance(type_value, str) or type_value not in BINDER_AUX_TYPE_VALUES:
             continue
         # No-slug discriminator: read the slug of each chain the entry claims from
         # the enriched roster. A binder carries no GPCRdb slug on any of its
