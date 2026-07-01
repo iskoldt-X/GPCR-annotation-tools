@@ -379,7 +379,7 @@ Tab-separated, normalized files ready for database ingestion:
 | File | Contents |
 |------|----------|
 | `structures.csv` | PDB ID, receptor UniProt, method, resolution, state, chain, date, and (for a heterodimer) the partner protomer's UniProt + chain |
-| `ligands.csv` | Ligand names, PubChem IDs, roles, binding-site type (`Site`, from the geometry-informed `site_ref`), entity types, SMILES, InChIKey, sequences, and whether the bound compound is an endogenous ligand (`is_endogenous`, GtoPdb). Incidental molecules the model judged non-functional are omitted. |
+| `ligands.csv` | Ligand identity (`Name`, the PDBe chemical-component code such as `RET` or `U0G`, falling back to the descriptive name when no component code exists), the full descriptive name (`Title`), PubChem IDs, roles, binding-site type (`Site`, from the geometry-informed `site_ref`), entity types, SMILES, InChIKey, sequences, the residue numbers of each modelled copy (`Residue_seq_id`, comma-joined and aligned copy-for-copy with `label_asym_id`), and whether the bound compound is an endogenous ligand (`is_endogenous`, GtoPdb). Incidental molecules the model judged non-functional are omitted. |
 | `g_proteins.csv` | G protein subunit UniProt IDs and chain assignments |
 | `arrestins.csv` | Arrestin UniProt IDs and chains |
 | `fusion_proteins.csv` | Fusion protein names |

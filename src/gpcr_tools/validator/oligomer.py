@@ -27,15 +27,23 @@ from gpcr_tools.config import (
     ALERT_MULTI_COPY_LIGAND,
     ALERT_NO_GPCR,
     ALERT_OLIGOMER_DISAGREEMENT,
+    ALERT_PREFIX_BINDER_RENAME,
     ALERT_PREFIX_FUSION_NOTE,
+    ALERT_PREFIX_G_PROTEIN_MISFILED,
+    ALERT_PREFIX_G_PROTEIN_RELOCATED,
     ALERT_PREFIX_MISSED_POLYMER,
     ALERT_PROTOMER_IN_AUXILIARY,
     ALERT_SUSPICIOUS_7TM,
     ALERT_TM_DATA_UNAVAILABLE,
     APO_SENTINEL,
+    BINDER_ANTIGEN_ALIASES,
+    BINDER_ANTIGEN_ANTI_PATTERN,
+    BINDER_ANTIGEN_BINDING_PATTERN,
+    BINDER_AUX_TYPE_VALUES,
     CRYSTALLIZATION_FUSION_KEYWORDS,
     CRYSTALLIZATION_FUSION_SLUGS,
     EMPTY_VALUES,
+    G_PROTEIN_SUBUNIT_SLUG_PREFIXES,
     GPCR_MIN_ANNOTATED_TM,
     GPCR_SLUG_NEGATIVE_PREFIXES,
     OLIGOMER_HETEROMER,
@@ -55,6 +63,10 @@ from gpcr_tools.validator.api_clients import (
     PolymerFeaturesCacheLike,
     fetch_polymer_features,
     fetch_polymer_features_cached,
+)
+from gpcr_tools.validator.chimera import (
+    is_alpha5_mimetic_description,
+    is_g_alpha_description,
 )
 
 logger = logging.getLogger(__name__)
@@ -572,6 +584,167 @@ def detect_crystallization_fusions(enriched_entry: dict[str, Any]) -> list[str]:
             f"{ALERT_PREFIX_FUSION_NOTE} at 'receptor_info': chain(s) {chain_str} "
             f"carry a crystallization fusion ('{description}'); confirm the receptor "
             f"annotation excludes the fusion partner."
+        )
+    return notes
+
+
+# Binder aux `type.value` -> the binder word used in the canonical name. The
+# schema's "Antibody fab fragment" reads more naturally as "Fab"; the rest map
+# to themselves.
+_BINDER_TYPE_WORD: dict[str, str] = {
+    "Antibody": "Antibody",
+    "Antibody fab fragment": "Fab",
+    "Nanobody": "Nanobody",
+    "scFv": "scFv",
+    "DARPin": "DARPin",
+}
+
+
+def _normalize_antigen_token(token: str) -> str:
+    """Clean and normalise an antigen token captured from a description.
+
+    Strips surrounding punctuation / parentheses left by the regex capture, then
+    maps a known casing via :data:`BINDER_ANTIGEN_ALIASES`. An unknown token
+    keeps its captured surface form (fail-open on naming, never blank).
+    """
+    cleaned = token.strip().strip("()[]{}.,;:'\"").strip()
+    if not cleaned:
+        return ""
+    return BINDER_ANTIGEN_ALIASES.get(cleaned.lower(), cleaned)
+
+
+def _binder_name_from_description(
+    description: str, type_word: str, append_role: bool = True
+) -> tuple[str, str] | None:
+    """Derive a canonical ``anti-<ANTIGEN> <TYPE>`` name from a chain description.
+
+    The antigen is read from the description (not the model name) via the two
+    antigen-agnostic patterns: ``anti-X`` (F1) or ``X-binding <type>`` (F2). If a
+    Fab chain role is spelled out ("Heavy chain" / "Light chain") it is appended
+    (unless *append_role* is False) so the two chains of one Fab differ only by
+    role, never by antigen+type. A single aux entry that covers BOTH Fab chains
+    passes ``append_role=False`` -- appending one chain's role would mislabel the
+    other, so a combined entry keeps the base ``anti-<ANTIGEN> <TYPE>`` name.
+    Returns ``(name, raw_antigen_token)`` where *raw_antigen_token* is the pattern
+    capture group BEFORE alias normalisation (the caller guards the rename on it),
+    or ``None`` when no pattern matches (caller then keeps the model's name).
+    """
+    raw_token: str | None = None
+    m = re.search(BINDER_ANTIGEN_ANTI_PATTERN, description, flags=re.IGNORECASE)
+    if m:
+        raw_token = m.group(1)
+    else:
+        m = re.search(BINDER_ANTIGEN_BINDING_PATTERN, description, flags=re.IGNORECASE)
+        if m:
+            raw_token = m.group(1)
+    if not raw_token:
+        return None
+    antigen = _normalize_antigen_token(raw_token)
+    if not antigen:
+        return None
+    name = f"anti-{antigen} {type_word}"
+    if append_role:
+        desc_lower = description.lower()
+        if "heavy chain" in desc_lower:
+            name += " Heavy chain"
+        elif "light chain" in desc_lower:
+            name += " Light chain"
+    return name, raw_token
+
+
+def correct_binder_names(
+    enriched_entry: dict[str, Any],
+    aux_entries: list[dict[str, Any]] | None,
+) -> list[str]:
+    """Rewrite binder names the model mislabelled with the antigen they bind.
+
+    The model sometimes names an auxiliary binder (Fab / nanobody / scFv / DARPin)
+    after its ANTIGEN -- an "anti-BRIL Fab" annotated simply as "BRIL". The correct
+    name lives in the chain's RCSB description (``pdbx_description``), available
+    only here at aggregation time. A binder entry is rewritten in place only when
+    ALL of the following hold:
+
+    * its ``type.value`` is a binder type (:data:`BINDER_AUX_TYPE_VALUES`) -- this
+      is the PRIMARY guard against misfiring on a receptor-side fusion: a fusion is
+      typed "Fusion protein", never a binder type. (The no-slug check below is a
+      secondary discriminator: a fusion CHAIN can carry no GPCRdb slug when it is
+      modelled as its own entity -- e.g. 9D3G chain A CCR6-BRIL has
+      ``uniprots=None`` -- so the type gate, not the slug, is what protects it.)
+    * its chain carries NO GPCRdb slug -- secondary check; a binder chain never
+      carries a slug, so a slug on any claimed chain excludes the entry; and
+    * its chain description matches an antigen-agnostic anti-X / X-binding pattern
+      AND the raw captured antigen token appears in the entry's CURRENT name -- so
+      the rename fires only when the model actually named the binder after its
+      antigen (the "BRIL" bug), not when it used a legitimate clone/format name
+      (e.g. 7SRS "P2C2 Fab", whose antigen "5HT2BR" is absent from the name).
+
+    The rewrite is deterministic and safe, so it emits an advisory (non-blocking)
+    note per corrected entry, mirroring :func:`detect_crystallization_fusions`.
+    Fail-safe: when no pattern matches, or the current name is empty/missing, the
+    model's name is kept (never blanked). A single aux entry covering BOTH Fab
+    chains gets the base ``anti-<ANTIGEN> <TYPE>`` name (no single-chain role
+    suffix, which would mislabel the other chain). Operates on the post-vote
+    best-run aux entries; the CSV routing (driven by ``type.value``) is untouched
+    -- only the ``name`` changes.
+    """
+    if not aux_entries:
+        return []
+    chains = _build_all_polymer_chains(enriched_entry)
+    if not chains:
+        return []
+
+    notes: list[str] = []
+    for aux in aux_entries:
+        if not isinstance(aux, dict):
+            continue
+        raw_type = aux.get("type")
+        type_value = raw_type.get("value") if isinstance(raw_type, dict) else None
+        if type_value not in BINDER_AUX_TYPE_VALUES:
+            continue
+        # No-slug discriminator: read the slug of each chain the entry claims from
+        # the enriched roster. A binder carries no GPCRdb slug on any of its
+        # chains; a receptor-side fusion does, so a slug on any claimed chain
+        # excludes the entry from renaming.
+        aux_chains = _split_chain_ids(aux.get("chain_id"))
+        chain_infos = [chains[c] for c in aux_chains if c in chains]
+        if not chain_infos or any(info.get("slug") for info in chain_infos):
+            continue
+        # Fail-safe: with no current name there is nothing to guard the rename on
+        # (see below) and nothing worth correcting -- keep the entry untouched.
+        old_name = aux.get("name")
+        if not old_name or not isinstance(old_name, str):
+            continue
+        # A single-chain entry may carry a Heavy/Light role in its description; a
+        # combined entry (both Fab chains) must NOT -- appending one chain's role
+        # would mislabel the other, so it gets the base name only.
+        append_role = len(aux_chains) == 1
+        # The chains of one entry share a description in practice; use the first
+        # that yields a name so a Fab's Heavy/Light chains stay consistent.
+        type_word = _BINDER_TYPE_WORD.get(type_value, type_value)
+        new_name: str | None = None
+        for info in chain_infos:
+            candidate = _binder_name_from_description(
+                info.get("description") or "", type_word, append_role=append_role
+            )
+            if not candidate:
+                continue
+            name, raw_token = candidate
+            # Fire ONLY when the model named the binder after its antigen: the raw
+            # captured antigen token (before alias normalisation) must appear in the
+            # current name. This keeps a legitimate clone/format name (7SRS "P2C2
+            # Fab", antigen "5HT2BR") while still correcting the "BRIL"-style bug.
+            if raw_token.lower() not in old_name.lower():
+                continue
+            new_name = name
+            break
+        if new_name is None or new_name == old_name:
+            continue
+        aux["name"] = new_name
+        chain_str = ", ".join(sorted(aux_chains)) or "?"
+        notes.append(
+            f"{ALERT_PREFIX_BINDER_RENAME} at 'auxiliary_proteins': chain(s) "
+            f"{chain_str} named '{old_name}' after the antigen; renamed to "
+            f"'{new_name}' from the structure description."
         )
     return notes
 
@@ -1213,10 +1386,13 @@ def reconcile_gpcr_in_auxiliary(
 
     A Class C receptor is an obligate dimer; its partner protomer is a real GPCR
     chain. When the model files that partner under ``auxiliary_proteins`` (often as
-    type "Other"), it pollutes ``other_aux_proteins.csv``. The partner is already
-    recorded independently in the structures.csv Partner columns (via
-    :func:`resolve_partner_protomer` over ``all_gpcr_chains``), so removing the
-    auxiliary entry loses no data.
+    type "Other"), it pollutes ``other_aux_proteins.csv``. A real (>=4-TM) partner
+    protomer is already recorded independently in the structures.csv Partner columns
+    (via :func:`resolve_partner_protomer` over ``all_gpcr_chains``), so removing the
+    auxiliary entry loses no data. (resolve_partner_protomer now gates the Partner
+    column on the same transmembrane threshold, so the "no data lost" invariant
+    holds for >=4-TM protomers; a sub-threshold chain is not a partner there
+    either, and the validated-roster guard below already keeps it out of eviction.)
 
     Two guards keep this from deleting legitimate auxiliary entries:
 
@@ -1275,6 +1451,327 @@ def reconcile_gpcr_in_auxiliary(
             }
         )
     best_run_data["auxiliary_proteins"] = kept
+
+
+# ---------------------------------------------------------------------------
+# G protein subunit fragment mis-filed under auxiliary_proteins / ligands
+# ---------------------------------------------------------------------------
+
+
+# The heterotrimer subunit columns a G protein-subunit slug routes to. Prefixes
+# are checked longest-first so "gbg" (gamma) is decided before the shorter "gbb"
+# (beta) it shares a stem with, and "gnb" (G-beta-5) before "gna" (alpha).
+_SUBUNIT_ALPHA = "alpha_subunit"
+_SUBUNIT_BETA = "beta_subunit"
+_SUBUNIT_GAMMA = "gamma_subunit"
+
+
+def _subunit_column_for_slug(slug: str) -> str | None:
+    """Route a G protein-subunit slug to its heterotrimer column, or ``None``.
+
+    ``gbg*`` -> gamma; ``gbb*`` / ``gnb*`` -> beta; ``gna*`` / ``gnat*`` ->
+    alpha. Order matters: gamma ("gbg") is decided before beta ("gbb") because
+    both begin "gb", and beta ("gnb") before alpha ("gna") because both begin
+    "gn". A slug outside :data:`G_PROTEIN_SUBUNIT_SLUG_PREFIXES` returns
+    ``None`` (not a subunit slug).
+    """
+    s = (slug or "").strip().lower()
+    if s.startswith("gbg"):
+        return _SUBUNIT_GAMMA
+    if s.startswith(("gbb", "gnb")):
+        return _SUBUNIT_BETA
+    if s.startswith(("gna", "gnat")):
+        return _SUBUNIT_ALPHA
+    return None
+
+
+def _chain_g_protein_subunit_slugs(
+    all_slugs: list[str],
+) -> dict[str, list[str]]:
+    """Map each subunit column to the subunit slugs a chain carries for it.
+
+    A chain can carry several UniProt slugs (a fusion). Only slugs that are G
+    protein subunits contribute; a receptor / fusion-partner slug is ignored.
+    Returns e.g. ``{"alpha_subunit": ["gnat1_bovin"]}`` for a clean alpha
+    fragment, or ``{"gamma_subunit": [...], "alpha_subunit": [...]}`` for a
+    cross-role gamma-Galpha fusion.
+    """
+    columns: dict[str, list[str]] = {}
+    for slug in all_slugs:
+        column = _subunit_column_for_slug(slug)
+        if column is not None:
+            columns.setdefault(column, []).append(slug.strip().lower())
+    return columns
+
+
+def _build_chain_identity_index(
+    enriched_entry: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Index every polymer chain's description, sequence, type, and ALL slugs.
+
+    Unlike :func:`_build_all_polymer_chains` (which keeps only the first slug),
+    this keeps the full slug list so a cross-role fusion chain (two subunit
+    slugs) can be told apart from a clean single-subunit chain. Non-polymer
+    ligands (ions, small molecules such as GDP) live in another bucket and are
+    absent here, which is itself the small-molecule type gate for a comp_id
+    ligand: it has no polymer chain to match.
+    """
+    index: dict[str, dict[str, Any]] = {}
+    for entity in enriched_entry.get("polymer_entities") or []:
+        if not isinstance(entity, dict):
+            continue
+        ep = entity.get("entity_poly") or {}
+        desc = ((entity.get("rcsb_polymer_entity") or {}).get("pdbx_description")) or ""
+        seq = ep.get("pdbx_seq_one_letter_code_can") or ep.get("pdbx_seq_one_letter_code") or ""
+        poly_type = (ep.get("type") or "").lower()
+        slugs = [
+            (u.get("gpcrdb_entry_name_slug") or "")
+            for u in (entity.get("uniprots") or [])
+            if isinstance(u, dict) and u.get("gpcrdb_entry_name_slug")
+        ]
+        for inst in entity.get("polymer_entity_instances") or []:
+            if not isinstance(inst, dict):
+                continue
+            auth = (inst.get("rcsb_polymer_entity_instance_container_identifiers") or {}).get(
+                "auth_asym_id"
+            )
+            if auth:
+                index[auth] = {
+                    "description": desc,
+                    "sequence": seq,
+                    "type": poly_type,
+                    "slugs": slugs,
+                }
+    return index
+
+
+def is_g_protein_fragment_chain(chain_info: dict[str, Any]) -> bool:
+    """Deterministically decide whether a polymer chain is a G protein fragment.
+
+    Identity comes from the STRUCTURE, never the model-supplied name:
+    * a conserved G-alpha alpha5 C-terminal motif in the modelled sequence, OR
+    * an RCSB description that reads as a G-alpha subunit, OR
+    * a UniProt slug that is a G protein alpha/beta/gamma subunit.
+
+    Only a polypeptide chain qualifies. A small molecule / ion (e.g. GDP) is a
+    non-polymer with no chain in this polymer index and no slug, so it trips none
+    of the three signals; the ``polypeptide`` type gate additionally excludes any
+    nucleic-acid or polysaccharide polymer chain from ever matching.
+    """
+    poly_type = (chain_info.get("type") or "").lower()
+    if "polypeptide" not in poly_type:
+        # G protein subunits are always polypeptide (RCSB "polypeptide(L)");
+        # a nucleic-acid / saccharide polymer is not one.
+        return False
+    seq = chain_info.get("sequence") or ""
+    desc = chain_info.get("description") or ""
+    slugs = chain_info.get("slugs") or []
+    if is_alpha5_mimetic_description(seq):
+        return True
+    if is_g_alpha_description(desc):
+        return True
+    return any((s or "").strip().lower().startswith(G_PROTEIN_SUBUNIT_SLUG_PREFIXES) for s in slugs)
+
+
+def _fill_subunit_record(subunit_block: dict[str, Any], slug: str, chain_id: str) -> None:
+    """Populate a G protein subunit record with the recovered slug + chain id.
+
+    Mirrors the schema shape (``uniprot_entry_name`` + ``chain_id``). Uses
+    ``setdefault`` so an existing curated value is never overwritten; the
+    relocation only fills a blank subunit column.
+    """
+    subunit_block.setdefault("uniprot_entry_name", slug)
+    subunit_block.setdefault("chain_id", chain_id)
+
+
+def relocate_misfiled_g_protein_fragments(
+    enriched_entry: dict[str, Any],
+    best_run_data: dict[str, Any],
+) -> list[str]:
+    """Recover G protein subunit fragments the model misfiled in the wrong bucket.
+
+    A G protein piece (a GaCT / alpha5 C-terminal peptide, or a beta/gamma
+    subunit the model named with an experimental tag such as "HiBiT"/"SmBiT")
+    sometimes lands in ``auxiliary_proteins`` or ``ligands`` instead of the G
+    protein record. This walks both buckets, identifies each misfiled fragment by
+    :func:`is_g_protein_fragment_chain` (structure, never the model name), and:
+
+    * **Unambiguous** (chain carries exactly ONE subunit column's slug) -> moves
+      it into that ``alpha_subunit`` / ``beta_subunit`` / ``gamma_subunit`` of the
+      G protein record (filling slug + chain id, and for an alpha C-terminal /
+      alpha5 fragment adding a fragment note to the g_protein 'note'), removes it
+      from its original bucket, and raises a GATING critical warning so a curator
+      confirms the recovered data. If the target column is ALREADY populated with
+      a DIFFERENT curated subunit (a genuine conflict), nothing is moved: the entry
+      stays in its bucket and a distinct gating conflict warning is raised for
+      manual resolution (setdefault would silently keep the curated value, so
+      moving the entry would lose the recovered slug+chain and misreport a move).
+    * **No usable slug** (detected by sequence/description but carrying no subunit
+      slug -- a short GaCT peptide, or an engineered mini-G / chimera) -> the
+      column cannot be determined, so it raises a gating alert only and is left
+      where it is.
+    * **Cross-role fusion** (a single chain carrying slugs for TWO subunit columns,
+      e.g. a gamma-Galpha fusion) -> routing is ambiguous, so it raises a gating
+      alert only and is NOT auto-routed.
+
+    Returns one gating warning string per detected fragment (relocated or gated).
+    Mutates *best_run_data* in place for the relocation cases.
+    """
+    chain_index = _build_chain_identity_index(enriched_entry)
+    if not chain_index:
+        return []
+
+    partners = best_run_data.get("signaling_partners")
+    if not isinstance(partners, dict):
+        partners = {}
+        best_run_data["signaling_partners"] = partners
+    g_protein = partners.get("g_protein")
+    if not isinstance(g_protein, dict):
+        g_protein = {}
+
+    warnings: list[str] = []
+
+    # Bucket name -> the mutable list in best_run_data. A tuple keeps a stable
+    # iteration order (auxiliary first, then ligands) for deterministic output.
+    for bucket_name in ("auxiliary_proteins", "ligands"):
+        bucket = best_run_data.get(bucket_name)
+        if not isinstance(bucket, list) or not bucket:
+            continue
+        kept: list[Any] = []
+        for entry in bucket:
+            if not isinstance(entry, dict):
+                kept.append(entry)
+                continue
+            # Small-molecule type gate on the ENTRY. A ligand that carries a
+            # chemical-component id (GDP, an ion, a small molecule) is not a
+            # polypeptide subunit -- and its author chain frequently COLLIDES with a
+            # polymer chain's (e.g. 5G53: GDP and the G-alpha both auth-chain "C"),
+            # so it must be excluded here before the chain match, or a nucleotide
+            # would be mis-relocated onto the G-alpha it happens to share a chain
+            # with. A genuine misfiled subunit is a peptide/protein entry with no
+            # chem_comp_id.
+            comp_id = (entry.get("chem_comp_id") or "").strip().lower()
+            if comp_id and comp_id not in EMPTY_VALUES:
+                kept.append(entry)
+                continue
+            entry_chains = _split_chain_ids(entry.get("chain_id"))
+            # Match the entry to a fragment chain in the structure. A misfiled
+            # subunit is one chain; use the first claimed chain that the structure
+            # marks as a G protein fragment.
+            matched_chain: str | None = None
+            for c in sorted(entry_chains):
+                info = chain_index.get(c)
+                if not info or not is_g_protein_fragment_chain(info):
+                    continue
+                # Belt on top of the chem_comp_id gate, for the LIGAND bucket only: a
+                # real subunit fragment is always a polypeptide. A nonpolymer (e.g.
+                # GDP) whose comp_id is absent could otherwise slip the gate above and
+                # match the G-alpha polymer it shares an author chain with; requiring
+                # the matched chain to be polypeptide blocks that. Peptide/protein
+                # fragments are polypeptide, so no genuine fragment is excluded.
+                # (is_g_protein_fragment_chain already enforces polypeptide today; this
+                # keeps the LIGAND path safe even if that gate is ever relaxed.)
+                if (
+                    bucket_name == "ligands"
+                    and "polypeptide" not in (info.get("type") or "").lower()
+                ):
+                    continue
+                matched_chain = c
+                break
+            if matched_chain is None:
+                kept.append(entry)
+                continue
+
+            info = chain_index[matched_chain]
+            columns = _chain_g_protein_subunit_slugs(info.get("slugs") or [])
+            name = entry.get("name") or entry.get("chem_comp_id") or "unknown"
+            desc = (info.get("description") or "").strip()
+
+            if len(columns) == 1:
+                # Unambiguous: exactly one subunit column. Relocate + gate -- but
+                # only when the fill actually takes. If the column already holds a
+                # DIFFERENT curated slug, setdefault would (correctly) leave it, yet
+                # removing the origin entry and claiming a move would lose the
+                # recovered slug+chain and lie about what happened. So decide first.
+                column = next(iter(columns))
+                slug = columns[column][0]
+                # Ensure the G protein record exists once we know we will fill it.
+                if not isinstance(partners.get("g_protein"), dict):
+                    partners["g_protein"] = g_protein
+                subunit_block = g_protein.get(column)
+                if not isinstance(subunit_block, dict):
+                    subunit_block = {}
+                    g_protein[column] = subunit_block
+                existing_slug = (subunit_block.get("uniprot_entry_name") or "").strip().lower()
+                # A genuine conflict: the column already names a DIFFERENT subunit. Same
+                # slug already present is not a conflict (idempotent -- the end state
+                # already holds the recovered value, so treat it as a clean fill and
+                # remove the duplicate origin entry, matching setdefault's semantics).
+                if existing_slug and existing_slug != slug:
+                    kept.append(entry)  # keep the entry -- nothing was moved
+                    warnings.append(
+                        f"{ALERT_PREFIX_G_PROTEIN_MISFILED} at "
+                        f"'signaling_partners.g_protein.{column}': '{name}' (chain "
+                        f"{matched_chain}) recovered {slug} but the {column} already "
+                        f"holds a different subunit ({existing_slug}); resolve manually. "
+                        f"Not moved automatically."
+                    )
+                    continue
+                _fill_subunit_record(subunit_block, slug, matched_chain)
+                # The "only the alpha5 fragment is modelled" note is accurate ONLY
+                # when the alpha5 sequence motif is actually present. A full-length
+                # G-alpha matched by description alone (is_g_alpha_description) is not a
+                # C-terminal fragment, so it gets no fragment note.
+                is_alpha_fragment = column == _SUBUNIT_ALPHA and is_alpha5_mimetic_description(
+                    info.get("sequence") or ""
+                )
+                if is_alpha_fragment:
+                    fragment_note = (
+                        f"Only the G-alpha C-terminal / alpha5 fragment is modelled "
+                        f"(chain {matched_chain})."
+                    )
+                    existing_note = g_protein.get("note")
+                    if isinstance(existing_note, str) and existing_note.strip():
+                        if fragment_note not in existing_note:
+                            g_protein["note"] = f"{existing_note.rstrip()} {fragment_note}"
+                    else:
+                        g_protein["note"] = fragment_note
+                warnings.append(
+                    f"{ALERT_PREFIX_G_PROTEIN_RELOCATED} at "
+                    f"'signaling_partners.g_protein.{column}': '{name}' (chain "
+                    f"{matched_chain}, slug {slug}) was filed under {bucket_name} but is a "
+                    f"G protein {column.split('_')[0]} subunit; moved into the G protein "
+                    f"record. Confirm the recovered subunit."
+                )
+                # Removed from its original bucket (do not re-add to kept).
+                continue
+
+            if len(columns) >= 2:
+                # Cross-role fusion (e.g. gamma + alpha on one chain): routing is
+                # ambiguous, so surface it and leave it in place.
+                col_names = ", ".join(sorted(columns))
+                kept.append(entry)
+                warnings.append(
+                    f"{ALERT_PREFIX_G_PROTEIN_MISFILED} at '{bucket_name}': '{name}' (chain "
+                    f"{matched_chain}) is a G protein fragment carrying two subunit "
+                    f"identities ({col_names}) -- routing is ambiguous. Assign the correct "
+                    f"G protein subunit manually; not moved automatically."
+                )
+                continue
+
+            # No usable subunit slug: detected by sequence / description only, so
+            # the subunit column cannot be determined. Gate, do not move.
+            kept.append(entry)
+            warnings.append(
+                f"{ALERT_PREFIX_G_PROTEIN_MISFILED} at '{bucket_name}': '{name}' (chain "
+                f"{matched_chain}, '{desc}') is a G protein-derived fragment filed under "
+                f"{bucket_name} but carries no subunit slug, so its subunit column cannot "
+                f"be determined. Assign it to the G protein record manually; not moved "
+                f"automatically."
+            )
+        best_run_data[bucket_name] = kept
+
+    return warnings
 
 
 # ---------------------------------------------------------------------------

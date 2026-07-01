@@ -85,8 +85,10 @@ from gpcr_tools.validator.integrity_checker import validate_all
 from gpcr_tools.validator.ligand_validator import validate_and_enrich_ligands
 from gpcr_tools.validator.oligomer import (
     analyze_oligomer,
+    correct_binder_names,
     detect_crystallization_fusions,
     reconcile_missed_polymers,
+    relocate_misfiled_g_protein_fragments,
 )
 from gpcr_tools.validator.receptor_validator import validate_receptor_identity
 
@@ -270,6 +272,19 @@ def _build_validation_report(
         "timestamp": datetime.now(tz=UTC).isoformat(),
     }
 
+    # G protein subunit fragments the model misfiled under auxiliary_proteins /
+    # ligands (a GaCT / alpha5 peptide, or a tag-named beta/gamma subunit). An
+    # unambiguous single-subunit fragment is MOVED into the G protein record (a
+    # gating warning routes the move to a curator); a no-slug or cross-role fragment
+    # is gated in place. This mutates the ligands / auxiliary_proteins lists, so it
+    # must run BEFORE the integrity check's positional list-index recursion
+    # (validate_all emits 'ligands[N]' paths that curate parses into index cleanups),
+    # exactly as the excluded-buffer prune (step 10b) precedes this report for the
+    # same reason.
+    report["critical_warnings"].extend(
+        relocate_misfiled_g_protein_fragments(enriched_entry, best_run_data)
+    )
+
     # Integrity checks (ghost chain, fake UniProt/PubChem, ghost ligand, method)
     integrity_warnings = validate_all(pdb_id, best_run_data, enriched_entry, cache=validation_cache)
     report["critical_warnings"].extend(integrity_warnings)
@@ -296,6 +311,13 @@ def _build_validation_report(
     # Receptor-side crystallization fusions (BRIL / T4 lysozyme) -- advisory,
     # non-blocking: recorded for the curator, does not gate accept-all.
     report["detector_notes"].extend(detect_crystallization_fusions(enriched_entry))
+
+    # Auxiliary binders (Fab / nanobody / scFv / DARPin) the model named after the
+    # antigen they bind -- rewritten to a canonical name from the RCSB chain
+    # description. Deterministic and safe -> advisory note, mutates the name in place.
+    report["detector_notes"].extend(
+        correct_binder_names(enriched_entry, best_run_data.get("auxiliary_proteins"))
+    )
 
     # Chimeric G protein review is driven by the deterministic alpha5 analysis,
     # NOT the model's optional is_chimeric flag (which the model can silently

@@ -15,6 +15,7 @@ from gpcr_tools.config import (
     ALERT_MISSED_PROTOMER,
     ALERT_MULTI_COPY_LIGAND,
     ALERT_NO_GPCR,
+    ALERT_NON_RECEPTOR_PARTNER,
     ALERT_OLIGOMER_DISAGREEMENT,
     ALERT_SUSPICIOUS_7TM,
     ALERT_TM_DATA_UNAVAILABLE,
@@ -61,6 +62,7 @@ class TestOligomerGatingWarnings:
             ALERT_NO_GPCR,
             ALERT_TM_DATA_UNAVAILABLE,
             ALERT_OLIGOMER_DISAGREEMENT,
+            ALERT_NON_RECEPTOR_PARTNER,
         ):
             msg = f"[{atype}] at 'oligomer_analysis': something to confirm"
             oligo = {

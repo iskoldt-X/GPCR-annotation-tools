@@ -58,9 +58,15 @@ class TestGpcrdbColumnContract:
             "Date",
             "In structure",
         )
-        assert {"label_asym_id", "SMILES", "InChIKey", "Sequence", "is_endogenous", "Site"} <= set(
-            CSV_SCHEMA["ligands.csv"][9:]
-        )
+        assert {
+            "label_asym_id",
+            "SMILES",
+            "InChIKey",
+            "Sequence",
+            "is_endogenous",
+            "Site",
+            "Residue_seq_id",
+        } <= set(CSV_SCHEMA["ligands.csv"][9:])
 
     def test_g_proteins_core_columns(self):
         assert CSV_SCHEMA["g_proteins.csv"][:8] == (
@@ -151,13 +157,18 @@ class TestTransformForCSV:
         assert len(rows) == 1
         row = rows[0]
         assert row["PDB"] == "TEST1"
-        assert row["Name"] == "Adenosine"
+        # Name carries the canonical PDBe chemical-component code; the descriptive
+        # name moves to Title.
+        assert row["Name"] == "ADN"
+        assert row["Title"] == "Adenosine"
         assert row["PubChemID"] == "2519"
         assert row["Role"] == "Agonist"
         assert row["ChainID"] == "A"
         assert row["InChIKey"] == "OIRDTQYFTABQOQ-KQYNXXCUSA-N"
         # An ordinary ligand has no dual-role site_ref, so the Site column is blank.
         assert row["Site"] == ""
+        # No nonpolymer instance index in this fixture -> no residue numbers.
+        assert row["Residue_seq_id"] == ""
 
     def test_site_ref_populates_site_column(self, sample_pdb_data):
         data = copy.deepcopy(sample_pdb_data)
@@ -226,7 +237,8 @@ class TestTransformForCSV:
                 "site_ref": "orthosteric",
             }
         )
-        names = [r["Name"] for r in transform_for_csv("TEST1", data)["ligands.csv"]]
+        # Descriptive names now live in Title (Name carries the component code).
+        names = [r["Title"] for r in transform_for_csv("TEST1", data)["ligands.csv"]]
         assert "Apo" not in names
         assert "Adenosine" in names
 
@@ -246,7 +258,8 @@ class TestTransformForCSV:
             }
         )
         _prune_excluded_buffer_ligands(data)
-        names = [r["Name"] for r in transform_for_csv("TEST1", data)["ligands.csv"]]
+        # Descriptive names now live in Title (Name carries the component code).
+        names = [r["Title"] for r in transform_for_csv("TEST1", data)["ligands.csv"]]
         assert "n-octyl-beta-D-glucoside" not in names
         assert "Adenosine" in names
 
@@ -497,7 +510,9 @@ class TestGhostLigandExport:
             },
         ]
         rows = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"]
-        assert [r["Name"] for r in rows] == ["Real"]
+        # Name now carries the component code; "Real" is the descriptive name (ATP).
+        assert [r["Name"] for r in rows] == ["ATP"]
+        assert [r["Title"] for r in rows] == ["Real"]
 
     def test_ghost_ligand_kept_when_curator_confirms(self, sample_pdb_data):
         sample_pdb_data["ligands"] = [
@@ -511,7 +526,9 @@ class TestGhostLigandExport:
             },
         ]
         rows = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"]
-        assert [r["Name"] for r in rows] == ["Sucralose"]
+        # Name now carries the component code (SUL); the descriptive name is Title.
+        assert [r["Name"] for r in rows] == ["SUL"]
+        assert [r["Title"] for r in rows] == ["Sucralose"]
 
     def test_non_ghost_ligands_unaffected(self, sample_pdb_data):
         sample_pdb_data["ligands"] = [
@@ -530,7 +547,9 @@ class TestGhostLigandExport:
             },
         ]
         rows = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"]
-        assert {r["Name"] for r in rows} == {"Matched", "NoStatus"}
+        # Name now carries the component codes; the descriptive names are in Title.
+        assert {r["Name"] for r in rows} == {"ATP", "GTP"}
+        assert {r["Title"] for r in rows} == {"Matched", "NoStatus"}
 
 
 class TestNonFunctionalLigandExport:
@@ -561,7 +580,9 @@ class TestNonFunctionalLigandExport:
             },
         ]
         rows = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"]
-        assert [r["Name"] for r in rows] == ["Retinal"]
+        # Name now carries the component code (Retinal -> RET); Palmitate is dropped.
+        assert [r["Name"] for r in rows] == ["RET"]
+        assert [r["Title"] for r in rows] == ["Retinal"]
 
     def test_functional_ligand_kept(self, sample_pdb_data):
         sample_pdb_data["ligands"] = [
@@ -578,7 +599,9 @@ class TestNonFunctionalLigandExport:
             },
         ]
         rows = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"]
-        assert [r["Name"] for r in rows] == ["Sphingosine-1-phosphate"]
+        # Name now carries the component code (S1P); descriptive name -> Title.
+        assert [r["Name"] for r in rows] == ["S1P"]
+        assert [r["Title"] for r in rows] == ["Sphingosine-1-phosphate"]
 
     def test_ligand_without_role_check_unaffected(self, sample_pdb_data):
         sample_pdb_data["ligands"] = [
@@ -591,7 +614,9 @@ class TestNonFunctionalLigandExport:
             },
         ]
         rows = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"]
-        assert [r["Name"] for r in rows] == ["Adenosine"]
+        # Name now carries the component code (Adenosine -> ADN); name -> Title.
+        assert [r["Name"] for r in rows] == ["ADN"]
+        assert [r["Title"] for r in rows] == ["Adenosine"]
 
 
 class TestLigandLabelAsymId:
@@ -621,6 +646,8 @@ class TestLigandLabelAsymId:
         row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
         # 'F' is the ligand's own label, not its author chain 'A' nor polymer 'Z'.
         assert row["label_asym_id"] == "F"
+        # The residue number comes from the same instance, aligned to the label.
+        assert row["Residue_seq_id"] == "501"
 
     def test_multi_instance_joins_labels(self, sample_pdb_data):
         sample_pdb_data["oligomer_analysis"] = {
@@ -636,6 +663,8 @@ class TestLigandLabelAsymId:
         row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
         # Both copies' own labels, never the receptor polymer label 'Z'.
         assert row["label_asym_id"] == "F, G"
+        # Residue numbers track the same instance order, copy-for-copy.
+        assert row["Residue_seq_id"] == "501, 502"
 
     def test_unindexed_ligand_has_blank_label(self, sample_pdb_data):
         sample_pdb_data["oligomer_analysis"] = {"label_asym_id_map": {"A": "Z"}}
@@ -643,6 +672,133 @@ class TestLigandLabelAsymId:
         row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
         # No instance index -> blank, NOT the receptor's polymer label 'Z'.
         assert row["label_asym_id"] == ""
+        # No instance -> no residue numbers either.
+        assert row["Residue_seq_id"] == ""
+
+
+class TestLigandNameAndResidue:
+    """Name carries the canonical PDBe chemical-component code (falling back to the
+    descriptive name only when no code exists); Title carries the descriptive name;
+    Residue_seq_id carries the auth_seq_id of each modelled copy, aligned
+    copy-for-copy with label_asym_id (NOT the AI chain_id)."""
+
+    def _ligand(self, **extra):
+        base = {
+            "name": "descriptive name",
+            "chem_comp_id": "LIG",
+            "chain_id": "A",
+            "validation_status": VALIDATION_MATCHED_SMALL_MOLECULE,
+            "role": {"value": "Agonist"},
+        }
+        base.update(extra)
+        return base
+
+    def test_three_letter_code_with_residue(self, sample_pdb_data):
+        # A three-letter small-molecule code with one modelled copy (6WHA's U0G,
+        # the agonist 25CN-NBOH, sits at auth_seq_id 501 on label chain F).
+        sample_pdb_data["oligomer_analysis"] = {
+            "nonpolymer_instance_index": {
+                "U0G": [{"auth_asym_id": "A", "label_asym_id": "F", "auth_seq_id": "501"}]
+            }
+        }
+        sample_pdb_data["ligands"] = [self._ligand(name="25CN-NBOH", chem_comp_id="U0G")]
+        row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
+        assert row["Name"] == "U0G"
+        assert row["Title"] == "25CN-NBOH"
+        assert row["label_asym_id"] == "F"
+        assert row["Residue_seq_id"] == "501"
+
+    def test_five_letter_ccd_code_passes_through(self, sample_pdb_data):
+        # A five-letter CCD code (the newer PDBe extended namespace) must pass
+        # through into Name verbatim, not be truncated or rejected.
+        sample_pdb_data["oligomer_analysis"] = {
+            "nonpolymer_instance_index": {
+                "A1H1S": [{"auth_asym_id": "A", "label_asym_id": "C", "auth_seq_id": "201"}]
+            }
+        }
+        sample_pdb_data["ligands"] = [self._ligand(name="some inhibitor", chem_comp_id="A1H1S")]
+        row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
+        assert row["Name"] == "A1H1S"
+        assert row["Title"] == "some inhibitor"
+        assert row["Residue_seq_id"] == "201"
+
+    def test_no_comp_id_peptide_falls_back_to_name(self, sample_pdb_data):
+        # A peptide ligand carries no chemical-component code (the schema emits the
+        # "None" sentinel); Name must fall back to the descriptive name, never the
+        # literal string "None", and the residue column stays blank.
+        sample_pdb_data["oligomer_analysis"] = {}
+        sample_pdb_data["ligands"] = [
+            self._ligand(name="Substance P", chem_comp_id="None", type="peptide")
+        ]
+        row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
+        assert row["Name"] == "Substance P"
+        assert row["Name"] != "None"
+        assert row["Title"] == "Substance P"
+        assert row["Residue_seq_id"] == ""
+
+    def test_no_comp_id_and_no_name_yields_blank_not_sentinel(self, sample_pdb_data):
+        # When BOTH the component code and the descriptive name are empty/"None"
+        # sentinels, the fallback must collapse to an empty string -- never the
+        # literal "None" leaking into Name (nor into the residue column).
+        sample_pdb_data["oligomer_analysis"] = {}
+        sample_pdb_data["ligands"] = [self._ligand(name="None", chem_comp_id="None")]
+        row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
+        assert row["Name"] == ""
+        assert row["Residue_seq_id"] == ""
+
+    def test_branched_glycan_no_instance_blank_residue(self, sample_pdb_data):
+        # A branched glycan has no entry in the non-polymer instance index, so the
+        # residue column is blank (and Name still carries whatever code it has).
+        sample_pdb_data["oligomer_analysis"] = {
+            "nonpolymer_instance_index": {"OTHER": [{"label_asym_id": "F", "auth_seq_id": "1"}]}
+        }
+        sample_pdb_data["ligands"] = [
+            self._ligand(name="glycan", chem_comp_id="NAG", type="branched")
+        ]
+        row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
+        assert row["Name"] == "NAG"
+        assert row["label_asym_id"] == ""
+        assert row["Residue_seq_id"] == ""
+
+    def test_residue_aligns_to_label_not_ai_chain_order(self, sample_pdb_data):
+        # 9AYF's 9IG (NPS R-568) is modelled twice; the index is sorted by
+        # label_asym_id to ["EA" (chain R, 1011), "T" (chain Q, 1010)] -- the
+        # REVERSE of the AI chain_id order "Q, R". The residue column must follow
+        # the label order, proving it is sourced from the instance list and not
+        # zipped against the AI chain_id.
+        sample_pdb_data["oligomer_analysis"] = {
+            "nonpolymer_instance_index": {
+                "9IG": [
+                    {"auth_asym_id": "R", "label_asym_id": "EA", "auth_seq_id": "1011"},
+                    {"auth_asym_id": "Q", "label_asym_id": "T", "auth_seq_id": "1010"},
+                ]
+            }
+        }
+        sample_pdb_data["ligands"] = [
+            self._ligand(name="NPS R-568", chem_comp_id="9IG", chain_id="Q, R")
+        ]
+        row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
+        assert row["Name"] == "9IG"
+        # label order is "EA, T" (chain R's copy first); residues follow in lockstep.
+        assert row["label_asym_id"] == "EA, T"
+        assert row["Residue_seq_id"] == "1011, 1010"
+
+    def test_high_cardinality_multi_copy(self, sample_pdb_data):
+        # A high-cardinality ion (e.g. eight modelled calcium copies) emits every
+        # copy's label and residue, aligned position-for-position.
+        instances = [
+            {"auth_asym_id": "A", "label_asym_id": chr(ord("F") + i), "auth_seq_id": str(700 + i)}
+            for i in range(8)
+        ]
+        sample_pdb_data["oligomer_analysis"] = {"nonpolymer_instance_index": {"CA": instances}}
+        sample_pdb_data["ligands"] = [self._ligand(name="Calcium ion", chem_comp_id="CA")]
+        row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
+        labels = row["label_asym_id"].split(", ")
+        residues = row["Residue_seq_id"].split(", ")
+        assert len(labels) == 8
+        assert len(residues) == 8
+        assert labels == [chr(ord("F") + i) for i in range(8)]
+        assert residues == [str(700 + i) for i in range(8)]
 
 
 def test_transform_skips_non_dict_ligand():

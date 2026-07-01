@@ -1181,6 +1181,13 @@ ALERT_TM_DATA_UNAVAILABLE: str = "TM_DATA_UNAVAILABLE"
 # The classification cannot be settled mechanically here, so route to a curator.
 # Promoted to a gating warning.
 ALERT_OLIGOMER_DISAGREEMENT: str = "OLIGOMER_DISAGREEMENT"
+# A chain carrying a GPCR slug was about to be recorded as an ADDITIONAL receptor
+# protomer in the Partner_UniProt column, but its UniProt annotation does not
+# carry enough transmembrane helices to be a 7TM receptor (a peptide ligand, a
+# soluble protein agonist, a single-pass co-receptor mis-mapped to a slug). It is
+# dropped from the partner set so the column only admits real receptor protomers;
+# the eviction is surfaced so the curator can confirm the chain's true role.
+ALERT_NON_RECEPTOR_PARTNER: str = "NON_RECEPTOR_PARTNER"
 
 # ---------------------------------------------------------------------------
 # 7TM statuses & detection constants
@@ -1273,6 +1280,16 @@ GPCR_SLUG_NEGATIVE_PREFIXES: tuple[str, ...] = (
 # ---------------------------------------------------------------------------
 
 CRYSTALLIZATION_FUSION_SLUGS: tuple[str, ...] = ("c562", "enlys")
+# BRIL cytochrome substring, kept narrow on purpose. The auxiliary-name
+# normaliser uses this to fold the cytochrome-b562 spellings into the house name
+# "BRIL"; the literal "BRIL"/"bril" spelling is handled separately by a
+# word-boundary `\bbril\b` regex in the normaliser. This constant intentionally
+# holds only the cytochrome substring — "b562" alone is excluded as too greedy
+# (it would match the distinct Pfam "Cytochrome c/b562"). It must NOT reuse
+# CRYSTALLIZATION_FUSION_KEYWORDS below: that tuple also matches lysozyme / GFP /
+# glycogen synthase, which are their own distinct fusions and must keep their own
+# names.
+BRIL_CYTOCHROME_TOKEN: str = "cytochrome b562"
 CRYSTALLIZATION_FUSION_KEYWORDS: tuple[str, ...] = (
     "bril",
     "b562",
@@ -1288,6 +1305,47 @@ CRYSTALLIZATION_FUSION_KEYWORDS: tuple[str, ...] = (
     # fusion aid. Requires both words to match, so the false-keep surface is small.
     "glycogen synthase",
 )
+
+# ---------------------------------------------------------------------------
+# Antibody / binder name correction
+# ---------------------------------------------------------------------------
+# The model sometimes names an auxiliary binder (Fab / nanobody / scFv / DARPin)
+# after the ANTIGEN it binds rather than the binder itself -- e.g. an "anti-BRIL
+# Fab" annotated simply as "BRIL". The correct name lives in the chain's RCSB
+# description (pdbx_description), available only at aggregation time. A binder is
+# rewritten only when ALL THREE hold: (a) its type is a binder type below,
+# (b) its chain carries NO GPCRdb slug (every real receptor-side fusion carries
+# one, so this never misfires on a fusion), and (c) its description matches one of
+# the antigen-agnostic patterns below.
+
+# Binder auxiliary-protein type values (the aux `type.value` enum subset that can
+# be named after an antigen). "Antibody fab fragment" matches the schema enum.
+BINDER_AUX_TYPE_VALUES: frozenset[str] = frozenset(
+    {"Antibody", "Antibody fab fragment", "Nanobody", "scFv", "DARPin"}
+)
+
+# Antigen-agnostic patterns read from the description (NOT the model name):
+#   F1 "anti-X ..."      -> captures the antigen token X after "anti-".
+#   F2 "X-binding <type>" -> captures X before "-binding <binder type>".
+# Deliberately NOT matched: bare "X antibody" (catches clone/format names like
+# scFv16, Nb35) and a lone "binding" token (catches "guanine nucleotide-binding
+# protein"). The type-gate + no-slug-gate + these two patterns are the discriminator.
+BINDER_ANTIGEN_ANTI_PATTERN: str = r"\banti[-\s]+([A-Za-z0-9][\w./-]*)"
+BINDER_ANTIGEN_BINDING_PATTERN: str = (
+    r"\b([\w/-]+)[-\s]binding\s+(nanobody|fab|scfv|sybody|darpin)\b"
+)
+
+# Surface-form normalisation for captured antigen tokens. Unknown tokens keep
+# their captured surface form (default), so the map need only fix known casings.
+BINDER_ANTIGEN_ALIASES: dict[str, str] = {
+    "bril": "BRIL",
+    "5-ht2b": "5-HT2B",
+    "5ht2br": "5-HT2B",
+    "gprc5d": "GPRC5D",
+    "ron": "RON",
+    "fab": "Fab",
+    "hinge": "hinge",
+}
 
 # ---------------------------------------------------------------------------
 # Download log status values (produced by papers/downloader, consumed by papers/watcher)
@@ -1333,10 +1391,18 @@ ALERT_PREFIX_API_UNAVAILABLE: str = "[API_UNAVAILABLE]"
 ALERT_PREFIX_CHIMERIC_REVIEW: str = "[CHIMERIC G PROTEIN]"
 ALERT_PREFIX_MISSED_POLYMER: str = "[UNANNOTATED CHAIN]"
 ALERT_PREFIX_FUSION_NOTE: str = "[CRYSTALLIZATION FUSION]"
+ALERT_PREFIX_BINDER_RENAME: str = "[BINDER NAME CORRECTED]"
 ALERT_PREFIX_ALPHA5_GRAFT: str = "[ALPHA5 GRAFT]"
 ALERT_PREFIX_UNRECOGNISED_G_ALPHA: str = "[UNRECOGNISED G-ALPHA]"
 ALERT_PREFIX_G_PROTEIN_LIGAND: str = "[G PROTEIN PEPTIDE AS LIGAND]"
 ALERT_PREFIX_MULTIPLE_AGONISTS: str = "[MULTIPLE AGONISTS]"
+# A G protein subunit fragment the model misfiled under auxiliary_proteins /
+# ligands, moved into the G protein record by its subunit slug.
+ALERT_PREFIX_G_PROTEIN_RELOCATED: str = "[G PROTEIN SUBUNIT RELOCATED]"
+# A misfiled G protein fragment whose subunit column cannot be resolved
+# deterministically (no subunit slug, or slugs spanning two subunit columns);
+# surfaced for a curator but NOT moved.
+ALERT_PREFIX_G_PROTEIN_MISFILED: str = "[G PROTEIN SUBUNIT MISFILED]"
 
 # ---------------------------------------------------------------------------
 # Annotator function call name
@@ -1387,6 +1453,9 @@ CSV_SCHEMA: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
             # columns positionally (PDB..In structure), so the binding-site type
             # goes at the end alongside the other added columns.
             "Site",
+            # Appended: the auth_seq_id of each modelled copy, comma-joined and
+            # aligned 1:1 with the label_asym_id column (same instance list).
+            "Residue_seq_id",
         ),
         "g_proteins.csv": (
             "PDB",

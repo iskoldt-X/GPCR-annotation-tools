@@ -153,19 +153,39 @@ def transform_for_csv(pdb_id: str, data: dict) -> dict[str, list[dict[str, str]]
         # copy -> its label; several -> all of them, comma-joined (mirroring the
         # ChainID column). Unindexed ligand -> blank (no protein-chain fallback).
         comp_id = sanitize_value(lig.get("chem_comp_id"))
-        instances = nonpolymer_instances.get(comp_id) if comp_id else None
+        instances = (
+            nonpolymer_instances.get(comp_id) if comp_id and not is_empty_key(comp_id) else None
+        )
         if instances:
             lig_label = ", ".join(
                 sanitize_value(i.get("label_asym_id")) for i in instances if i.get("label_asym_id")
             )
+            # Residue numbers come from the SAME filtered instance list (already
+            # sorted by label_asym_id at the source), emitting auth_seq_id in place
+            # of label_asym_id so the two columns line up copy-for-copy. Sourcing
+            # from the AI chain_id instead would desync in order and cardinality.
+            lig_residue_seq = ", ".join(
+                sanitize_value(i.get("auth_seq_id")) for i in instances if i.get("label_asym_id")
+            )
         else:
             lig_label = ""
+            lig_residue_seq = ""
+        # The PDBe chemical-component id is the canonical ligand identity, so it
+        # goes in Name; the descriptive free-text name goes in Title. When the
+        # component id is empty/"None"/missing (e.g. a peptide or branched
+        # glycan), fall back to the descriptive name rather than writing a blank
+        # or the literal "None" — and if that descriptive name is itself empty/
+        # "None", write an empty string instead of the sentinel.
+        if is_empty_key(comp_id):
+            lig_name = "" if is_empty_key(lig.get("name")) else sanitize_value(lig.get("name"))
+        else:
+            lig_name = comp_id
         rows_map["ligands.csv"].append(
             {
                 "PDB": pdb_id,
                 "ChainID": lig_chain,
                 "label_asym_id": lig_label,
-                "Name": sanitize_value(lig.get("name")),
+                "Name": lig_name,
                 # The schema tells the model to emit the string "None" when there
                 # is no PubChem id; normalize that sentinel to empty rather than
                 # writing a literal "None" into the numeric column.
@@ -177,6 +197,8 @@ def transform_for_csv(pdb_id: str, data: dict) -> dict[str, list[dict[str, str]]
                 # (e.g. orthosteric / allosteric); blank for an ordinary ligand.
                 # This keeps the per-site rows distinct rather than duplicate.
                 "Site": sanitize_value(lig.get("site_ref")),
+                # Title is the descriptive free-text name, now distinct from Name
+                # (which carries the canonical chemical-component id).
                 "Title": sanitize_value(lig.get("name")),
                 "Type": sanitize_value(lig.get("type")),
                 "Date": sanitize_value(s_info.get("release_date")),
@@ -185,6 +207,7 @@ def transform_for_csv(pdb_id: str, data: dict) -> dict[str, list[dict[str, str]]
                 "InChIKey": sanitize_value(lig.get("InChIKey")),
                 "Sequence": sanitize_value(lig.get("Sequence")),
                 "is_endogenous": sanitize_value(lig.get("is_endogenous")),
+                "Residue_seq_id": lig_residue_seq,
             }
         )
 

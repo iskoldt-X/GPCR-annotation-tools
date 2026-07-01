@@ -504,17 +504,39 @@ class TestGProteinPeptideAsLigand:
         polymer = [_poly_entity("P", sequence="HAEGTFTSD", description="Glucagon-like peptide-1")]
         assert not self._gp_warnings(lig, polymer)
 
-    def test_g_alpha_peptide_with_unknown_role_not_flagged(self) -> None:
-        # The model honestly abstaining (role unknown) must never be flagged.
+    def test_g_alpha_peptide_with_unknown_role_flagged(self) -> None:
+        # A G protein fragment does not belong in the ligand bucket regardless of
+        # role: an 'unknown' role no longer suppresses the flag, because the
+        # mis-filing is the identity, not the role.
         lig = {"chain_id": "B", "name": "C-terminal peptide", "type": "peptide"}
         lig["role"] = {"value": "unknown"}
         polymer = [_poly_entity("B", sequence="ACDEF", description=_G_ALPHA_DESC)]
-        assert not self._gp_warnings(lig, polymer)
+        warnings = self._gp_warnings(lig, polymer)
+        assert warnings
+        assert _WARNING_REGEX.search(warnings[0]) is not None
 
-    def test_g_alpha_peptide_with_absent_role_not_flagged(self) -> None:
+    def test_g_alpha_peptide_with_absent_role_flagged(self) -> None:
+        # Same for a missing role: the G protein piece is misfiled in ligands.
         lig = {"chain_id": "B", "name": "C-terminal peptide", "type": "peptide"}
         polymer = [_poly_entity("B", sequence="ACDEF", description=_G_ALPHA_DESC)]
-        assert not self._gp_warnings(lig, polymer)
+        warnings = self._gp_warnings(lig, polymer)
+        assert warnings
+        assert _WARNING_REGEX.search(warnings[0]) is not None
+
+    def test_gact_alpha5_peptide_as_ligand_unknown_role_caught(self) -> None:
+        # 6NWE-style GaCT / alpha5 peptide (bare-sequence name, no slug) filed as a
+        # ligand with role unknown -> caught by identity (the alpha5 motif), even
+        # though the model made no functional-role claim.
+        lig = {
+            "chain_id": "B",
+            "name": "ILENLKDVGLF peptide CT2",
+            "type": "peptide",
+            "role": {"value": "unknown"},
+        }
+        polymer = [_poly_entity("B", sequence="ILENLKDVGLF", description="ILENLKDVGLF peptide CT2")]
+        warnings = self._gp_warnings(lig, polymer)
+        assert warnings
+        assert _WARNING_REGEX.search(warnings[0]) is not None
 
 
 class TestMultipleAgonists:
