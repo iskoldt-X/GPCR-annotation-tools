@@ -1453,8 +1453,11 @@ CSV_SCHEMA: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
             # columns positionally (PDB..In structure), so the binding-site type
             # goes at the end alongside the other added columns.
             "Site",
-            # Appended: the auth_seq_id of each modelled copy, comma-joined and
-            # aligned 1:1 with the label_asym_id column (same instance list).
+            # Appended: one token per modelled copy, each "<auth_asym_id>:<auth_seq_id>"
+            # (author chain : author residue number), comma-joined in the same order
+            # as, and 1:1 with, the label_asym_id column (same instance list). The
+            # chain prefix keeps a multi-copy ligand's repeating residue numbers
+            # unambiguous.
             "Residue_seq_id",
         ),
         "g_proteins.csv": (

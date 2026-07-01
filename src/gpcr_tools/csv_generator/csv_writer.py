@@ -161,11 +161,16 @@ def transform_for_csv(pdb_id: str, data: dict) -> dict[str, list[dict[str, str]]
                 sanitize_value(i.get("label_asym_id")) for i in instances if i.get("label_asym_id")
             )
             # Residue numbers come from the SAME filtered instance list (already
-            # sorted by label_asym_id at the source), emitting auth_seq_id in place
-            # of label_asym_id so the two columns line up copy-for-copy. Sourcing
-            # from the AI chain_id instead would desync in order and cardinality.
+            # sorted by label_asym_id at the source), so the two columns line up
+            # copy-for-copy. Each token is "<auth_asym_id>:<auth_seq_id>" (author
+            # chain : author residue number) for one modelled copy, making a
+            # multi-copy ligand's repeating residue numbers self-describing. The
+            # per-copy chain comes from the instance's own auth_asym_id, NOT the AI
+            # chain_id (which would desync in order and cardinality).
             lig_residue_seq = ", ".join(
-                sanitize_value(i.get("auth_seq_id")) for i in instances if i.get("label_asym_id")
+                f"{sanitize_value(i.get('auth_asym_id'))}:{sanitize_value(i.get('auth_seq_id'))}"
+                for i in instances
+                if i.get("label_asym_id")
             )
         else:
             lig_label = ""

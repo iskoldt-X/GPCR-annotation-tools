@@ -646,8 +646,9 @@ class TestLigandLabelAsymId:
         row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
         # 'F' is the ligand's own label, not its author chain 'A' nor polymer 'Z'.
         assert row["label_asym_id"] == "F"
-        # The residue number comes from the same instance, aligned to the label.
-        assert row["Residue_seq_id"] == "501"
+        # The residue token comes from the same instance, aligned to the label, and
+        # is prefixed with the copy's author chain: "<auth_asym_id>:<auth_seq_id>".
+        assert row["Residue_seq_id"] == "A:501"
 
     def test_multi_instance_joins_labels(self, sample_pdb_data):
         sample_pdb_data["oligomer_analysis"] = {
@@ -663,8 +664,9 @@ class TestLigandLabelAsymId:
         row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
         # Both copies' own labels, never the receptor polymer label 'Z'.
         assert row["label_asym_id"] == "F, G"
-        # Residue numbers track the same instance order, copy-for-copy.
-        assert row["Residue_seq_id"] == "501, 502"
+        # Residue tokens track the same instance order, copy-for-copy, each carrying
+        # the copy's own author chain prefix.
+        assert row["Residue_seq_id"] == "A:501, A:502"
 
     def test_unindexed_ligand_has_blank_label(self, sample_pdb_data):
         sample_pdb_data["oligomer_analysis"] = {"label_asym_id_map": {"A": "Z"}}
@@ -679,8 +681,10 @@ class TestLigandLabelAsymId:
 class TestLigandNameAndResidue:
     """Name carries the canonical PDBe chemical-component code (falling back to the
     descriptive name only when no code exists); Title carries the descriptive name;
-    Residue_seq_id carries the auth_seq_id of each modelled copy, aligned
-    copy-for-copy with label_asym_id (NOT the AI chain_id)."""
+    Residue_seq_id carries an "<auth_asym_id>:<auth_seq_id>" token per modelled copy
+    (author chain : author residue number), aligned copy-for-copy with label_asym_id,
+    with the chain sourced from the instance's own auth_asym_id (NOT the AI
+    chain_id)."""
 
     def _ligand(self, **extra):
         base = {
@@ -706,7 +710,7 @@ class TestLigandNameAndResidue:
         assert row["Name"] == "U0G"
         assert row["Title"] == "25CN-NBOH"
         assert row["label_asym_id"] == "F"
-        assert row["Residue_seq_id"] == "501"
+        assert row["Residue_seq_id"] == "A:501"
 
     def test_five_letter_ccd_code_passes_through(self, sample_pdb_data):
         # A five-letter CCD code (the newer PDBe extended namespace) must pass
@@ -720,7 +724,7 @@ class TestLigandNameAndResidue:
         row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
         assert row["Name"] == "A1H1S"
         assert row["Title"] == "some inhibitor"
-        assert row["Residue_seq_id"] == "201"
+        assert row["Residue_seq_id"] == "A:201"
 
     def test_no_comp_id_peptide_falls_back_to_name(self, sample_pdb_data):
         # A peptide ligand carries no chemical-component code (the schema emits the
@@ -779,16 +783,29 @@ class TestLigandNameAndResidue:
         ]
         row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
         assert row["Name"] == "9IG"
-        # label order is "EA, T" (chain R's copy first); residues follow in lockstep.
+        # label order is "EA, T" (chain R's copy first); residue tokens follow in
+        # lockstep, each carrying that copy's own author chain prefix (R, then Q) --
+        # the REVERSE of the AI chain_id order "Q, R", proving the chain is sourced
+        # per-copy from the instance list, not zipped against the AI chain_id.
         assert row["label_asym_id"] == "EA, T"
-        assert row["Residue_seq_id"] == "1011, 1010"
+        assert row["Residue_seq_id"] == "R:1011, Q:1010"
 
     def test_high_cardinality_multi_copy(self, sample_pdb_data):
-        # A high-cardinality ion (e.g. eight modelled calcium copies) emits every
-        # copy's label and residue, aligned position-for-position.
+        # 9AYF models calcium eight times across two author chains (Q and R), so the
+        # bare residue numbers repeat (1006-1009 on each chain) and are ambiguous on
+        # their own. The chain prefix makes every token unique. The instance list is
+        # sorted by label_asym_id (AA, BA, CA on R; then P, Q, R, S on Q; then Z on
+        # R), so the emitted order is NOT grouped by chain -- the prefix is what
+        # disambiguates the two "1006"s, the two "1007"s, etc.
         instances = [
-            {"auth_asym_id": "A", "label_asym_id": chr(ord("F") + i), "auth_seq_id": str(700 + i)}
-            for i in range(8)
+            {"auth_asym_id": "R", "label_asym_id": "AA", "auth_seq_id": "1007"},
+            {"auth_asym_id": "R", "label_asym_id": "BA", "auth_seq_id": "1008"},
+            {"auth_asym_id": "R", "label_asym_id": "CA", "auth_seq_id": "1009"},
+            {"auth_asym_id": "Q", "label_asym_id": "P", "auth_seq_id": "1006"},
+            {"auth_asym_id": "Q", "label_asym_id": "Q", "auth_seq_id": "1007"},
+            {"auth_asym_id": "Q", "label_asym_id": "R", "auth_seq_id": "1008"},
+            {"auth_asym_id": "Q", "label_asym_id": "S", "auth_seq_id": "1009"},
+            {"auth_asym_id": "R", "label_asym_id": "Z", "auth_seq_id": "1006"},
         ]
         sample_pdb_data["oligomer_analysis"] = {"nonpolymer_instance_index": {"CA": instances}}
         sample_pdb_data["ligands"] = [self._ligand(name="Calcium ion", chem_comp_id="CA")]
@@ -797,8 +814,21 @@ class TestLigandNameAndResidue:
         residues = row["Residue_seq_id"].split(", ")
         assert len(labels) == 8
         assert len(residues) == 8
-        assert labels == [chr(ord("F") + i) for i in range(8)]
-        assert residues == [str(700 + i) for i in range(8)]
+        # Residue tokens stay 1:1 and in the same order as label_asym_id.
+        assert labels == ["AA", "BA", "CA", "P", "Q", "R", "S", "Z"]
+        assert residues == [
+            "R:1007",
+            "R:1008",
+            "R:1009",
+            "Q:1006",
+            "Q:1007",
+            "Q:1008",
+            "Q:1009",
+            "R:1006",
+        ]
+        # The repeating bare number "1006" is disambiguated by its chain prefix.
+        assert "Q:1006" in residues
+        assert "R:1006" in residues
 
 
 def test_transform_skips_non_dict_ligand():
