@@ -110,6 +110,42 @@ class TestCorrectBinderNames:
         assert heavy["name"] == "P2C2 Fab"
         assert notes == []
 
+    def test_7srs_clone_tag_preserved_on_rename(self) -> None:
+        # 7SRS: the model name is ALREADY informative -- "Anti-5HT2BR Fab (P2C2)"
+        # carries the antigen (so the rename fires) AND the clone code "(P2C2)".
+        # The rebuilt canonical name must PRESERVE the clone tag: "anti-5-HT2B Fab
+        # (P2C2)", not drop it. (Role suffix omitted here: single-chain entry whose
+        # description has no Heavy/Light word.)
+        enriched = _enriched(
+            _entity("R", "5ht2b_human", "5-hydroxytryptamine receptor 2B"),
+            _entity("P", None, "Anti-5HT2BR Fab"),
+        )
+        fab = _aux("Anti-5HT2BR Fab (P2C2)", "Antibody fab fragment", "P")
+        notes = correct_binder_names(enriched, [fab])
+        assert fab["name"] == "anti-5-HT2B Fab (P2C2)"
+        assert len(notes) == 1
+
+    def test_9ima_antigen_parenthetical_not_duplicated(self) -> None:
+        # 9IMA-style: the model name's trailing parenthetical only RESTATES the
+        # antigen ("(anti-GPRC5D)"), so it must NOT be appended -- that would double
+        # it into "anti-GPRC5D Fab (anti-GPRC5D)". The canonical name stays clean.
+        enriched = _enriched(
+            _entity("A", "gpc5d_human", "G-protein coupled receptor family C group 5 member D"),
+            _entity("C", None, "anti-GPRC5D Fab"),
+        )
+        fab = _aux("Talquetamab Fab (anti-GPRC5D)", "Antibody fab fragment", "C")
+        correct_binder_names(enriched, [fab])
+        assert fab["name"] == "anti-GPRC5D Fab"
+
+    def test_bril_no_parenthetical_unchanged_by_clone_rule(self) -> None:
+        # A plain antigen name with no trailing parenthetical is renamed exactly as
+        # before -- the clone-preservation rule is a no-op when there is no paren.
+        enriched = _enriched(_entity("H", None, "anti-BRIL Fab Heavy chain"))
+        fab = _aux("BRIL", "Antibody fab fragment", "H")
+        notes = correct_binder_names(enriched, [fab])
+        assert fab["name"] == "anti-BRIL Fab Heavy chain"
+        assert len(notes) == 1
+
     def test_combined_two_chain_entry_gets_base_name_no_role_suffix(self) -> None:
         # 7SRS anti-5-HT2B Fab, but the model captured BOTH chains in ONE entry
         # (chain_id "P, Q") and named it after the antigen ("5HT2BR"). Appending a

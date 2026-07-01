@@ -436,6 +436,33 @@ def _split_chain_ids(value: Any) -> set[str]:
     return out
 
 
+def _ordered_chain_ids(value: Any) -> list[str]:
+    """Parse a chain_id field to a deduplicated list preserving first-seen order.
+
+    Same parse rules as :func:`_split_chain_ids` (comma / semicolon separated,
+    empty / apo sentinels dropped) but keeps the depositor's order so a merged
+    chain list stays stable rather than set-shuffled.
+    """
+    if not value or not isinstance(value, str):
+        return []
+    out: list[str] = []
+    for part in value.replace(";", ",").split(","):
+        token = part.strip()
+        if (
+            token
+            and token.lower() not in EMPTY_VALUES
+            and token.lower() != APO_SENTINEL
+            and token not in out
+        ):
+            out.append(token)
+    return out
+
+
+def _format_chain_ids(chain_ids: list[str]) -> str:
+    """Render a chain-id list as the codebase's comma-space string (e.g. "A, B")."""
+    return ", ".join(chain_ids)
+
+
 def _build_all_polymer_chains(enriched_entry: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Build ``{auth_asym_id: {"description": str, "slug": str | None}}`` per chain.
 
@@ -599,6 +626,48 @@ _BINDER_TYPE_WORD: dict[str, str] = {
     "DARPin": "DARPin",
 }
 
+# Binder-type words that may appear inside a trailing parenthetical; a paren
+# holding one of these (or "anti", or the captured antigen) is a redundant
+# antigen/type restatement, not a distinct clone code, so it is NOT preserved.
+_BINDER_PAREN_TYPE_WORDS: frozenset[str] = frozenset(
+    {"fab", "nanobody", "scfv", "sybody", "darpin", "antibody"}
+)
+
+# A trailing parenthetical at the very end of a model name, e.g. "(P2C2)".
+_TRAILING_PAREN_RE = re.compile(r"\(([^()]+)\)\s*$")
+
+
+def _preservable_clone_tag(model_name: str, raw_antigen_token: str) -> str:
+    """Return a trailing parenthetical clone tag worth preserving, else ``""``.
+
+    A model name can carry a genuine extra identifier as a trailing parenthetical
+    -- a clone code like 7SRS ``"Anti-5HT2BR Fab (P2C2)"`` -> ``"(P2C2)"``. That
+    is worth keeping when the canonical name is rebuilt. A parenthetical that only
+    restates the antigen or binder type -- e.g. 9IMA ``"Talquetamab Fab
+    (anti-GPRC5D)"`` -> ``"(anti-GPRC5D)"`` -- is redundant and dropped so the
+    canonical name never doubles it (``"anti-GPRC5D Fab (anti-GPRC5D)"``).
+
+    Preserve the tag ONLY when it names none of: "anti", the captured antigen
+    token, or a binder-type word (fab / nanobody / scfv / ...). Returns the tag
+    WITH its parentheses (e.g. ``"(P2C2)"``), or ``""`` when there is nothing
+    preservable.
+    """
+    match = _TRAILING_PAREN_RE.search(model_name)
+    if not match:
+        return ""
+    inner = match.group(1).strip()
+    if not inner:
+        return ""
+    inner_lower = inner.lower()
+    if "anti" in inner_lower:
+        return ""
+    if raw_antigen_token and raw_antigen_token.strip().lower() in inner_lower:
+        return ""
+    tokens = re.split(r"[\s/,-]+", inner_lower)
+    if any(tok in _BINDER_PAREN_TYPE_WORDS for tok in tokens):
+        return ""
+    return f"({inner})"
+
 
 def _normalize_antigen_token(token: str) -> str:
     """Clean and normalise an antigen token captured from a description.
@@ -735,7 +804,12 @@ def correct_binder_names(
             # Fab", antigen "5HT2BR") while still correcting the "BRIL"-style bug.
             if raw_token.lower() not in old_name.lower():
                 continue
-            new_name = name
+            # Preserve a genuine trailing clone tag from the original name (7SRS
+            # "Anti-5HT2BR Fab (P2C2)" -> keep "(P2C2)") so the rebuilt canonical
+            # name does not drop the more-specific identifier. A parenthetical that
+            # only restates the antigen/type is redundant and is not appended.
+            clone_tag = _preservable_clone_tag(old_name, raw_token)
+            new_name = f"{name} {clone_tag}" if clone_tag else name
             break
         if new_name is None or new_name == old_name:
             continue
@@ -1601,11 +1675,14 @@ def relocate_misfiled_g_protein_fragments(
       G protein record (filling slug + chain id, and for an alpha C-terminal /
       alpha5 fragment adding a fragment note to the g_protein 'note'), removes it
       from its original bucket, and raises a GATING critical warning so a curator
-      confirms the recovered data. If the target column is ALREADY populated with
-      a DIFFERENT curated subunit (a genuine conflict), nothing is moved: the entry
-      stays in its bucket and a distinct gating conflict warning is raised for
-      manual resolution (setdefault would silently keep the curated value, so
-      moving the entry would lose the recovered slug+chain and misreport a move).
+      confirms the recovered data. If the target column already names the SAME
+      subunit on a DIFFERENT chain, the recovered chain is MERGED into the existing
+      chain_id ("A" + "B" -> "A, B") so the subunit's coverage is not under-reported
+      (an already-listed chain is a pure no-op). If the target column is ALREADY
+      populated with a DIFFERENT curated subunit (a genuine conflict), nothing is
+      moved: the entry stays in its bucket and a distinct gating conflict warning is
+      raised for manual resolution (moving the entry would lose the recovered
+      slug+chain and misreport a move).
     * **No usable slug** (detected by sequence/description but carrying no subunit
       slug -- a short GaCT peptide, or an engineered mini-G / chimera) -> the
       column cannot be determined, so it raises a gating alert only and is left
@@ -1704,9 +1781,8 @@ def relocate_misfiled_g_protein_fragments(
                     g_protein[column] = subunit_block
                 existing_slug = (subunit_block.get("uniprot_entry_name") or "").strip().lower()
                 # A genuine conflict: the column already names a DIFFERENT subunit. Same
-                # slug already present is not a conflict (idempotent -- the end state
-                # already holds the recovered value, so treat it as a clean fill and
-                # remove the duplicate origin entry, matching setdefault's semantics).
+                # slug is not a conflict; the recovered chain is merged into the existing
+                # chain_id below (a new chain) or is a pure no-op (already listed).
                 if existing_slug and existing_slug != slug:
                     kept.append(entry)  # keep the entry -- nothing was moved
                     warnings.append(
@@ -1717,7 +1793,20 @@ def relocate_misfiled_g_protein_fragments(
                         f"Not moved automatically."
                     )
                     continue
-                _fill_subunit_record(subunit_block, slug, matched_chain)
+                # Same-slug/different-chain recovery: the column already names this
+                # subunit but on a different chain (curated "A", recovered "B"). The
+                # subunit spans both chains, so MERGE the recovered chain into the
+                # existing chain_id (dedup, stable order -> "A, B") rather than drop it,
+                # which would under-report the subunit's coverage in Alpha_ChainID. If
+                # the recovered chain is already listed, this is a pure no-op.
+                if existing_slug == slug:
+                    merged = _ordered_chain_ids(subunit_block.get("chain_id"))
+                    if matched_chain not in merged:
+                        merged.append(matched_chain)
+                        subunit_block["chain_id"] = _format_chain_ids(merged)
+                    # else: recovered chain already present -> chain_id unchanged.
+                else:
+                    _fill_subunit_record(subunit_block, slug, matched_chain)
                 # The "only the alpha5 fragment is modelled" note is accurate ONLY
                 # when the alpha5 sequence motif is actually present. A full-length
                 # G-alpha matched by description alone (is_g_alpha_description) is not a

@@ -2639,11 +2639,11 @@ class TestRelocateMisfiledGProteinFragments:
         assert ALERT_PREFIX_G_PROTEIN_RELOCATED not in warnings[0]
         assert "gnas2_human" in warnings[0]  # names the existing (conflicting) value
 
-    def test_same_subunit_already_present_is_idempotent(self) -> None:
-        # Not a conflict: the column already holds the SAME slug the fragment
-        # recovers. The end state already carries the recovered value, so this is a
-        # clean (idempotent) fill -- the duplicate origin entry is removed and a
-        # RELOCATED warning fires, matching setdefault's no-op-when-equal semantics.
+    def test_same_subunit_same_chain_is_idempotent_no_duplicate(self) -> None:
+        # Not a conflict: the column already holds the SAME slug on the SAME chain
+        # the fragment recovers. The end state already carries the recovered value,
+        # so this is a pure no-op -- the duplicate origin entry is removed, chain_id
+        # is unchanged (no "B, B" double-listing), and a RELOCATED warning fires.
         enriched = self._enriched(
             [_gp_poly("B", sequence="ILENLKDCGLF", description=_GACT_DESC, slugs=["gnat1_bovin"])]
         )
@@ -2659,6 +2659,56 @@ class TestRelocateMisfiledGProteinFragments:
         assert data["auxiliary_proteins"] == []  # duplicate origin entry removed
         alpha = data["signaling_partners"]["g_protein"]["alpha_subunit"]
         assert alpha["uniprot_entry_name"] == "gnat1_bovin"
+        assert alpha["chain_id"] == "B"  # unchanged -- no double-listing
+        assert len(warnings) == 1
+        assert ALERT_PREFIX_G_PROTEIN_RELOCATED in warnings[0]
+
+    def test_same_subunit_different_chain_merges_chain_ids(self) -> None:
+        # Same slug, DIFFERENT chain: the column already names this subunit on chain
+        # "A", and the recovered fragment is chain "B" (a second modelled copy of the
+        # subunit). The subunit spans both chains, so the recovered chain is MERGED
+        # into the existing chain_id ("A" + "B" -> "A, B") rather than dropped -- which
+        # would under-report the subunit's coverage. The aux entry is removed and a
+        # (now-truthful) RELOCATED warning fires.
+        enriched = self._enriched(
+            [_gp_poly("B", sequence="ILENLKDCGLF", description=_GACT_DESC, slugs=["gnas2_human"])]
+        )
+        data: dict[str, Any] = {
+            "signaling_partners": {
+                "g_protein": {
+                    "alpha_subunit": {"uniprot_entry_name": "gnas2_human", "chain_id": "A"}
+                }
+            },
+            "auxiliary_proteins": [{"name": "G-alpha fragment", "chain_id": "B"}],
+        }
+        warnings = relocate_misfiled_g_protein_fragments(enriched, data)
+        assert data["auxiliary_proteins"] == []  # merged out of the bucket
+        alpha = data["signaling_partners"]["g_protein"]["alpha_subunit"]
+        assert alpha["uniprot_entry_name"] == "gnas2_human"  # unchanged
+        assert alpha["chain_id"] == "A, B"  # recovered chain merged in
+        assert len(warnings) == 1
+        assert ALERT_PREFIX_G_PROTEIN_RELOCATED in warnings[0]
+        assert "alpha_subunit" in warnings[0]
+
+    def test_same_subunit_chain_already_in_list_is_no_op(self) -> None:
+        # Same slug and the recovered chain is ALREADY one of the listed chains
+        # ("A, B" already, recovered "B"): pure idempotent -- no double-listing, the
+        # duplicate aux entry is removed, and a RELOCATED warning fires.
+        enriched = self._enriched(
+            [_gp_poly("B", sequence="ILENLKDCGLF", description=_GACT_DESC, slugs=["gnas2_human"])]
+        )
+        data: dict[str, Any] = {
+            "signaling_partners": {
+                "g_protein": {
+                    "alpha_subunit": {"uniprot_entry_name": "gnas2_human", "chain_id": "A, B"}
+                }
+            },
+            "auxiliary_proteins": [{"name": "G-alpha fragment", "chain_id": "B"}],
+        }
+        warnings = relocate_misfiled_g_protein_fragments(enriched, data)
+        assert data["auxiliary_proteins"] == []
+        alpha = data["signaling_partners"]["g_protein"]["alpha_subunit"]
+        assert alpha["chain_id"] == "A, B"  # unchanged -- B not re-added
         assert len(warnings) == 1
         assert ALERT_PREFIX_G_PROTEIN_RELOCATED in warnings[0]
 
