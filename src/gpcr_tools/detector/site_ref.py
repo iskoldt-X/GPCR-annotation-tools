@@ -347,7 +347,12 @@ def detect_site_refs(
             else [None] * len(contact_copies)
         )
         atom_lists = (
-            [list(res) for chain in model for res in chain if res.name == comp_id]
+            [
+                list(res)
+                for chain in model
+                for res in chain
+                if res.name == comp_id and not is_protein_atom(res)
+            ]
             if model is not None
             else []
         )

@@ -8,6 +8,7 @@ tests cover the enriched parsing and the per-copy evidence orchestration.
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 
 import gemmi
@@ -364,3 +365,136 @@ class TestSidePropagation:
         with caplog.at_level(logging.DEBUG, logger="gpcr_tools.detector.site_ref"):
             self._run(monkeypatch, tmp_path, ic_sign=-1, note=note)
         assert note in caplog.text
+
+
+def _tm_bundle_chain(name: str) -> gemmi.Chain:
+    """A receptor chain whose Cα form rings around the z-axis at three depths.
+
+    The rings sit inside the bilayer band, so ``_bundle_center`` resolves the
+    bundle axis (near the z-axis) and the ring residues are the contact partners
+    for the ligand copies. Radial position relative to the axis is what decides
+    pocket-facing (inner) vs lipid-facing (outer).
+    """
+    chain = gemmi.Chain(name)
+    seq = 1
+    radius = 8.0
+    for z in (-10.0, 8.0, 0.0):
+        for i in range(12):
+            angle = 2.0 * math.pi * i / 12
+            x, y = radius * math.cos(angle), radius * math.sin(angle)
+            res = gemmi.Residue()
+            res.name = "ALA"
+            res.seqid = gemmi.SeqId(seq, " ")
+            res.het_flag = "A"
+            seq += 1
+            for atom_name, element in (("N", "N"), ("CA", "C"), ("C", "C"), ("O", "O")):
+                atom = gemmi.Atom()
+                atom.name = atom_name
+                atom.pos = gemmi.Position(x, y, z)
+                atom.element = gemmi.Element(element)
+                res.add_atom(atom)
+            chain.add_residue(res)
+    return chain
+
+
+def _residue(name: str, seq_id: int, het_flag: str, x: float, y: float, z: float) -> gemmi.Residue:
+    """A backbone residue (N, CA, C, O) named *name* centred near (x, y, z)."""
+    res = gemmi.Residue()
+    res.name = name
+    res.seqid = gemmi.SeqId(seq_id, " ")
+    res.het_flag = het_flag
+    for atom_name, dx, element in (
+        ("N", 0.0, "N"),
+        ("CA", 0.3, "C"),
+        ("C", 0.6, "C"),
+        ("O", 0.9, "O"),
+    ):
+        atom = gemmi.Atom()
+        atom.name = atom_name
+        atom.pos = gemmi.Position(x + dx, y, z)
+        atom.element = gemmi.Element(element)
+        res.add_atom(atom)
+    return res
+
+
+def _backbone_glu_decoy_chain(name: str, x: float, y: float, z: float) -> gemmi.Chain:
+    """A polymer chain whose only glutamate is a decoy backbone GLU near (x, y, z).
+
+    The chain is padded with a few distant alanines so ``setup_entities`` classifies
+    it as a polymer (making the GLU ``is_protein_atom`` True). The decoy GLU has no
+    other glutamate within contact range, so if the facing loop ever treated it as a
+    ligand copy its primary contact chain is the receptor bundle -- and, placed
+    radially OUTSIDE that bundle, it reads lipid-facing (0.0), distinct from the true
+    ligand's pocket-facing (1.0). This makes a facing desync observable.
+    """
+    chain = gemmi.Chain(name)
+    for i in range(3):  # distant alanines so the chain is a polymer
+        chain.add_residue(_residue("ALA", i + 1, "A", 50.0 + i * 3.0, 50.0, 0.0))
+    chain.add_residue(_residue("GLU", 4, "A", x, y, z))
+    return chain
+
+
+def _free_glu_residue(seq_id: int, x: float, y: float, z: float) -> gemmi.Residue:
+    """A free glutamate ligand (HETATM, non-polymer) at (x, y, z)."""
+    res = gemmi.Residue()
+    res.name = "GLU"
+    res.seqid = gemmi.SeqId(seq_id, " ")
+    res.het_flag = "H"
+    for i, element in enumerate(("N", "C", "C", "O")):
+        atom = gemmi.Atom()
+        atom.name = f"{element}{i}"
+        atom.pos = gemmi.Position(x + i * 0.4, y, z)
+        atom.element = gemmi.Element(element)
+        res.add_atom(atom)
+    return res
+
+
+class TestNameCollisionCopyAlignment:
+    """A ligand comp_id can collide with a standard amino-acid name (free GLU vs
+    backbone glutamate). The three per-copy fact lists -- contacts (geometry.py),
+    facing (membrane.py), and the atom lists for depth (site_ref.py) -- are consumed
+    by shared index, so all three must select the same copies in the same order.
+    Otherwise the real ligand's facing/depth/side would be sourced from a backbone
+    residue. This locks all three gates: reverting ANY one makes the test fail."""
+
+    def test_facts_come_from_the_ligand_not_backbone(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # A receptor bundle (chain R); a decoy backbone GLU (chain D) inside the band,
+        # radially OUTSIDE the bundle (lipid-facing) at z=-10; and one free-ligand GLU
+        # inside the band, radially INSIDE the bundle (pocket-facing) at z=+8. Both are
+        # in-band so an ungated facing loop still yields a value -- a WRONG one for the
+        # decoy -- and the depths differ so a desynced atom list gives itself away. The
+        # decoy sorts before the ligand in model order, so any desync surfaces at index 0.
+        st = _structure([_tm_bundle_chain("R"), _backbone_glu_decoy_chain("D", 10.8, 0.0, -10.0)])
+        st[0].add_chain(gemmi.Chain("B"))
+        st[0]["B"].add_residue(_free_glu_residue(501, 5.5, 0.0, 8.0))
+        st.setup_entities()
+
+        monkeypatch.setattr(sr, "load_structure", lambda *a, **k: st)
+        monkeypatch.setattr(
+            sr, "fetch_polymer_alignment", lambda *a, **k: {"R": {"Q9NYV8": [(1, 1, 400)]}}
+        )
+        monkeypatch.setattr(sr, "membrane_frame", lambda *a, **k: _FRAME)
+        # Real ligand_contact_residues / ligand_facing_fractions / atom_lists run;
+        # only the contact->number mapping and orientation are stubbed.
+        monkeypatch.setattr(sr, "_copy_evidence", lambda *a, **k: dict(_ORTH))
+        monkeypatch.setattr(sr, "galpha_auth_chains", lambda *a, **k: set())
+        monkeypatch.setattr(sr, "_resolve_orientation", lambda *a, **k: (-1, None))
+
+        signals = sr.detect_site_refs("X", _entry("GLU"), tmp_path)
+        assert len(signals) == 1
+        copies = signals[0].payload["copies"]
+        # Exactly one copy: the free ligand, never the backbone GLU. A revert of the
+        # ligand_contact_residues gate would sweep the decoy in and inflate this.
+        assert len(copies) == 1
+        copy = copies[0]
+        # Facing must come from the free ligand (pocket-facing = 1.0), NOT the decoy
+        # (lipid-facing = 0.0). A revert of the ligand_facing_fractions gate would
+        # desync facings and read 0.0 here.
+        assert copy["facing"] == 1.0
+        # Depth/in-band/side must come from the ligand at z=+8, NOT the decoy at
+        # z=-10. A revert of the atom_lists gate would read -10.0 here.
+        assert copy["depth"] == 8.0
+        assert copy["in_band"] is True
+        assert copy["side"] == "mid-membrane"

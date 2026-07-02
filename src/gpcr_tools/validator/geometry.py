@@ -266,7 +266,10 @@ def analyze_ligand_copies(
     copies: list[LigandCopyGeometry] = []
     for chain in model:
         for residue in chain:
-            if residue.name == comp_id:
+            # A ligand comp_id can collide with a standard amino-acid name (e.g. a
+            # free GLU ligand), so exclude polymer residues -- only a genuine
+            # non-polymer residue of this name is a ligand copy.
+            if residue.name == comp_id and not is_protein_atom(residue):
                 copies.append(
                     _analyze_copy(model, neighbor_search, chain.name, residue, gpcr_chains)
                 )
@@ -296,7 +299,9 @@ def ligand_contact_residues(
     copies: list[tuple[float, list[tuple[str, int, str]]]] = []
     for chain in model:
         for residue in chain:
-            if residue.name != comp_id:
+            # Skip polymer residues sharing the ligand name (a free GLU ligand vs
+            # backbone glutamate); only a non-polymer residue is a ligand copy.
+            if residue.name != comp_id or is_protein_atom(residue):
                 continue
             ligand_atoms = list(residue)
             env: dict[tuple[str, int, str], gemmi.Position] = {}
@@ -391,6 +396,9 @@ def ligand_interaction_counts(structure: gemmi.Structure, comp_id: str) -> list[
     metal ligand atom counts only toward ``metal`` (never ``polar``), and a
     metal-near-carbon contact falls in no bucket. One dict per modelled copy, in
     model order.
+
+    Note: this has no production caller yet (exercised only by tests). When wiring
+    it in, keep the polymer gate below -- do not restore a bare name match.
     """
     if len(structure) == 0:
         return []
@@ -401,7 +409,9 @@ def ligand_interaction_counts(structure: gemmi.Structure, comp_id: str) -> list[
     counts: list[dict[str, int]] = []
     for chain in model:
         for residue in chain:
-            if residue.name != comp_id:
+            # Skip polymer residues sharing the ligand name (a free GLU ligand vs
+            # backbone glutamate); only a non-polymer residue is a ligand copy.
+            if residue.name != comp_id or is_protein_atom(residue):
                 continue
             polar: set[tuple[str, int, str]] = set()
             metal: set[tuple[str, int, str]] = set()
