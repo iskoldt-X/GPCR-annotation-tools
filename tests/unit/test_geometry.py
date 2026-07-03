@@ -291,6 +291,17 @@ class TestLigandCopySelectionSkipsPolymer:
         st = _name_collision_structure()
         assert len(ligand_contact_residues(st, "GLU", {"A"})) == 1
 
+    def test_contact_residues_carry_copy_id(self) -> None:
+        # Each copy leads with its own author chain + residue number (the copy identifier
+        # auth_asym_id:auth_seq_id), read from the coordinate residue. The free GLU
+        # ligand is chain B, residue 501.
+        st = _name_collision_structure()
+        (copy,) = ligand_contact_residues(st, "GLU", {"A"})
+        auth_chain, auth_seq_id, burial, contacts = copy
+        assert (auth_chain, auth_seq_id) == ("B", 501)
+        assert isinstance(burial, float)
+        assert isinstance(contacts, list)
+
     def test_interaction_counts_excludes_backbone(self) -> None:
         st = _name_collision_structure()
         assert len(ligand_interaction_counts(st, "GLU")) == 1

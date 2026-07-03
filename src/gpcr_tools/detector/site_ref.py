@@ -357,10 +357,15 @@ def detect_site_refs(
             else []
         )
         copies: list[dict[str, Any]] = []
-        for i, (burial, contacts) in enumerate(contact_copies):
+        for i, (copy_chain, copy_seq, burial, contacts) in enumerate(contact_copies):
             evidence = _copy_evidence(contacts, chain_accessions, alignment)
             if evidence is None:
                 continue
+            # The copy's own identifier (auth_asym_id:auth_seq_id) travels
+            # with it from ligand_contact_residues, so it stays bound to THIS copy
+            # even when sparse copies are dropped above -- a dropped copy can never
+            # shift another copy's copy identifier (no positional realignment).
+            evidence["copy_id"] = f"{copy_chain}:{copy_seq}"
             evidence["enclosure"] = round(burial, 2)
             evidence["facing"] = facings[i] if i < len(facings) else None
             if frame is not None and i < len(atom_lists):

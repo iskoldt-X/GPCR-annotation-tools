@@ -189,8 +189,10 @@ def _format_site_ref(payload: dict[str, Any]) -> str | None:
                 band = f"{band}, {side}"
         else:
             band = "membrane depth n/a"
+        copy_id = copy.get("copy_id")
+        label = f"copy {copy_id}" if copy_id else "a copy"
         copy_lines.append(
-            f"  a copy: enclosure {copy.get('enclosure')}; contacts generic numbers "
+            f"  {label}: enclosure {copy.get('enclosure')}; contacts generic numbers "
             f"[{generic}] in segments [{segments}] ({core} Class A orthosteric-core); "
             f"{facing_txt}; {band}"
         )

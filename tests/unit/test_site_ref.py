@@ -83,12 +83,13 @@ class TestEnrichedParsing:
 def stub_pipeline(monkeypatch: pytest.MonkeyPatch):
     """Stub the I/O so detect_site_refs exercises only its orchestration.
 
-    Set the fixture list to ``(enclosure, evidence_or_None)`` per copy: the stub
-    feeds each copy's enclosure through ligand_contact_residues and its evidence
-    dict (or None for a too-sparse copy) through _copy_evidence. membrane_frame is
-    stubbed to None so the facing/depth facts are skipped in these tests.
+    Set the fixture list to ``(auth_chain, auth_seq_id, enclosure, evidence_or_None)``
+    per copy: the stub feeds each copy's identifier + enclosure through
+    ligand_contact_residues and its evidence dict (or None for a too-sparse copy)
+    through _copy_evidence. membrane_frame is stubbed to None so the facing/depth
+    facts are skipped in these tests.
     """
-    copies: list[tuple[float, dict | None]] = []
+    copies: list[tuple[str, int, float, dict | None]] = []
     monkeypatch.setattr(sr, "load_structure", lambda *a, **k: object())
     monkeypatch.setattr(
         sr, "fetch_polymer_alignment", lambda *a, **k: {"R": {"Q9NYV8": [(1, 1, 400)]}}
@@ -110,7 +111,7 @@ _VEST = {"generic_numbers": ["45x52"], "segments": ["ECL2"], "core_hits": 0, "ma
 
 class TestDetectSiteRefs:
     def test_single_copy_signal(self, stub_pipeline, tmp_path: Path) -> None:
-        stub_pipeline[:] = [(0.92, dict(_ORTH))]
+        stub_pipeline[:] = [("R", 602, 0.92, dict(_ORTH))]
         signals = sr.detect_site_refs("X", _entry("LIG"), tmp_path)
         assert len(signals) == 1
         copies = signals[0].payload["copies"]
@@ -118,32 +119,50 @@ class TestDetectSiteRefs:
         assert copies[0]["generic_numbers"] == ["3x33", "6x51"]
         assert copies[0]["core_hits"] == 2
         assert copies[0]["enclosure"] == 0.92  # the burial is recorded as an enclosure fact
+        assert copies[0]["copy_id"] == "R:602"  # the copy's own identifier
 
     def test_multi_copy_facts_not_collapsed(self, stub_pipeline, tmp_path: Path) -> None:
         # Both copies' facts are emitted (distinct sites); the model decides whether
         # to emit one entry per site -- the detector no longer makes that call.
-        stub_pipeline[:] = [(0.95, dict(_ORTH)), (0.9, dict(_VEST))]
+        stub_pipeline[:] = [("R", 601, 0.95, dict(_ORTH)), ("R", 602, 0.9, dict(_VEST))]
         signals = sr.detect_site_refs("X", _entry("LIG"), tmp_path)
         assert len(signals) == 1
         copies = signals[0].payload["copies"]
         assert len(copies) == 2
         assert {c["segments"][0] for c in copies} == {"TM3", "ECL2"}
+        # Each copy carries its own identifier, keyed to the copy that produced it.
+        assert {c["copy_id"] for c in copies} == {"R:601", "R:602"}
 
     def test_shallow_copy_still_emitted_as_fact(self, stub_pipeline, tmp_path: Path) -> None:
         # A low-enclosure copy is no longer gated out; its enclosure is just a fact
         # (the model reads low enclosure + lipid-facing as a structural-lipid hint).
-        stub_pipeline[:] = [(0.40, dict(_VEST))]
+        stub_pipeline[:] = [("R", 601, 0.40, dict(_VEST))]
         signals = sr.detect_site_refs("X", _entry("CLR"), tmp_path)
         assert signals[0].payload["copies"][0]["enclosure"] == 0.40
 
     def test_sparse_copy_skipped(self, stub_pipeline, tmp_path: Path) -> None:
         # A copy with too few mapped contacts (_copy_evidence -> None) is dropped.
-        stub_pipeline[:] = [(0.9, dict(_ORTH)), (0.5, None)]
+        stub_pipeline[:] = [("R", 601, 0.9, dict(_ORTH)), ("R", 602, 0.5, None)]
         signals = sr.detect_site_refs("X", _entry("LIG"), tmp_path)
         assert len(signals[0].payload["copies"]) == 1
 
+    def test_sparse_drop_does_not_misalign_copy_ids(self, stub_pipeline, tmp_path: Path) -> None:
+        # A middle copy dropped for sparse contacts must NOT shift the copy identifiers of
+        # the copies that survive: each copy identifier stays bound to the copy that
+        # produced it (a key relationship, never a positional one).
+        stub_pipeline[:] = [
+            ("R", 601, 0.9, dict(_ORTH)),
+            ("R", 602, 0.5, None),  # sparse -> dropped
+            ("R", 603, 0.9, dict(_VEST)),
+        ]
+        signals = sr.detect_site_refs("X", _entry("LIG"), tmp_path)
+        copies = signals[0].payload["copies"]
+        assert len(copies) == 2
+        # The survivors keep THEIR own copy identifiers; the dropped R:602 appears nowhere.
+        assert [c["copy_id"] for c in copies] == ["R:601", "R:603"]
+
     def test_all_sparse_emits_no_signal(self, stub_pipeline, tmp_path: Path) -> None:
-        stub_pipeline[:] = [(0.9, None), (0.8, None)]
+        stub_pipeline[:] = [("R", 601, 0.9, None), ("R", 602, 0.8, None)]
         assert sr.detect_site_refs("X", _entry("LIG"), tmp_path) == []
 
     def test_no_gpcr_chain_short_circuits(self, tmp_path: Path) -> None:
@@ -322,7 +341,7 @@ class TestSidePropagation:
         )
         monkeypatch.setattr(sr, "membrane_frame", lambda *a, **k: _FRAME)
         monkeypatch.setattr(sr, "ligand_facing_fractions", lambda *a, **k: [0.9])
-        monkeypatch.setattr(sr, "ligand_contact_residues", lambda *a, **k: [(0.85, [])])
+        monkeypatch.setattr(sr, "ligand_contact_residues", lambda *a, **k: [("B", 1, 0.85, [])])
         monkeypatch.setattr(sr, "_copy_evidence", lambda *a, **k: dict(_ORTH))
         monkeypatch.setattr(sr, "galpha_auth_chains", lambda *a, **k: set())
         monkeypatch.setattr(sr, "ligand_membrane_depth", lambda *a, **k: (-24.0, False))
@@ -489,6 +508,9 @@ class TestNameCollisionCopyAlignment:
         # ligand_contact_residues gate would sweep the decoy in and inflate this.
         assert len(copies) == 1
         copy = copies[0]
+        # The copy identifier is the free ligand's own author identity (chain B, seq 501),
+        # read from the coordinate residue -- never the backbone decoy's.
+        assert copy["copy_id"] == "B:501"
         # Facing must come from the free ligand (pocket-facing = 1.0), NOT the decoy
         # (lipid-facing = 0.0). A revert of the ligand_facing_fractions gate would
         # desync facings and read 0.0 here.

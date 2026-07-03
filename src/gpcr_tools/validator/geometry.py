@@ -280,13 +280,18 @@ def ligand_contact_residues(
     structure: gemmi.Structure,
     comp_id: str,
     receptor_chains: set[str],
-) -> list[tuple[float, list[tuple[str, int, str]]]]:
-    """Per-copy burial + receptor contacts of *comp_id*, for site classification.
+) -> list[tuple[str, int, float, list[tuple[str, int, str]]]]:
+    """Per-copy identity + burial + receptor contacts of *comp_id*.
 
-    Returns one ``(burial, contacts)`` per modelled copy. *burial* is the angular
-    coverage in [0, 1] (how enclosed the copy is, by any protein atom) -- it lets
-    the caller require that a multi-site split come from deeply-buried copies (real
-    pockets) rather than a structural lipid scattered across surface grooves.
+    Returns one ``(auth_chain, auth_seq_id, burial, contacts)`` per modelled copy.
+    ``auth_chain`` / ``auth_seq_id`` are the copy's own author chain and residue
+    number, read straight from the coordinate residue -- together they are its
+    stable identifier (``auth_asym_id:auth_seq_id``), the same identity
+    :func:`analyze_ligand_copies` carries, so a caller can key each copy to the
+    non-polymer instance metadata without relying on list position. *burial* is the
+    angular coverage in [0, 1] (how enclosed the copy is, by any protein atom) -- it
+    lets the caller require that a multi-site split come from deeply-buried copies
+    (real pockets) rather than a structural lipid scattered across surface grooves.
     *contacts* are ``(receptor_auth_chain, label_seq, amino_acid_one_letter)`` for
     each receptor residue the copy touches; ``label_seq`` (the entity SEQRES index)
     is what the RCSB alignment maps to a UniProt position, and the amino acid lets
@@ -296,7 +301,7 @@ def ligand_contact_residues(
     neighbor_search = gemmi.NeighborSearch(
         model, structure.cell, GEOMETRY_NEIGHBOR_SEARCH_RADIUS
     ).populate()
-    copies: list[tuple[float, list[tuple[str, int, str]]]] = []
+    copies: list[tuple[str, int, float, list[tuple[str, int, str]]]] = []
     for chain in model:
         for residue in chain:
             # Skip polymer residues sharing the ligand name (a free GLU ligand vs
@@ -325,8 +330,14 @@ def ligand_contact_residues(
                                 info.one_letter_code.upper() if info else "X"
                             )
             burial = _burial(centroid(ligand_atoms), list(env.values())) if ligand_atoms else 0.0
+            copy_seq = residue.seqid.num
             copies.append(
-                (burial, [(chain_name, ls, aa) for (chain_name, ls), aa in contacts.items()])
+                (
+                    chain.name,
+                    copy_seq if copy_seq is not None else 0,
+                    burial,
+                    [(chain_name, ls, aa) for (chain_name, ls), aa in contacts.items()],
+                )
             )
     return copies
 

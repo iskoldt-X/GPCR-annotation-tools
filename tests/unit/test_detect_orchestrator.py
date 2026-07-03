@@ -36,6 +36,7 @@ def _copy(
     depth: float | None = None,
     in_band: bool | None = None,
     side: str | None = None,
+    copy_id: str | None = None,
 ) -> dict:
     copy: dict = {
         "generic_numbers": generic,
@@ -49,6 +50,8 @@ def _copy(
         copy["in_band"] = in_band
     if side is not None:
         copy["side"] = side
+    if copy_id is not None:
+        copy["copy_id"] = copy_id
     return copy
 
 
@@ -170,6 +173,24 @@ class TestAssembleDetectBlock:
         # Both copies' facts present; the conditional per-site split instruction shown.
         assert "3x33" in block and "ECL2" in block
         assert "one entry per site" in block
+
+    def test_site_ref_copy_line_labelled_with_copy_id(self) -> None:
+        # A copy carrying its copy identifier labels its evidence line with it, so the
+        # model can bind its answer to that physical copy.
+        block = assemble_detect_block(
+            [_site_ref("ADN", [_copy(["3x33"], ["TM3"], 1, 0.9, copy_id="R:602")])]
+        )
+        assert block is not None
+        assert "copy R:602: enclosure 0.9;" in block
+        assert "a copy:" not in block
+
+    def test_site_ref_copy_line_falls_back_when_no_copy_id(self) -> None:
+        # Without a copy identifier the line keeps the neutral "a copy" wording --
+        # defensive rendering for a copy lacking an identifier, not a metadata-join
+        # failure (identity is read from coordinates, so this path is unreachable today).
+        block = assemble_detect_block([_site_ref("ADN", [_copy(["3x33"], ["TM3"], 1, 0.9)])])
+        assert block is not None
+        assert "  a copy: enclosure 0.9;" in block
 
     def test_split_instruction_owned_by_site_ref_not_dual_role(self) -> None:
         # The dual-role signal gives burial evidence but must NOT command a split;
