@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from google.genai import types
 
 ANNOTATION_TOOL = types.Tool(
@@ -512,6 +514,95 @@ PHARMACOLOGICAL_ROLE_CHECK_SCHEMA = types.Schema(
         ),
     },
 )
+
+
+def _base_ligand_item_properties() -> dict[str, types.Schema]:
+    """Return the base per-ligand array-item properties (None-safe).
+
+    This is the single source of the ``site_ref`` and ``role`` enums that the
+    per-copy ``ligand_copies`` schema reuses, so the two answer spaces can never
+    drift apart.
+    """
+    declarations = ANNOTATION_TOOL.function_declarations or []
+    params = declarations[0].parameters if declarations else None
+    ligands = (params.properties or {}).get("ligands") if params else None
+    items = ligands.items if ligands is not None else None
+    return (items.properties or {}) if items is not None else {}
+
+
+def build_ligand_copies_schema(copy_ids: Sequence[str]) -> types.Schema:
+    """Build a per-PDB ``ligand_copies`` array schema for *copy_ids*.
+
+    One row per modelled ligand copy in the structure. ``copy_id`` is pinned by
+    enum to exactly this structure's copy identifiers ("<auth_asym_id>:<auth_seq_id>"),
+    so the model assigns a site/role to a fixed roster of copies rather than
+    inventing identities. ``site_ref`` and ``role`` reuse the compound-level ligand
+    enums verbatim, so the per-copy answer space matches the compound-level one.
+
+    Deliberately sets no ``min_items`` / ``max_items``: a fixed-length pin is
+    rejected by the API at higher copy counts, and every copy is instead accounted
+    for by the ``copy_id`` enum (coverage is enforced separately, downstream).
+    """
+    props = _base_ligand_item_properties()
+    site_ref = props.get("site_ref")
+    role = props.get("role")
+    site_ref_enum = list(site_ref.enum or []) if site_ref is not None else []
+    role_value = (role.properties or {}).get("value") if role is not None else None
+    role_enum = list(role_value.enum or []) if role_value is not None else []
+    return types.Schema(
+        type=types.Type.ARRAY,
+        description=(
+            "Per-copy binding-site and role assignment: one entry for each modelled "
+            "ligand copy listed in the LIGAND COPIES block. Provide an entry for every "
+            "listed copy; the copy_id values are fixed by this structure and must be "
+            "reused exactly."
+        ),
+        items=types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                "copy_id": types.Schema(
+                    type=types.Type.STRING,
+                    enum=list(copy_ids),
+                    description=(
+                        "Identifier of the modelled copy, author chain and residue "
+                        "number as '<chain>:<seq>'. Must be one of this structure's "
+                        "listed copies."
+                    ),
+                ),
+                "site_ref": types.Schema(
+                    type=types.Type.STRING,
+                    enum=site_ref_enum,
+                    description=(
+                        "Where this copy sits -- a pure position, with the same meaning "
+                        "and values as the ligand site_ref field. Use 'unknown' when the "
+                        "copy's position is genuinely undetermined."
+                    ),
+                ),
+                "role": types.Schema(
+                    type=types.Type.STRING,
+                    enum=role_enum,
+                    description=(
+                        "This copy's pharmacological role, with the same values as the "
+                        "ligand role field."
+                    ),
+                ),
+                "confidence": types.Schema(
+                    type=types.Type.STRING,
+                    enum=["High", "Medium", "Low"],
+                    description="Confidence level of this per-copy assignment.",
+                ),
+                "evidence": types.Schema(
+                    type=types.Type.STRING,
+                    description=(
+                        "Brief justification for this copy's site_ref / role, from its "
+                        "geometry facts and/or the paper. Optional."
+                    ),
+                ),
+            },
+            required=["copy_id", "site_ref", "role", "confidence"],
+        ),
+    )
+
 
 # No temperature override here: the default model is tuned to run at its own
 # default temperature, and pinning a low value can trigger reasoning loops or

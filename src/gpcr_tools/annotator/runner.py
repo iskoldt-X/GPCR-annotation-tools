@@ -15,7 +15,12 @@ from typing import Any
 
 from google.genai.errors import APIError, ClientError, ServerError
 
-from gpcr_tools.annotator.detect_orchestrator import build_tool_config, build_tool_for_signals
+from gpcr_tools.annotator.detect_orchestrator import (
+    build_tool_config,
+    build_tool_for_signals,
+    ligand_copy_id_enum,
+    ligand_copy_identifiers,
+)
 from gpcr_tools.annotator.gemini_client import get_client
 from gpcr_tools.annotator.pdf_compressor import compress_pdf_if_needed
 from gpcr_tools.annotator.post_processor import post_process_annotation
@@ -551,8 +556,15 @@ def run_single_pdb(
             parts = build_prompt_parts(
                 pdb_id, enriched_data, prompt_text, detect_signals=detect_signals
             )
+            # Pin the per-PDB ligand_copies schema to this structure's ligand copy
+            # identifiers (empty -> schema unchanged); the matching prompt roster is
+            # built inside build_prompt_parts.
+            copy_ids = ligand_copy_id_enum(ligand_copy_identifiers(enriched_data))
             run_config = build_tool_config(
-                detect_signals, temperature=temperature, thinking_level=thinking_level
+                detect_signals,
+                temperature=temperature,
+                thinking_level=thinking_level,
+                ligand_copy_ids=copy_ids,
             )
             contents: list[Any] = [*parts, uploaded_file]
 
@@ -736,7 +748,13 @@ def build_and_submit_batch(
         parts = build_prompt_parts(
             pdb_id, enriched_data, prompt_text, detect_signals=detect_signals
         )
-        tool_for_pdb = build_tool_for_signals(ANNOTATION_TOOL, detect_signals)
+        # Pin the per-PDB ligand_copies schema to this structure's ligand copy
+        # identifiers (empty -> schema unchanged); the matching prompt roster is
+        # built inside build_prompt_parts.
+        copy_ids = ligand_copy_id_enum(ligand_copy_identifiers(enriched_data))
+        tool_for_pdb = build_tool_for_signals(
+            ANNOTATION_TOOL, detect_signals, ligand_copy_ids=copy_ids
+        )
 
         # We need to construct the request dict for the batch API.
         # The schema for the batch API contents is identical to generate_content.

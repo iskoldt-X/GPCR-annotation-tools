@@ -8,10 +8,17 @@ mutated.
 
 from __future__ import annotations
 
+import re
+
+from google.genai import types
+
 from gpcr_tools.annotator.detect_orchestrator import (
     assemble_detect_block,
+    assemble_ligand_copy_block,
     build_tool_config,
     build_tool_for_signals,
+    ligand_copy_id_enum,
+    ligand_copy_identifiers,
 )
 from gpcr_tools.annotator.schema import ANNOTATION_TOOL, TOOL_CONFIG
 from gpcr_tools.detector.signals import (
@@ -482,10 +489,222 @@ class TestBuildToolConfig:
         assert build_tool_config([], thinking_level=None) is TOOL_CONFIG
 
     def test_thinking_level_sets_thinking_config_leaving_base_unchanged(self) -> None:
-        from google.genai import types
-
         cfg = build_tool_config([], thinking_level="low")
         assert cfg is not TOOL_CONFIG
         assert cfg.thinking_config is not None
         assert cfg.thinking_config.thinking_level == types.ThinkingLevel.LOW
         assert TOOL_CONFIG.thinking_config is None  # base config untouched
+
+
+# ---------------------------------------------------------------------------
+# Per-PDB ligand_copies schema + prompt roster (per-copy fill-in)
+# ---------------------------------------------------------------------------
+
+
+def _np_entity(comp_id: str, copies: list[tuple[str, str, str]]) -> dict:
+    """A nonpolymer entity with *copies* as (auth_asym_id, label_asym_id, auth_seq_id)."""
+    return {
+        "rcsb_nonpolymer_entity_container_identifiers": {"nonpolymer_comp_id": comp_id},
+        "nonpolymer_entity_instances": [
+            {
+                "rcsb_nonpolymer_entity_instance_container_identifiers": {
+                    "auth_asym_id": auth,
+                    "asym_id": label,
+                    "auth_seq_id": seq,
+                }
+            }
+            for (auth, label, seq) in copies
+        ],
+    }
+
+
+def _multi_ligand_entry() -> dict:
+    """A structure with a drug-like ligand, incidental lipids (CLR/PLM), and a
+    stripped buffer (SO4), so the candidate filter and copy-identifier formation
+    are both exercised."""
+    return {
+        "nonpolymer_entities": [
+            _np_entity("J40", [("R", "A", "601")]),
+            _np_entity(
+                "CLR",
+                [("R", "B", "602"), ("R", "C", "603"), ("R", "D", "604"), ("R", "E", "605")],
+            ),
+            _np_entity("PLM", [("R", "F", "701"), ("R", "G", "702"), ("R", "H", "703")]),
+            _np_entity("SO4", [("R", "I", "801")]),
+        ]
+    }
+
+
+def _base_ligand_item_props() -> dict:
+    return (
+        ANNOTATION_TOOL.function_declarations[0].parameters.properties["ligands"].items.properties
+    )
+
+
+class TestLigandCopyIdentifiers:
+    def test_lists_every_candidate_copy_and_strips_buffers(self) -> None:
+        roster = ligand_copy_identifiers(_multi_ligand_entry())
+        copy_ids = ligand_copy_id_enum(roster)
+        # Drug-like + both incidental lipids are on the roster; the buffer is not.
+        assert set(copy_ids) == {
+            "R:601",
+            "R:602",
+            "R:603",
+            "R:604",
+            "R:605",
+            "R:701",
+            "R:702",
+            "R:703",
+        }
+        assert "R:801" not in copy_ids  # SO4 buffer stripped
+        assert len(copy_ids) == len(set(copy_ids))  # unique (valid enum)
+        comps = {comp for comp, _cid in roster}
+        assert comps == {"J40", "CLR", "PLM"}  # incidental lipids kept on the exam
+
+    def test_incidental_lipid_copy_present(self) -> None:
+        roster = ligand_copy_identifiers(_multi_ligand_entry())
+        assert ("CLR", "R:602") in roster  # a cholesterol (incidental) copy is on the roster
+
+    def test_accepts_enriched_envelope(self) -> None:
+        bare = ligand_copy_identifiers(_multi_ligand_entry())
+        wrapped = ligand_copy_identifiers({"data": {"entry": _multi_ligand_entry()}})
+        assert bare == wrapped
+
+    def test_no_candidates_yields_empty_roster(self) -> None:
+        only_buffers = {"nonpolymer_entities": [_np_entity("SO4", [("R", "A", "801")])]}
+        assert ligand_copy_identifiers(only_buffers) == []
+
+    def test_skips_copy_without_usable_identifier(self) -> None:
+        # A copy missing its author residue number cannot form an identifier.
+        entry = {"nonpolymer_entities": [_np_entity("J40", [("R", "A", "")])]}
+        assert ligand_copy_identifiers(entry) == []
+
+
+class TestBuildToolForLigandCopies:
+    def test_injects_ligand_copies_array_pinned_to_copy_ids(self) -> None:
+        copy_ids = ["R:601", "R:602", "R:701"]
+        tool = build_tool_for_signals(ANNOTATION_TOOL, [], ligand_copy_ids=copy_ids)
+        assert tool is not ANNOTATION_TOOL
+        params = tool.function_declarations[0].parameters
+        arr = params.properties["ligand_copies"]
+        assert arr.type == types.Type.ARRAY
+        item = arr.items
+        # copy_id enum is exactly this structure's identifiers (incl. an incidental lipid).
+        assert set(item.properties["copy_id"].enum) == set(copy_ids)
+        # Required fields; evidence is optional.
+        assert set(item.required) == {"copy_id", "site_ref", "role", "confidence"}
+        assert "evidence" in item.properties
+        assert "evidence" not in item.required
+        # No fixed-length pin (rejected by the API at higher counts).
+        assert arr.min_items is None
+        assert arr.max_items is None
+
+    def test_reuses_base_site_ref_and_role_enums(self) -> None:
+        tool = build_tool_for_signals(ANNOTATION_TOOL, [], ligand_copy_ids=["R:601"])
+        item = tool.function_declarations[0].parameters.properties["ligand_copies"].items
+        base = _base_ligand_item_props()
+        assert set(item.properties["site_ref"].enum) == set(base["site_ref"].enum)
+        assert set(item.properties["role"].enum) == set(base["role"].properties["value"].enum)
+        assert set(item.properties["confidence"].enum) == {"High", "Medium", "Low"}
+
+    def test_base_tool_and_ligands_array_untouched(self) -> None:
+        build_tool_for_signals(ANNOTATION_TOOL, [], ligand_copy_ids=["R:601"])
+        base_params = ANNOTATION_TOOL.function_declarations[0].parameters
+        assert "ligand_copies" not in base_params.properties  # no leak onto the base tool
+        # The existing compound-level ligands array is left exactly as it was.
+        assert base_params.properties["ligands"].type == types.Type.ARRAY
+        assert "site_ref" in base_params.properties["ligands"].items.properties
+
+    def test_no_copies_and_no_incidental_returns_identity(self) -> None:
+        assert build_tool_for_signals(ANNOTATION_TOOL, [], ligand_copy_ids=[]) is ANNOTATION_TOOL
+        assert build_tool_for_signals(ANNOTATION_TOOL, [], ligand_copy_ids=None) is ANNOTATION_TOOL
+
+    def test_coexists_with_incidental_role_check_without_mutating_base(self) -> None:
+        tool = build_tool_for_signals(
+            ANNOTATION_TOOL, [_incidental_candidate()], ligand_copy_ids=["R:601"]
+        )
+        params = tool.function_declarations[0].parameters
+        assert "ligand_copies" in params.properties  # new top-level array
+        assert "pharmacological_role_check" in params.properties["ligands"].items.properties
+        # Both injections leave the base tool pristine.
+        base_params = ANNOTATION_TOOL.function_declarations[0].parameters
+        assert "ligand_copies" not in base_params.properties
+        assert (
+            "pharmacological_role_check" not in base_params.properties["ligands"].items.properties
+        )
+
+    def test_no_candidate_copies_leaves_tool_identical_to_base(self) -> None:
+        only_buffers = {"nonpolymer_entities": [_np_entity("SO4", [("R", "A", "801")])]}
+        copy_ids = ligand_copy_id_enum(ligand_copy_identifiers(only_buffers))
+        assert (
+            build_tool_for_signals(ANNOTATION_TOOL, [], ligand_copy_ids=copy_ids) is ANNOTATION_TOOL
+        )
+
+
+class TestBuildToolConfigLigandCopies:
+    def test_forwards_copy_ids_leaving_base_config_unchanged(self) -> None:
+        cfg = build_tool_config([], ligand_copy_ids=["R:601"])
+        assert cfg is not TOOL_CONFIG
+        params = cfg.tools[0].function_declarations[0].parameters
+        assert "ligand_copies" in params.properties
+        assert TOOL_CONFIG.tools[0] is ANNOTATION_TOOL  # base config untouched
+
+    def test_no_copy_ids_returns_base_config_identity(self) -> None:
+        assert build_tool_config([], ligand_copy_ids=[]) is TOOL_CONFIG
+        assert build_tool_config([], ligand_copy_ids=None) is TOOL_CONFIG
+
+
+class TestAssembleLigandCopyBlock:
+    def test_none_when_roster_empty(self) -> None:
+        assert assemble_ligand_copy_block([], []) is None
+
+    def test_one_line_per_copy_including_sparse(self) -> None:
+        roster = [("CLR", "R:602"), ("CLR", "R:605"), ("J40", "R:601")]
+        # Only R:602 has mapped geometry; R:605 and R:601 are sparse.
+        signals = [_site_ref("CLR", [_copy(["3x33"], ["TM3"], 1, 0.9, copy_id="R:602")])]
+        block = assemble_ligand_copy_block(roster, signals)
+        assert block is not None
+        # Every enum member gets a per-copy line carrying its component id.
+        for comp, cid in roster:
+            assert f"copy {cid} ({comp}):" in block
+        # The mapped copy shows its geometry facts; the sparse copies show the note.
+        assert "3x33" in block
+        assert block.count("few receptor contacts / surface-exposed") == 2
+
+    def test_carries_fill_in_instruction(self) -> None:
+        block = assemble_ligand_copy_block([("J40", "R:601")], [])
+        assert block is not None
+        assert "ligand_copies" in block
+        assert "may repeat across copies" in block
+        assert "'unknown'" in block
+        assert "do not add, omit, or alter" in block
+
+
+class TestPromptRosterSchemaEnumInSync:
+    """Desync guard: the copy_id set the PROMPT enumerates must be EXACTLY the
+    copy_id enum baked into the SCHEMA. Both derive from ``ligand_copy_identifiers``,
+    so any future edit that lets the prompt block and the schema enum drift apart
+    (e.g. one filters copies the other keeps) fails here rather than in production."""
+
+    def _copy_ids_in_block(self, block: str) -> set[str]:
+        # Each per-copy line is exactly "  copy <copy_id> (<comp_id>): ...".
+        return set(re.findall(r"^  copy (\S+) \(", block, re.MULTILINE))
+
+    def test_block_copy_ids_equal_schema_copy_id_enum(self) -> None:
+        entry = _multi_ligand_entry()
+        roster = ligand_copy_identifiers(entry)
+
+        # PROMPT side: the copy_ids the assembled LIGAND COPIES block actually lists.
+        block = assemble_ligand_copy_block(roster, [])
+        assert block is not None
+        prompt_copy_ids = self._copy_ids_in_block(block)
+
+        # SCHEMA side: the copy_id enum pinned into the built ligand_copies schema.
+        tool = build_tool_for_signals(
+            ANNOTATION_TOOL, [], ligand_copy_ids=ligand_copy_id_enum(roster)
+        )
+        ligand_copies = tool.function_declarations[0].parameters.properties["ligand_copies"]
+        schema_copy_id_enum = set(ligand_copies.items.properties["copy_id"].enum)
+
+        assert prompt_copy_ids  # non-empty, so this is a real comparison
+        assert prompt_copy_ids == schema_copy_id_enum

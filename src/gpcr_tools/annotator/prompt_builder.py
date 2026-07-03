@@ -6,7 +6,11 @@ from collections import defaultdict
 from types import MappingProxyType
 from typing import Any
 
-from gpcr_tools.annotator.detect_orchestrator import assemble_detect_block
+from gpcr_tools.annotator.detect_orchestrator import (
+    assemble_detect_block,
+    assemble_ligand_copy_block,
+    ligand_copy_identifiers,
+)
 from gpcr_tools.config import (
     INCIDENTAL_CANDIDATES,
     LIGAND_EXCLUDE_LIST,
@@ -410,6 +414,17 @@ def build_prompt_parts(
     detect_block = assemble_detect_block(detect_signals or [])
     if detect_block:
         parts.append(detect_block)
+        parts.append("\n\n")
+
+    # 5c. Per-copy ligand roster: one line per functional-candidate ligand copy
+    # (from RCSB metadata, so it includes sparse copies), paired with the per-PDB
+    # ligand_copies schema the model fills. Nothing is appended when the structure
+    # has no candidate copies, so an ordinary structure's prompt is unchanged.
+    copy_block = assemble_ligand_copy_block(
+        ligand_copy_identifiers(enriched_data), detect_signals or []
+    )
+    if copy_block:
+        parts.append(copy_block)
         parts.append("\n\n")
 
     # 6. Full paper header

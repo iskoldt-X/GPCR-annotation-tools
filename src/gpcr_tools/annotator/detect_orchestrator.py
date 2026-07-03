@@ -15,6 +15,7 @@ The model-facing wording of the evidence block is locked by a snapshot test.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from google.genai import types
@@ -23,6 +24,7 @@ from gpcr_tools.annotator.schema import (
     ANNOTATION_TOOL,
     PHARMACOLOGICAL_ROLE_CHECK_SCHEMA,
     TOOL_CONFIG,
+    build_ligand_copies_schema,
 )
 from gpcr_tools.detector.signals import (
     SEVERITY_ADVISORY,
@@ -34,6 +36,10 @@ from gpcr_tools.detector.signals import (
     SIGNAL_SITE_REF,
     DetectSignal,
 )
+from gpcr_tools.detector.site_ref import _annotated_ligands
+from gpcr_tools.validator.oligomer import build_nonpolymer_instance_index
+
+logger = logging.getLogger(__name__)
 
 # A pocket-residue list is truncated to this many numbers in the prompt evidence.
 _MAX_POCKET_RESIDUES_SHOWN = 12
@@ -229,41 +235,220 @@ def assemble_detect_block(signals: list[DetectSignal]) -> str | None:
     return f"{_DETECT_BLOCK_HEADER}\n{lines}"
 
 
-def build_tool_for_signals(base_tool: types.Tool, signals: list[DetectSignal]) -> types.Tool:
-    """Return *base_tool* augmented for an incidental-candidate advisory, else itself.
+# Header + fill-in instruction for the per-copy ligand roster block. Domain
+# language only, kept in the detector-evidence voice.
+_LIGAND_COPY_BLOCK_HEADER = (
+    "=== LIGAND COPIES (assign a site and role to every copy) ===\n"
+    "Each modelled copy of a candidate ligand is listed below by its copy "
+    "identifier (author chain:residue) and component id, with its geometry facts:"
+)
 
-    An incidental-candidate advisory adds the optional ``pharmacological_role_check`` field to each
-    ligand item. (``site_ref`` is a permanent base-schema field for every ligand,
-    so it is not injected here; the dual-role advisory only adds prompt evidence.)
-    With no incidental-candidate signal the base tool is returned by identity, guaranteeing
-    zero schema perturbation. The base tool is never mutated (deep copy first).
+# A copy the geometry channel dropped as too sparse to map still gets a line:
+# sparse contact is itself a clue that the copy is surface / membrane-facing.
+_SPARSE_COPY_NOTE = (
+    "few receptor contacts / surface-exposed (often a structural or "
+    "membrane-facing copy) -- judge from the paper"
+)
+
+_LIGAND_COPY_INSTRUCTION = (
+    "Fill the ligand_copies array with exactly one entry per copy listed above, "
+    "reusing its copy_id verbatim. Assign each copy's site_ref and role from that "
+    "copy's own geometry facts (keyed by the same identifier, both here and in the "
+    "DETECTOR EVIDENCE block) plus the paper. Answers may repeat across copies -- "
+    "many structural-lipid copies all at 'membrane_facing' is expected, so do not "
+    "invent distinct sites to force them apart. Use 'unknown' when a copy's position "
+    "is genuinely undetermined rather than guessing. Fill exactly the copies listed: "
+    "do not add, omit, or alter any identifier."
+)
+
+
+def _entry(enriched_data: dict[str, Any]) -> dict[str, Any]:
+    """Unwrap the ``data.entry`` envelope if present, else use the object as-is."""
+    return (enriched_data.get("data") or {}).get("entry") or enriched_data
+
+
+def ligand_copy_identifiers(enriched_data: dict[str, Any]) -> list[tuple[str, str]]:
+    """Ordered ``(comp_id, copy_id)`` for every functional-candidate ligand copy.
+
+    The exam roster: every modelled copy -- from ``build_nonpolymer_instance_index``,
+    the true physical copy set in the RCSB metadata -- of every functional-candidate
+    component (``_annotated_ligands``: present non-polymers minus stripped buffers,
+    with incidental membrane lipids such as cholesterol kept on the roster). Each
+    ``copy_id`` is "<auth_asym_id>:<auth_seq_id>". Accepts the enriched envelope or a
+    bare entry, and is empty when the structure has no functional-candidate copies.
+    """
+    entry = _entry(enriched_data)
+    index = build_nonpolymer_instance_index(entry)
+    candidates = _annotated_ligands(entry)
+    roster: list[tuple[str, str]] = []
+    # Dedup key is copy_id ALONE (not (comp_id, copy_id)): copy_id is the schema
+    # enum value the model binds each answer to, so a repeated value would be
+    # ambiguous. Track which comp_id first claimed each copy_id so a genuine
+    # cross-component collision can be surfaced rather than silently dropped.
+    claimed_by: dict[str, str] = {}
+    for comp_id in sorted(candidates):
+        for inst in index.get(comp_id, []):
+            auth_asym = inst.get("auth_asym_id") or ""
+            auth_seq = inst.get("auth_seq_id") or ""
+            if not auth_asym or not auth_seq:
+                # A copy with no usable author chain/residue cannot form an
+                # identifier the model can bind an answer to -- skip it.
+                continue
+            copy_id = f"{auth_asym}:{auth_seq}"
+            existing = claimed_by.get(copy_id)
+            if existing is not None:
+                # Two DIFFERENT components sharing one author chain:residue is a
+                # rare collision; keep the first and warn rather than drop silently.
+                if existing != comp_id:
+                    logger.warning(
+                        "[%s] ligand copy identifier %s is shared by components %s and %s; "
+                        "keeping %s and dropping %s (copy_id must be a unique roster key).",
+                        entry.get("rcsb_id") or "UNKNOWN",
+                        copy_id,
+                        existing,
+                        comp_id,
+                        existing,
+                        comp_id,
+                    )
+                continue
+            claimed_by[copy_id] = comp_id
+            roster.append((comp_id, copy_id))
+    return roster
+
+
+def ligand_copy_id_enum(copy_roster: list[tuple[str, str]]) -> list[str]:
+    """The ``copy_id`` enum (order-preserving, already unique) from a copy roster."""
+    return [copy_id for _comp_id, copy_id in copy_roster]
+
+
+def _geometry_by_copy_id(signals: list[DetectSignal]) -> dict[str, dict[str, Any]]:
+    """Index each site_ref advisory copy's geometry facts by its copy identifier."""
+    by_copy: dict[str, dict[str, Any]] = {}
+    for signal in signals:
+        if signal.kind != SIGNAL_SITE_REF or signal.severity != SEVERITY_ADVISORY:
+            continue
+        for copy in (signal.payload or {}).get("copies") or []:
+            copy_id = copy.get("copy_id")
+            if copy_id:
+                by_copy[copy_id] = copy
+    return by_copy
+
+
+def _format_copy_facts(copy: dict[str, Any]) -> str:
+    """Compact one-line geometry summary for a single ligand copy."""
+    generic = ", ".join(copy.get("generic_numbers") or []) or "none mapped"
+    segments = ", ".join(copy.get("segments") or []) or "?"
+    core = copy.get("core_hits") or 0
+    parts = [
+        f"contacts generic numbers [{generic}] in segments [{segments}] "
+        f"({core} Class A orthosteric-core)"
+    ]
+    enclosure = copy.get("enclosure")
+    if enclosure is not None:
+        parts.append(f"enclosure {enclosure}")
+    facing = copy.get("facing")
+    if facing is not None:
+        parts.append(f"{facing:.2f} pocket-facing")
+    side = copy.get("side")
+    if side is not None:
+        parts.append(str(side))
+    return "; ".join(parts)
+
+
+def assemble_ligand_copy_block(
+    copy_roster: list[tuple[str, str]],
+    signals: list[DetectSignal],
+) -> str | None:
+    """Build the LIGAND COPIES prompt block, or ``None`` when the roster is empty.
+
+    *copy_roster* is the ordered ``(comp_id, copy_id)`` list of every
+    functional-candidate ligand copy (from RCSB metadata, so it includes copies
+    whose geometry was too sparse to map). Every listed copy gets one line carrying
+    its identifier, component id, and geometry facts looked up from the site_ref
+    signals by ``copy_id`` -- or a sparse-contact note when no geometry mapped. The
+    block then instructs the model to assign a site/role/confidence to every listed
+    copy. Enumeration comes from the metadata copy set, not the geometry channel, so
+    a sparse copy dropped from DETECTOR EVIDENCE is still represented here.
+    """
+    if not copy_roster:
+        return None
+    geometry = _geometry_by_copy_id(signals)
+    lines: list[str] = []
+    for comp_id, copy_id in copy_roster:
+        facts = geometry.get(copy_id)
+        summary = _format_copy_facts(facts) if facts else _SPARSE_COPY_NOTE
+        lines.append(f"  copy {copy_id} ({comp_id}): {summary}")
+    body = "\n".join(lines)
+    return f"{_LIGAND_COPY_BLOCK_HEADER}\n{body}\n{_LIGAND_COPY_INSTRUCTION}"
+
+
+def build_tool_for_signals(
+    base_tool: types.Tool,
+    signals: list[DetectSignal],
+    ligand_copy_ids: list[str] | None = None,
+) -> types.Tool:
+    """Return *base_tool* augmented for this structure, or *base_tool* itself.
+
+    Two independent, additive augmentations, both applied to a single deep copy so
+    the base tool is never mutated:
+
+    * an incidental-candidate advisory adds the optional
+      ``pharmacological_role_check`` field to each ligand item; and
+    * *ligand_copy_ids* (this structure's ligand copy identifiers) adds the new
+      top-level ``ligand_copies`` array, whose ``copy_id`` enum is pinned to exactly
+      those identifiers. The original ``ligands`` array is left untouched -- the
+      per-copy array is a purely additive sidecar.
+
+    With neither present the base tool is returned by identity, guaranteeing zero
+    schema perturbation for an ordinary structure. (``site_ref`` is a permanent
+    base-schema field for every ligand, so it is not injected here; the dual-role
+    advisory only adds prompt evidence.)
     """
     has_incidental = any(
         s.kind == SIGNAL_INCIDENTAL_CANDIDATE and s.severity == SEVERITY_ADVISORY for s in signals
     )
-    if not has_incidental:
+    copy_ids = list(ligand_copy_ids or [])
+    if not has_incidental and not copy_ids:
         return base_tool
     declarations = base_tool.function_declarations or []
     if not declarations:
         return base_tool
     tool = base_tool.model_copy(deep=True)
     params = (tool.function_declarations or [])[0].parameters
-    ligands = (params.properties or {}).get("ligands") if params else None
-    items = ligands.items if ligands is not None else None
-    if items is None or items.properties is None:
+    if params is None or params.properties is None:
         return base_tool
-    # Guard against a future SDK making deep model_copy shallow: mutating a nested
-    # dict still shared with the base would corrupt every subsequent structure.
+
     base_decls = base_tool.function_declarations or []
     base_params = base_decls[0].parameters if base_decls else None
-    base_ligands = (base_params.properties or {}).get("ligands") if base_params else None
-    base_items = base_ligands.items if base_ligands is not None else None
-    if base_items is not None and items.properties is base_items.properties:
-        raise RuntimeError(
-            "Tool.model_copy(deep=True) did not deep-copy nested Schema properties; "
-            "refusing to mutate the shared base tool (check the google-genai version)."
-        )
-    items.properties["pharmacological_role_check"] = PHARMACOLOGICAL_ROLE_CHECK_SCHEMA
+    base_props = base_params.properties if base_params is not None else None
+
+    if has_incidental:
+        ligands = params.properties.get("ligands")
+        items = ligands.items if ligands is not None else None
+        if items is None or items.properties is None:
+            return base_tool
+        # Guard against a future SDK making deep model_copy shallow: mutating a
+        # nested dict still shared with the base would corrupt every subsequent
+        # structure.
+        base_ligands = (base_props or {}).get("ligands") if base_props else None
+        base_items = base_ligands.items if base_ligands is not None else None
+        if base_items is not None and items.properties is base_items.properties:
+            raise RuntimeError(
+                "Tool.model_copy(deep=True) did not deep-copy nested Schema properties; "
+                "refusing to mutate the shared base tool (check the google-genai version)."
+            )
+        items.properties["pharmacological_role_check"] = PHARMACOLOGICAL_ROLE_CHECK_SCHEMA
+
+    if copy_ids:
+        # Same deep-copy guard for the top-level properties dict we extend: a
+        # shallow copy would still share it with the base tool.
+        if base_props is not None and params.properties is base_props:
+            raise RuntimeError(
+                "Tool.model_copy(deep=True) did not deep-copy nested Schema properties; "
+                "refusing to mutate the shared base tool (check the google-genai version)."
+            )
+        params.properties["ligand_copies"] = build_ligand_copies_schema(copy_ids)
+
     return tool
 
 
@@ -271,6 +456,7 @@ def build_tool_config(
     signals: list[DetectSignal],
     temperature: float | None = None,
     thinking_level: str | None = None,
+    ligand_copy_ids: list[str] | None = None,
 ) -> types.GenerateContentConfig:
     """Return the generation config for *signals* (identity ``TOOL_CONFIG`` if no mutation).
 
@@ -278,9 +464,11 @@ def build_tool_config(
     unset so the model's own default applies (``TOOL_CONFIG`` pins no temperature).
     *thinking_level* (one of ``minimal``/``low``/``medium``/``high``) sets the
     reasoning depth when given; ``None`` leaves it unset so the model's own
-    default (``high``) applies.
+    default (``high``) applies. *ligand_copy_ids* (this structure's ligand copy
+    identifiers) pins the per-PDB ``ligand_copies`` array; empty/``None`` leaves
+    the schema unchanged.
     """
-    tool = build_tool_for_signals(ANNOTATION_TOOL, signals)
+    tool = build_tool_for_signals(ANNOTATION_TOOL, signals, ligand_copy_ids=ligand_copy_ids)
     if tool is ANNOTATION_TOOL and temperature is None and thinking_level is None:
         return TOOL_CONFIG
     config = TOOL_CONFIG.model_copy(deep=True)
