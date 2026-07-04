@@ -11,11 +11,18 @@ from typing import Any
 from gpcr_tools.config import (
     AUX_PROTEIN_DISPATCH,
     CSV_SCHEMA,
+    SITE_REF_UNKNOWN,
     VALIDATION_GHOST_LIGAND,
     VALIDATION_SKIPPED_APO,
     get_config,
     is_empty_key,
 )
+
+# When a physical ligand copy's per-copy site vote is 'unknown'/absent, or points
+# to a site with no matching ligand row, the copy cannot be attributed to a
+# specific binding site. It is still listed (never silently dropped) but tagged
+# with this mark, so the residue column never implies a confident site it lacks.
+RESIDUE_SITE_UNDETERMINED_MARK = " (?)"
 
 
 def sanitize_value(value: Any) -> str:
@@ -40,6 +47,173 @@ def _primary_chain(value: Any) -> str:
     # Split on comma or semicolon, tolerating optional spaces, to match the chain
     # parsers used elsewhere in the codebase; take the first (primary complex).
     return text.replace(";", ",").split(",")[0].strip()
+
+
+def _ligand_row_dropped(lig: Any) -> bool:
+    """Whether a ligand row is filtered out of ``ligands.csv`` before it is written.
+
+    The single source of truth for the writer loop's skip decision, shared with
+    the per-site residue partition so a physical copy is never attributed to a
+    binding-site row that never reaches output (which would silently lose it).
+    A row is dropped when:
+
+    * it is not a dict (cannot be a valid row);
+    * it is a GHOST ligand the validator could not find in the structure, unless a
+      curator explicitly kept it (writing it would record an interaction for a
+      molecule absent from the deposition);
+    * it is an apo / "no ligand" placeholder (SKIPPED_APO, or a value-level Apo
+      marker) -- not a bound ligand, so it must not become an interaction row;
+    * it is a dual-use molecule the model explicitly judged non-functional
+      (``pharmacological_role_check.is_functional_ligand`` is False). A missing or
+      null verdict means "not assessed" and does NOT drop the row.
+    """
+    if not isinstance(lig, dict):
+        return True
+    if lig.get("validation_status") == VALIDATION_GHOST_LIGAND and not lig.get(
+        "curator_kept_ghost"
+    ):
+        return True
+    if (
+        lig.get("validation_status") == VALIDATION_SKIPPED_APO
+        or sanitize_value(lig.get("type")) == "none"
+        or sanitize_value(lig.get("name")) == "Apo"
+        or sanitize_value((lig.get("role") or {}).get("value")) == "Apo (no ligand)"
+    ):
+        return True
+    prc = lig.get("pharmacological_role_check")
+    return isinstance(prc, dict) and prc.get("is_functional_ligand") is False
+
+
+def _per_site_label_and_residue_columns(
+    ligands: list[Any],
+    nonpolymer_instances: dict[str, Any],
+    ligand_copies: Any,
+) -> list[tuple[str, str]]:
+    """Compute each ligand row's (``label_asym_id``, ``Residue_seq_id``) pair, filtered by site.
+
+    A compound modelled at several binding sites is emitted as one ligand row per
+    site (same component id, different ``site_ref``). Historically every such row
+    listed the SAME full set of copies (a plain component-id join), so the rows
+    were indistinguishable. Here each site row instead lists only the copies whose
+    per-copy vote placed them at that site.
+
+    A copy identifier is ``"<auth_asym_id>:<auth_seq_id>"`` -- the same string used
+    both as the residue token and as the per-copy ``copy_id`` -- so a residue token
+    maps to its voted site directly, and it belongs to the component because it
+    comes from that component's own instance list. The paired ``label_asym_id`` and
+    residue tokens are produced together from ONE filtered token list per row, so
+    the two columns can never diverge in cardinality or order: they stay 1:1
+    copy-for-copy on every row (the CSV schema's ``label_asym_id`` <-> residue
+    contract).
+
+    Only rows that SURVIVE to output are partitioned (``_ligand_row_dropped``):
+    a copy voted to a site whose row is dropped (e.g. an incidental lipid the model
+    judged non-functional) is not lost -- it falls into the tagged homeless bucket
+    on a surviving row of the same compound.
+
+    Honest fallbacks (never silently wrong, never a dropped copy):
+      * No per-copy votes for this record (pre-feature data, or votes dropped
+        upstream) -> every row keeps the full component-id-join list, unchanged.
+      * A single-copy compound, or a polymer/keyless ligand with no instances ->
+        nothing to partition; listed exactly as before.
+      * A copy whose vote is 'unknown'/absent, or voted to a site with no surviving
+        ligand row, is not attributed to any site: it is appended once (to the
+        compound's first surviving row), tagged, so it is surfaced rather than lost.
+
+    Returns a list parallel to *ligands* (same length and order); each element is
+    that row's ``(label_asym_id, Residue_seq_id)`` pair.
+    """
+    results: list[tuple[str, str]] = [("", "") for _ in ligands]
+
+    # Per-copy voted site, keyed by copy identifier. An absent/empty list means the
+    # record carries no per-copy votes at all -> the component-id-join fallback.
+    votes: dict[str, Any] = {}
+    have_votes = isinstance(ligand_copies, list) and bool(ligand_copies)
+    if have_votes:
+        for row in ligand_copies:
+            if isinstance(row, dict):
+                copy_id = sanitize_value(row.get("copy_id"))
+                if copy_id:
+                    votes[copy_id] = row.get("site_ref")
+
+    def _tokens(comp_id: str) -> list[tuple[str, str]]:
+        # (label_asym_id, "<auth_asym_id>:<auth_seq_id>") for each modelled copy
+        # that carries a label. The residue token is also the per-copy copy_id, so
+        # a copy's voted site is looked up by it. Label and residue are emitted
+        # together so the two columns stay aligned copy-for-copy.
+        tokens: list[tuple[str, str]] = []
+        for inst in nonpolymer_instances.get(comp_id) or []:
+            if isinstance(inst, dict) and inst.get("label_asym_id"):
+                label = sanitize_value(inst.get("label_asym_id"))
+                residue = (
+                    f"{sanitize_value(inst.get('auth_asym_id'))}"
+                    f":{sanitize_value(inst.get('auth_seq_id'))}"
+                )
+                tokens.append((label, residue))
+        return tokens
+
+    def _norm_site(value: Any) -> str:
+        text = sanitize_value(value)
+        return "" if is_empty_key(text) else text.lower()
+
+    # Group the SURVIVING ligand rows by component id so a compound's per-copy votes
+    # can be split across its site rows (and a homeless copy attached exactly once).
+    # Dropped rows are excluded so their site never becomes a placement target.
+    rows_by_comp: dict[str, list[int]] = {}
+    row_site: dict[int, str] = {}
+    for idx, lig in enumerate(ligands):
+        if _ligand_row_dropped(lig):
+            continue
+        comp_id = sanitize_value(lig.get("chem_comp_id"))
+        if is_empty_key(comp_id):
+            continue  # keyless (peptide/glycan): no per-copy residues, as before
+        row_site[idx] = _norm_site(lig.get("site_ref"))
+        rows_by_comp.setdefault(comp_id, []).append(idx)
+
+    def _join(pairs: list[tuple[str, str]]) -> tuple[str, str]:
+        return (
+            ", ".join(label for label, _residue in pairs),
+            ", ".join(residue for _label, residue in pairs),
+        )
+
+    for comp_id, idxs in rows_by_comp.items():
+        tokens = _tokens(comp_id)
+        # Nothing to partition -> keep the full join on every surviving row of this
+        # compound (byte-identical to the pre-feature behavior): no votes, a single
+        # copy, or no instance data at all.
+        if not have_votes or len(tokens) <= 1:
+            joined = _join(tokens)
+            for idx in idxs:
+                results[idx] = joined
+            continue
+
+        existing_sites = {row_site[idx] for idx in idxs}
+        by_site: dict[str, list[tuple[str, str]]] = {}
+        homeless: list[tuple[str, str]] = []
+        for label, residue in tokens:
+            voted = _norm_site(votes[residue]) if residue in votes else ""
+            if voted and voted != SITE_REF_UNKNOWN and voted in existing_sites:
+                by_site.setdefault(voted, []).append((label, residue))
+            else:
+                # 'unknown'/absent vote, or a vote to a site with no surviving
+                # ligand row: cannot be attributed -> keep it (tagged) rather than
+                # drop it, so no copy is ever silently lost.
+                homeless.append((label, residue))
+
+        for position, idx in enumerate(idxs):
+            placed = list(by_site.get(row_site[idx], []))
+            if position == 0 and homeless:
+                # Attach every un-attributable copy exactly once, on the first
+                # surviving row. Only the residue token carries the mark (the
+                # column that would otherwise imply a confident site); the label
+                # stays a clean identifier, still 1:1 with it by position.
+                placed.extend(
+                    (label, f"{residue}{RESIDUE_SITE_UNDETERMINED_MARK}")
+                    for label, residue in homeless
+                )
+            results[idx] = _join(placed)
+
+    return results
 
 
 def transform_for_csv(pdb_id: str, data: dict) -> dict[str, list[dict[str, str]]]:
@@ -110,71 +284,37 @@ def transform_for_csv(pdb_id: str, data: dict) -> dict[str, list[dict[str, str]]
     )
 
     # ── ligands.csv ────────────────────────────────────────────────
-    for lig in data.get("ligands") or []:
-        if not isinstance(lig, dict):
-            continue
-        # Fail-safe: a ligand the validator could not find in the structure
-        # (GHOST_LIGAND) is left out of the export unless a curator explicitly
-        # confirmed it.  The model sometimes annotates a ligand the paper
-        # discusses but that this deposition does not actually model; writing it
-        # would record an interaction for a molecule absent from the structure.
-        if lig.get("validation_status") == VALIDATION_GHOST_LIGAND and not lig.get(
-            "curator_kept_ghost"
-        ):
-            continue
-        # Skip an apo / "no ligand" placeholder: the model sometimes emits a row
-        # to note the structure also has a ligand-free form. It is not a bound
-        # ligand, so it must not become a ligand-interaction row (it would
-        # otherwise carry a spurious binding site / role). The validator tags
-        # these SKIPPED_APO; the value checks also catch any that slipped tagging.
-        if (
-            lig.get("validation_status") == VALIDATION_SKIPPED_APO
-            or sanitize_value(lig.get("type")) == "none"
-            or sanitize_value(lig.get("name")) == "Apo"
-            or sanitize_value((lig.get("role") or {}).get("value")) == "Apo (no ligand)"
-        ):
-            continue
-        # A dual-use molecule (e.g. palmitate, cholesterol) is presented to the
-        # model as an incidental-candidate; the model judges whether it is a real
-        # functional ligand here or merely a structural lipid / covalent PTM. When
-        # the model's verdict is explicitly negative, leave the row out so an
-        # incidental molecule (e.g. a palmitoylation site in rhodopsin) is not
-        # recorded as a bound ligand. Gate on the model's verdict only: a missing
-        # or null field means "not assessed" and must not trigger the skip.
-        prc = lig.get("pharmacological_role_check")
-        if isinstance(prc, dict) and prc.get("is_functional_ligand") is False:
+    # label_asym_id and Residue_seq_id are filtered per binding site from the
+    # per-copy votes and built together, so a multi-site compound's rows each list
+    # only their own copies and the two columns stay 1:1 copy-for-copy. Computed
+    # once here over the SAME rows the loop below keeps, so a copy is never
+    # attributed to a dropped row and lost (see _per_site_label_and_residue_columns).
+    per_site_columns = _per_site_label_and_residue_columns(
+        data.get("ligands") or [],
+        nonpolymer_instances,
+        data.get("ligand_copies"),
+    )
+    for idx, lig in enumerate(data.get("ligands") or []):
+        # A ligand row filtered out before writing -- a non-dict entry, a GHOST
+        # ligand the validator could not find (unless a curator kept it), an apo /
+        # "no ligand" placeholder, or a dual-use molecule the model judged
+        # non-functional -- is skipped. The SAME predicate drives the per-site
+        # partition above, so a copy voted to a dropped row's site is surfaced
+        # (tagged) on a surviving row rather than silently lost.
+        if _ligand_row_dropped(lig):
             continue
         smiles = lig.get("SMILES_stereo") or lig.get("SMILES") or ""
         lig_chain = sanitize_value(lig.get("chain_id"))
-        # A non-polymer ligand's label_asym_id is its OWN mmCIF instance label(s).
-        # Never route it through the polymer label_asym_id_map (which covers
-        # protein chains only) — mapping the ligand's auth chain through that map
-        # stamps the receptor's chain label onto the ligand row. One modelled
-        # copy -> its label; several -> all of them, comma-joined (mirroring the
-        # ChainID column). Unindexed ligand -> blank (no protein-chain fallback).
         comp_id = sanitize_value(lig.get("chem_comp_id"))
-        instances = (
-            nonpolymer_instances.get(comp_id) if comp_id and not is_empty_key(comp_id) else None
-        )
-        if instances:
-            lig_label = ", ".join(
-                sanitize_value(i.get("label_asym_id")) for i in instances if i.get("label_asym_id")
-            )
-            # Residue numbers come from the SAME filtered instance list (already
-            # sorted by label_asym_id at the source), so the two columns line up
-            # copy-for-copy. Each token is "<auth_asym_id>:<auth_seq_id>" (author
-            # chain : author residue number) for one modelled copy, making a
-            # multi-copy ligand's repeating residue numbers self-describing. The
-            # per-copy chain comes from the instance's own auth_asym_id, NOT the AI
-            # chain_id (which would desync in order and cardinality).
-            lig_residue_seq = ", ".join(
-                f"{sanitize_value(i.get('auth_asym_id'))}:{sanitize_value(i.get('auth_seq_id'))}"
-                for i in instances
-                if i.get("label_asym_id")
-            )
-        else:
-            lig_label = ""
-            lig_residue_seq = ""
+        # A non-polymer ligand's label_asym_id is its OWN mmCIF instance label(s),
+        # never routed through the polymer label_asym_id_map. Both label_asym_id and
+        # Residue_seq_id come from the per-site partition: one modelled copy -> its
+        # label; several -> only the copies voted to this row's site, comma-joined,
+        # falling back to the full component-id join when there are no per-copy
+        # votes. Each residue token is "<auth_asym_id>:<auth_seq_id>" (author chain :
+        # author residue number), the same identifier used as the per-copy copy_id
+        # and aligned copy-for-copy with label_asym_id.
+        lig_label, lig_residue_seq = per_site_columns[idx]
         # The PDBe chemical-component id is the canonical ligand identity, so it
         # goes in Name; the descriptive free-text name goes in Title. When the
         # component id is empty/"None"/missing (e.g. a peptide or branched
