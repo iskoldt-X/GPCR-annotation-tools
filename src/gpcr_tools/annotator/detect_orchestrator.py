@@ -16,6 +16,9 @@ The model-facing wording of the evidence block is locked by a snapshot test.
 from __future__ import annotations
 
 import logging
+from collections import Counter
+from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from google.genai import types
@@ -319,6 +322,69 @@ def ligand_copy_identifiers(enriched_data: dict[str, Any]) -> list[tuple[str, st
 def ligand_copy_id_enum(copy_roster: list[tuple[str, str]]) -> list[str]:
     """The ``copy_id`` enum (order-preserving, already unique) from a copy roster."""
     return [copy_id for _comp_id, copy_id in copy_roster]
+
+
+@dataclass(frozen=True)
+class LigandCopyCoverage:
+    """Whether a run's ``ligand_copies`` covers the expected copy roster exactly.
+
+    ``missing`` / ``duplicated`` are expected copy identifiers absent from, or
+    repeated in, the returned rows; ``unexpected`` are returned identifiers
+    outside the expected set. ``ok`` is True only when all three are empty --
+    exact coverage: every expected ``copy_id`` present exactly once, nothing extra.
+    """
+
+    missing: tuple[str, ...] = ()
+    duplicated: tuple[str, ...] = ()
+    unexpected: tuple[str, ...] = ()
+
+    @property
+    def ok(self) -> bool:
+        return not (self.missing or self.duplicated or self.unexpected)
+
+    def describe(self) -> str:
+        """One-line human summary for a log message (``exact coverage`` when ok)."""
+        parts: list[str] = []
+        if self.missing:
+            parts.append(f"missing {list(self.missing)}")
+        if self.duplicated:
+            parts.append(f"duplicated {list(self.duplicated)}")
+        if self.unexpected:
+            parts.append(f"unexpected {list(self.unexpected)}")
+        return "; ".join(parts) if parts else "exact coverage"
+
+
+def check_ligand_copy_coverage(
+    ligand_copies: Any, expected_copy_ids: Sequence[str]
+) -> LigandCopyCoverage:
+    """Check that a run's ``ligand_copies`` covers *expected_copy_ids* exactly.
+
+    Exact coverage = every expected identifier present exactly once, with no
+    duplicate and no identifier outside the expected set. The per-PDB schema enum
+    already constrains ``copy_id`` values, but a returned response is validated
+    defensively here -- deterministic post-processing, no AI schema/prompt change.
+
+    An empty *expected_copy_ids* (a structure with no candidate copies) always
+    reports exact coverage: there is nothing to validate, so this is a no-op.
+    Tolerant of a non-list *ligand_copies* or rows without a string ``copy_id`` --
+    such rows contribute no coverage, so a malformed response surfaces as missing
+    copies rather than raising.
+    """
+    expected = list(expected_copy_ids)
+    if not expected:
+        return LigandCopyCoverage()
+    counts: Counter[str] = Counter()
+    if isinstance(ligand_copies, list):
+        for row in ligand_copies:
+            if isinstance(row, dict):
+                copy_id = row.get("copy_id")
+                if isinstance(copy_id, str):
+                    counts[copy_id] += 1
+    expected_set = set(expected)
+    missing = tuple(cid for cid in expected if counts[cid] == 0)
+    duplicated = tuple(cid for cid in expected if counts[cid] > 1)
+    unexpected = tuple(sorted(cid for cid in counts if cid not in expected_set))
+    return LigandCopyCoverage(missing=missing, duplicated=duplicated, unexpected=unexpected)
 
 
 def _geometry_by_copy_id(signals: list[DetectSignal]) -> dict[str, dict[str, Any]]:

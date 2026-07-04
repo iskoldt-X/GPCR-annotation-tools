@@ -1434,6 +1434,219 @@ def test_upload_fatal_4xx_aborts_without_retry(tmp_path, monkeypatch):
     assert not config.batch_jobs_registry_file.exists()
 
 
+# ---------------------------------------------------------------------------
+# Ligand copy coverage validation (single retry->degrade; batch drop)
+# ---------------------------------------------------------------------------
+
+
+def test_run_single_pdb_retries_then_degrades_on_coverage_mismatch(tmp_path, monkeypatch, caplog):
+    """A per-copy coverage mismatch is retried like any generation trigger; once
+    the retry budget is exhausted the best-effort result is KEPT (the PDB is not
+    lost) and the mismatch is surfaced as a warning naming what was missing."""
+    import logging
+
+    monkeypatch.setenv("GPCR_AI_RESULTS_PATH", str(tmp_path / "ai_results"))
+    reset_config()
+    config = get_config()
+
+    # Roster of two copies; the model only ever returns one (R:602 missing).
+    monkeypatch.setattr(
+        "gpcr_tools.annotator.runner.ligand_copy_identifiers",
+        lambda enriched: [("LIG", "R:601"), ("LIG", "R:602")],
+    )
+
+    mock_client = MagicMock()
+    mock_client.files.upload.return_value = MagicMock(uri="u", name="f")
+    fc = MagicMock()
+    fc.name = runner.ANNOTATOR_FUNCTION_NAME
+    fc.args = {"receptor_info": {}, "ligand_copies": [{"copy_id": "R:601"}]}
+    mock_response = MagicMock()
+    mock_response.function_calls = [fc]
+    mock_response.model_version = "m-1"
+    mock_client.models.generate_content.return_value = mock_response
+
+    monkeypatch.setattr("gpcr_tools.annotator.runner.get_client", lambda: mock_client)
+    monkeypatch.setattr("gpcr_tools.annotator.runner.compress_pdf_if_needed", lambda a, b: a)
+    monkeypatch.setattr("gpcr_tools.annotator.runner.build_prompt_parts", lambda *a, **k: ["ctx"])
+    monkeypatch.setattr("gpcr_tools.annotator.runner.load_detect_signals", lambda pdb_id: [])
+    monkeypatch.setattr(
+        "gpcr_tools.annotator.runner.post_process_annotation", lambda args: dict(args)
+    )
+    # Small retry budget + no real sleeping so the test is fast.
+    monkeypatch.setattr("gpcr_tools.annotator.runner.GEMINI_MAX_RETRIES", 3)
+    monkeypatch.setattr("gpcr_tools.annotator.runner.time.sleep", lambda *_: None)
+
+    with caplog.at_level(logging.WARNING, logger="gpcr_tools.annotator.runner"):
+        runner.run_single_pdb("7W55", {}, "Prompt", Path("dummy.pdf"), num_runs=1, model_name="m")
+
+    # Every attempt mismatched, so all 3 attempts were spent.
+    assert mock_client.models.generate_content.call_count == 3
+
+    # The run was NOT lost: the best-effort annotation is persisted, and the
+    # single path keeps whatever was returned (it does not drop ligand_copies).
+    out_file = config.ai_results_dir / "7W55" / model_run_subdir("m") / "run_1.json"
+    assert out_file.exists()
+    data = json.loads(out_file.read_text())
+    assert data["ligand_copies"] == [{"copy_id": "R:601"}]
+
+    degrade = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING
+        and "coverage mismatch after" in r.getMessage()
+        and "R:602" in r.getMessage()
+    ]
+    assert degrade, "exhausted coverage retries must be surfaced as a warning naming the miss"
+
+
+def test_recover_batch_drops_ligand_copies_on_coverage_mismatch(tmp_path, monkeypatch, caplog):
+    """Batch has no per-run retry: a coverage mismatch drops that run's
+    ligand_copies (so bad per-copy data never reaches voting) and warns, while
+    the rest of the annotation is kept; an exact-coverage run is untouched."""
+    import logging
+
+    monkeypatch.setenv("GPCR_STATE_PATH", str(tmp_path / "state"))
+    monkeypatch.setenv("GPCR_AI_RESULTS_PATH", str(tmp_path / "ai_results"))
+    monkeypatch.setenv("GPCR_ENRICHED_PATH", str(tmp_path / "enriched"))
+    reset_config()
+    config = get_config()
+    config.pipeline_runs_dir.mkdir(parents=True)
+    config.enriched_dir.mkdir(parents=True)
+    (config.enriched_dir / "7W55.json").write_text("{}")
+
+    # Expected roster of two copies (source used to build the per-PDB schema).
+    monkeypatch.setattr(
+        "gpcr_tools.annotator.runner.ligand_copy_identifiers",
+        lambda enriched: [("LIG", "R:601"), ("LIG", "R:602")],
+    )
+
+    def _line(key, copy_ids):
+        return json.dumps(
+            {
+                "key": key,
+                "response": {
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [
+                                    {
+                                        "functionCall": {
+                                            "name": "annotate_gpcr_db_structure",
+                                            "args": {
+                                                "receptor_info": {"uniprot_entry_name": "X"},
+                                                "ligand_copies": [{"copy_id": c} for c in copy_ids],
+                                            },
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                },
+            }
+        )
+
+    raw = config.pipeline_runs_dir / "raw_output_testjob.jsonl"
+    raw.write_text(
+        # run 1: an out-of-set id (R:999) -> mismatch -> drop.
+        _line("7W55__run_01", ["R:601", "R:602", "R:999"])
+        + "\n"
+        # run 2: exact coverage -> kept.
+        + _line("7W55__run_02", ["R:601", "R:602"])
+        + "\n"
+    )
+
+    monkeypatch.setattr(
+        "gpcr_tools.annotator.runner.post_process_annotation", lambda args: dict(args)
+    )
+
+    with caplog.at_level(logging.WARNING, logger="gpcr_tools.annotator.runner"):
+        runner.recover_batch()
+
+    out_dir = config.ai_results_dir / "7W55" / model_run_subdir(None)
+    run1 = json.loads((out_dir / "run_1.json").read_text())
+    run2 = json.loads((out_dir / "run_2.json").read_text())
+
+    # Mismatched run: ligand_copies dropped, the rest of the annotation kept.
+    assert "ligand_copies" not in run1
+    assert run1["receptor_info"]["uniprot_entry_name"] == "X"
+    # Exact-coverage run: ligand_copies preserved (no over-dropping).
+    assert [c["copy_id"] for c in run2["ligand_copies"]] == ["R:601", "R:602"]
+
+    drops = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "dropping ligand_copies" in r.getMessage()
+    ]
+    assert drops and "R:999" in drops[0].getMessage()
+
+
+def test_recover_batch_warns_when_ligand_copies_fully_omitted(tmp_path, monkeypatch, caplog):
+    """A run that omits ligand_copies ENTIRELY against a non-empty expected roster
+    is a coverage mismatch too: the batch check is unconditional (not gated on the
+    field being present), so it is warned consistently with the single-run path
+    rather than skipped."""
+    import logging
+
+    monkeypatch.setenv("GPCR_STATE_PATH", str(tmp_path / "state"))
+    monkeypatch.setenv("GPCR_AI_RESULTS_PATH", str(tmp_path / "ai_results"))
+    monkeypatch.setenv("GPCR_ENRICHED_PATH", str(tmp_path / "enriched"))
+    reset_config()
+    config = get_config()
+    config.pipeline_runs_dir.mkdir(parents=True)
+    config.enriched_dir.mkdir(parents=True)
+    (config.enriched_dir / "7W55.json").write_text("{}")
+
+    monkeypatch.setattr(
+        "gpcr_tools.annotator.runner.ligand_copy_identifiers",
+        lambda enriched: [("LIG", "R:601"), ("LIG", "R:602")],
+    )
+
+    # A response that carries NO ligand_copies field at all.
+    line = json.dumps(
+        {
+            "key": "7W55__run_01",
+            "response": {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "functionCall": {
+                                        "name": "annotate_gpcr_db_structure",
+                                        "args": {"receptor_info": {"uniprot_entry_name": "X"}},
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+        }
+    )
+    (config.pipeline_runs_dir / "raw_output_testjob.jsonl").write_text(line + "\n")
+
+    monkeypatch.setattr(
+        "gpcr_tools.annotator.runner.post_process_annotation", lambda args: dict(args)
+    )
+
+    with caplog.at_level(logging.WARNING, logger="gpcr_tools.annotator.runner"):
+        runner.recover_batch()
+
+    out_dir = config.ai_results_dir / "7W55" / model_run_subdir(None)
+    run1 = json.loads((out_dir / "run_1.json").read_text())
+    # The rest of the annotation is kept; the field stays absent.
+    assert "ligand_copies" not in run1
+    assert run1["receptor_info"]["uniprot_entry_name"] == "X"
+
+    warned = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "coverage mismatch" in r.getMessage()
+    ]
+    assert warned, "an omitted array must be warned consistently, not skipped"
+
+
 def test_storage_helpers(tmp_path, monkeypatch):
     """resolve_doi / canonical_pdf_name / sanitize_doi behave as documented."""
     from gpcr_tools.config import sanitize_doi

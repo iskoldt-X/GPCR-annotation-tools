@@ -18,6 +18,7 @@ from google.genai.errors import APIError, ClientError, ServerError
 from gpcr_tools.annotator.detect_orchestrator import (
     build_tool_config,
     build_tool_for_signals,
+    check_ligand_copy_coverage,
     ligand_copy_id_enum,
     ligand_copy_identifiers,
 )
@@ -598,6 +599,31 @@ def run_single_pdb(
 
                         # Process and save
                         final_data = post_process_annotation(args)
+
+                        # Deterministic coverage guard: the returned per-copy
+                        # roster must cover this structure's ligand copy
+                        # identifiers exactly. A mismatch is a retry trigger like
+                        # a missing / mismatched function call. On the final
+                        # attempt the best-effort result is kept rather than
+                        # losing the whole PDB -- missing per-copy rows are
+                        # tolerated downstream (surface, don't silently corrupt).
+                        coverage = check_ligand_copy_coverage(
+                            final_data.get("ligand_copies"), copy_ids
+                        )
+                        if not coverage.ok:
+                            if retries < GEMINI_MAX_RETRIES - 1:
+                                raise ValueError(
+                                    f"ligand copy coverage mismatch ({coverage.describe()})"
+                                )
+                            logger.warning(
+                                "[%s] Run %d: ligand copy coverage mismatch after %d "
+                                "attempts (%s); keeping the returned annotation.",
+                                pdb_id,
+                                run_num,
+                                GEMINI_MAX_RETRIES,
+                                coverage.describe(),
+                            )
+
                         final_data["_provenance"] = {
                             "model_requested": model_name,
                             "model_served": getattr(response, "model_version", None),
@@ -996,6 +1022,24 @@ def check_batch_status() -> None:
                 _cleanup_terminal_job_uploads(config, client, entry["job_name"])
 
 
+def _expected_copy_ids_for_pdb(config: Any, pdb_id: str) -> list[str]:
+    """Expected ligand copy identifiers for *pdb_id*, from its enriched data.
+
+    The same roster source the per-PDB schema was built from
+    (``ligand_copy_id_enum(ligand_copy_identifiers(entry))``). Returns an empty
+    list -- meaning "nothing to validate" -- when the enriched file is missing or
+    unreadable, so batch recovery never fails on a coverage check it cannot make.
+    """
+    enriched_path = config.enriched_dir / f"{pdb_id}.json"
+    if not enriched_path.exists():
+        return []
+    try:
+        enriched_data = json.loads(enriched_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    return ligand_copy_id_enum(ligand_copy_identifiers(enriched_data))
+
+
 def recover_batch() -> None:
     """Re-process raw JSONL batch output into individual per-run JSON files."""
     config = get_config()
@@ -1004,6 +1048,9 @@ def recover_batch() -> None:
     if not runs_dir.exists():
         logger.info("No pipeline runs directory found.")
         return
+
+    # Per-PDB expected copy roster, computed once per PDB across all raw files.
+    expected_ids_cache: dict[str, list[str]] = {}
 
     registry = _load_job_registry(config)
     # Map a downloaded raw-output filename to its authoritative job entry, so
@@ -1103,6 +1150,34 @@ def recover_batch() -> None:
                                 )
                                 break
                             final_data = post_process_annotation(args)
+
+                            # Deterministic coverage guard. Batch has no per-run
+                            # retry, so on a mismatch drop this run's per-copy
+                            # roster (imperfect per-copy data never reaches
+                            # voting); the rest of the annotation is kept intact.
+                            # Checked unconditionally -- NOT gated on the field
+                            # being present -- so a fully-omitted array against a
+                            # non-empty expected roster is warned just like the
+                            # single-run path (an empty roster is a no-op). The pop
+                            # is a harmless no-op when the field was already absent.
+                            if pdb_id not in expected_ids_cache:
+                                expected_ids_cache[pdb_id] = _expected_copy_ids_for_pdb(
+                                    config, pdb_id
+                                )
+                            coverage = check_ligand_copy_coverage(
+                                final_data.get("ligand_copies"), expected_ids_cache[pdb_id]
+                            )
+                            if not coverage.ok:
+                                logger.warning(
+                                    "[%s] Run %d: ligand copy coverage mismatch (%s); "
+                                    "dropping ligand_copies from this run (line %d).",
+                                    pdb_id,
+                                    run_num,
+                                    coverage.describe(),
+                                    line_no,
+                                )
+                                final_data.pop("ligand_copies", None)
+
                             final_data["_provenance"] = {
                                 "model_requested": batch_meta.get("model_requested"),
                                 "model_served": response_obj.get("modelVersion"),

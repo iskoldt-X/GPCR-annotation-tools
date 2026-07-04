@@ -17,6 +17,7 @@ from gpcr_tools.annotator.detect_orchestrator import (
     assemble_ligand_copy_block,
     build_tool_config,
     build_tool_for_signals,
+    check_ligand_copy_coverage,
     ligand_copy_id_enum,
     ligand_copy_identifiers,
 )
@@ -708,3 +709,50 @@ class TestPromptRosterSchemaEnumInSync:
 
         assert prompt_copy_ids  # non-empty, so this is a real comparison
         assert prompt_copy_ids == schema_copy_id_enum
+
+
+class TestCheckLigandCopyCoverage:
+    """Exact-coverage validation of a returned ligand_copies roster."""
+
+    @staticmethod
+    def _rows(*copy_ids: str) -> list[dict]:
+        return [
+            {"copy_id": cid, "site_ref": "unknown", "role": {"value": "agonist"}}
+            for cid in copy_ids
+        ]
+
+    def test_exact_coverage_is_ok(self) -> None:
+        cov = check_ligand_copy_coverage(self._rows("R:601", "R:602"), ["R:601", "R:602"])
+        assert cov.ok
+        assert cov.missing == () and cov.duplicated == () and cov.unexpected == ()
+
+    def test_missing_copy_is_detected(self) -> None:
+        cov = check_ligand_copy_coverage(self._rows("R:601"), ["R:601", "R:602"])
+        assert not cov.ok
+        assert cov.missing == ("R:602",)
+        assert "missing" in cov.describe()
+
+    def test_duplicate_copy_is_detected(self) -> None:
+        cov = check_ligand_copy_coverage(self._rows("R:601", "R:601"), ["R:601", "R:602"])
+        assert not cov.ok
+        assert cov.duplicated == ("R:601",)
+        # R:602 was never returned, so it is also flagged missing.
+        assert cov.missing == ("R:602",)
+
+    def test_out_of_set_copy_is_detected(self) -> None:
+        cov = check_ligand_copy_coverage(self._rows("R:601", "R:602", "R:999"), ["R:601", "R:602"])
+        assert not cov.ok
+        assert cov.unexpected == ("R:999",)
+
+    def test_empty_roster_is_a_noop(self) -> None:
+        # No candidate copies: nothing to validate, always ok -- even if the
+        # response somehow carried rows.
+        assert check_ligand_copy_coverage(None, []).ok
+        assert check_ligand_copy_coverage(self._rows("R:601"), []).ok
+
+    def test_non_list_response_surfaces_as_missing(self) -> None:
+        # A malformed (non-list) ligand_copies contributes no coverage rather
+        # than raising, so every expected copy is reported missing.
+        cov = check_ligand_copy_coverage("not-a-list", ["R:601"])
+        assert not cov.ok
+        assert cov.missing == ("R:601",)
