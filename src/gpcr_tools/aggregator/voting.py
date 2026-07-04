@@ -117,7 +117,15 @@ def get_majority_votes(
         return None, {}
 
     # --- List-of-dict branch (e.g. ligands, auxiliary_proteins) ---
-    if isinstance(first_item, list) and first_item and isinstance(first_item[0], dict):
+    # Select this branch from the FIRST NON-EMPTY LIST among the runs, not
+    # ``values[0]``: a run may omit a list field (``None``) or emit an empty
+    # list, and such a run can sort first (e.g. run_1 whose ligand_copies was
+    # dropped upstream). Keying off ``values[0]`` alone would misroute the whole
+    # field to the scalar JSON tally, collapsing a genuine per-copy split into one
+    # atomic value and hiding the disagreement. The inner loop already tolerates
+    # the None/empty runs via ``continue``.
+    first_list = next((v for v in values if isinstance(v, list) and v), None)
+    if first_list is not None and isinstance(first_list[0], dict):
         key_field = _resolve_key_field(path)
 
         if key_field:
@@ -454,5 +462,32 @@ def flag_low_confidence_consensus(
         if isinstance(aux, dict) and _is_low(aux.get("type")):
             key = _list_item_identity(aux, "name", idx)
             flags.append(_record(f"auxiliary_proteins[{key}].type.value", aux["type"]))
+
+    # Per-copy site/role assignments carry a flat top-level ``confidence`` (the
+    # ligand_copies sidecar row), not the nested ``{value, confidence}`` shape of
+    # the ligands list, so they are checked directly here. A unanimous but
+    # low-confidence per-copy call is still a guess -- surface it on the same
+    # ``ligand_copies[<copy_id>].<field>`` paths the near-tie flag uses, reusing
+    # the existing review path rather than a new mechanism. The one flat
+    # ``confidence`` governs the WHOLE row, so both the site_ref and the role it
+    # produced are low-confidence guesses and each is flagged. The paths match the
+    # discrepancy walker's so the runner's dedupe-by-path keeps a copy already
+    # flagged as a near-tie from being reported twice.
+    for idx, copy_row in enumerate(best_run_data.get("ligand_copies") or []):
+        if isinstance(copy_row, dict) and copy_row.get("confidence") in low_levels:
+            key = _list_item_identity(copy_row, "copy_id", idx)
+            confidence = copy_row.get("confidence")
+            for field in ("site_ref", "role"):
+                value = copy_row.get(field)
+                flags.append(
+                    {
+                        "path": f"ligand_copies[{key}].{field}",
+                        "best_run_value": value,
+                        "majority_vote_value": value,
+                        "all_votes": {},
+                        "needs_review": True,
+                        "low_confidence": confidence,
+                    }
+                )
 
     return flags

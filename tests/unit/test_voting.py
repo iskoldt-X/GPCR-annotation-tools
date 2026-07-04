@@ -189,6 +189,148 @@ class TestListOfDictVoting:
         assert any(isinstance(m, dict) and m.get("role") == "unknown" for m in majority)
 
 
+class TestLigandCopyVoting:
+    """Per-copy site/role voting: the ligand_copies sidecar is grouped across
+    runs by copy_id (its physical-copy identity) and voted with the SAME majority
+    + near-tie + human-review machinery as every other list, never a parallel
+    abstain mechanism.
+    """
+
+    @staticmethod
+    def _copy(copy_id: str, site: str, role: str, confidence: str = "High") -> dict[str, Any]:
+        return {
+            "copy_id": copy_id,
+            "site_ref": site,
+            "role": role,
+            "confidence": confidence,
+        }
+
+    def test_stable_copy_gets_cross_run_majority(self) -> None:
+        # A copy whose site/role is consistent across runs aggregates to that
+        # site/role by plurality.
+        runs = [
+            [
+                self._copy("R:601", "intracellular", "modulator"),
+                self._copy("R:602", "orthosteric", "agonist"),
+            ]
+        ] * 5
+        majority, _ = get_majority_votes(runs, path="ligand_copies")
+        by_id = {m["copy_id"]: m for m in majority}
+        assert by_id["R:601"]["site_ref"] == "intracellular"
+        assert by_id["R:601"]["role"] == "modulator"
+        assert by_id["R:602"]["site_ref"] == "orthosteric"
+        assert by_id["R:602"]["role"] == "agonist"
+
+    def test_split_copy_site_uses_majority_and_flags_near_tie(self) -> None:
+        # A copy whose site churns across runs (3 orthosteric : 2 allosteric_7tm,
+        # margin 1) must be handled by the SAME near-tie path -- plurality winner
+        # kept, and the copy surfaced as needs_review with a vote_margin -- not
+        # silently written as a confident wrong site, and not via a new mechanism.
+        churn = ["orthosteric", "orthosteric", "orthosteric", "allosteric_7tm", "allosteric_7tm"]
+        run_dicts = [
+            {
+                "ligand_copies": [
+                    self._copy("R:601", "intracellular", "modulator"),
+                    self._copy("R:702", site, "agonist"),
+                ]
+            }
+            for site in churn
+        ]
+        majority, all_votes = get_majority_votes(run_dicts)
+        _idx, best = select_best_run(run_dicts, majority)
+        discs = find_discrepancies(best, majority, all_votes)
+
+        # Plurality winner is kept (not dropped / abstained via a sentinel).
+        by_id = {m["copy_id"]: m for m in majority["ligand_copies"]}
+        assert by_id["R:702"]["site_ref"] == "orthosteric"
+
+        # The churning copy is flagged for review through the standard near-tie
+        # record shape (needs_review + vote_margin), the same one every scalar
+        # near-tie uses -- no novel keys, no parallel abstain field.
+        flagged = [d for d in discs if d["path"] == "ligand_copies[R:702].site_ref"]
+        assert flagged, "churning copy site must surface as a discrepancy"
+        assert flagged[0].get("needs_review") is True
+        assert flagged[0].get("vote_margin") == 1
+
+        # The stable copy is NOT flagged.
+        assert not any(d["path"] == "ligand_copies[R:601].site_ref" for d in discs)
+
+    def test_each_copy_aggregated_independently_no_bleed(self) -> None:
+        # One copy churning must not affect a sibling copy, and the aggregate must
+        # never emit more rows than there are physical copies.
+        churn = ["orthosteric", "orthosteric", "intracellular"]
+        runs = [
+            [
+                self._copy("R:601", site, "modulator"),
+                self._copy("R:602", "membrane_facing", "structural"),
+            ]
+            for site in churn
+        ]
+        majority, _ = get_majority_votes(runs, path="ligand_copies")
+        # Exactly two rows for two distinct copies -- no "more rows than copies".
+        assert len(majority) == 2
+        by_id = {m["copy_id"]: m for m in majority}
+        assert set(by_id) == {"R:601", "R:602"}
+        # The stable sibling is untouched by the other copy's churn.
+        assert by_id["R:602"]["site_ref"] == "membrane_facing"
+        # The churning copy still resolves to its plurality winner.
+        assert by_id["R:601"]["site_ref"] == "orthosteric"
+
+    def test_ligands_aggregation_unchanged_by_copy_registration(self) -> None:
+        # Regression guard: registering ligand_copies must not change the ligands
+        # list behaviour. A compound modelled at two distinct sites still splits
+        # into two comp:site entries.
+        runs = [
+            [
+                {"chem_comp_id": "A1AEI", "site_ref": "orthosteric", "role": "agonist"},
+                {"chem_comp_id": "A1AEI", "site_ref": "intracellular", "role": "modulator"},
+            ]
+        ] * 3
+        majority, _ = get_majority_votes(runs, path="ligands")
+        assert len(majority) == 2
+        sites = {m["site_ref"] for m in majority}
+        assert sites == {"orthosteric", "intracellular"}
+
+    @pytest.mark.parametrize("first_run_copies", [None, []])
+    def test_split_survives_when_first_run_omits_copies(self, first_run_copies) -> None:
+        # A run may carry NO ligand_copies -- omitted by the model, or dropped by
+        # the coverage guard -- and after the filename sort that run is index 0. The
+        # whole field must still route to per-copy grouping. Selecting the branch
+        # off values[0] alone (None or an empty list) misfired to a JSON-string
+        # scalar tally, which collapsed a genuine per-copy split into one confident
+        # answer with NO review flag. Here run_1 omits the field (None, and
+        # separately []), while the rest carry a real 2:2 split on copy R:702; the
+        # split MUST still surface via the ordinary near-tie path.
+        split = ["orthosteric", "orthosteric", "allosteric_7tm", "allosteric_7tm"]
+        run_dicts: list[dict[str, Any]] = [{"receptor_info": {"chain_id": "R"}}]
+        if first_run_copies is not None:
+            run_dicts[0]["ligand_copies"] = first_run_copies
+        for site in split:
+            run_dicts.append(
+                {
+                    "receptor_info": {"chain_id": "R"},
+                    "ligand_copies": [
+                        self._copy("R:601", "intracellular", "modulator"),
+                        self._copy("R:702", site, "agonist"),
+                    ],
+                }
+            )
+        majority, all_votes = get_majority_votes(run_dicts)
+
+        # The field is per-copy grouped (both sides are lists), NOT collapsed to a
+        # whole-array scalar tally.
+        assert isinstance(majority["ligand_copies"], list)
+        assert isinstance(all_votes["ligand_copies"], list)
+
+        _idx, best = select_best_run(run_dicts, majority)
+        discs = find_discrepancies(best, majority, all_votes)
+        flagged = [d for d in discs if d["path"] == "ligand_copies[R:702].site_ref"]
+        assert flagged, "a 2:2 per-copy split must be flagged, not silently collapsed"
+        assert flagged[0].get("needs_review") is True
+        # The stable sibling copy is not spuriously flagged.
+        assert not any(d["path"] == "ligand_copies[R:601].site_ref" for d in discs)
+
+
 class TestEmptyAndPlaceholderKeys:
     """Placeholder/empty grouping keys must neither collapse distinct entities
     nor silently drop keyless items.
@@ -776,6 +918,59 @@ class TestLowConfidenceConsensus:
         flags = flag_low_confidence_consensus(best, frozenset({"Low"}))
         # Identity is the normalized name plus the chain-set suffix.
         assert any(f["path"] == "auxiliary_proteins[nb35|ch:b].type.value" for f in flags)
+
+    def test_low_confidence_ligand_copy_flagged(self) -> None:
+        from gpcr_tools.aggregator.voting import flag_low_confidence_consensus
+
+        best = {
+            "ligand_copies": [
+                {
+                    "copy_id": "R:602",
+                    "site_ref": "orthosteric",
+                    "role": "agonist",
+                    "confidence": "Low",
+                }
+            ]
+        }
+        flags = flag_low_confidence_consensus(best, frozenset({"Low"}))
+        assert any(
+            f["path"] == "ligand_copies[R:602].site_ref" and f.get("needs_review") for f in flags
+        )
+
+    def test_high_confidence_ligand_copy_not_flagged(self) -> None:
+        from gpcr_tools.aggregator.voting import flag_low_confidence_consensus
+
+        best = {
+            "ligand_copies": [
+                {
+                    "copy_id": "R:602",
+                    "site_ref": "orthosteric",
+                    "role": "agonist",
+                    "confidence": "High",
+                }
+            ]
+        }
+        assert flag_low_confidence_consensus(best, frozenset({"Low"})) == []
+
+    def test_low_confidence_ligand_copy_flags_site_and_role(self) -> None:
+        # One flat confidence governs the WHOLE per-copy row, so a low-confidence
+        # copy must surface BOTH the site_ref and the role assignment it produced,
+        # not just the site.
+        from gpcr_tools.aggregator.voting import flag_low_confidence_consensus
+
+        best = {
+            "ligand_copies": [
+                {
+                    "copy_id": "R:602",
+                    "site_ref": "orthosteric",
+                    "role": "agonist",
+                    "confidence": "Low",
+                }
+            ]
+        }
+        paths = {f["path"] for f in flag_low_confidence_consensus(best, frozenset({"Low"}))}
+        assert "ligand_copies[R:602].site_ref" in paths
+        assert "ligand_copies[R:602].role" in paths
 
 
 class TestNameCaseFolding:

@@ -88,6 +88,25 @@ class TestListItemIdentity:
         b = list_item_identity({"chem_comp_id": "None", "name": "Compound 29"}, "chem_comp_id", 1)
         assert a != b
 
+    def test_ligand_copy_keyed_by_copy_id_alone(self) -> None:
+        # A per-copy row (key_field == "copy_id") keys on the copy identifier
+        # ALONE. Its site_ref must NOT be appended -- otherwise one physical copy
+        # whose site churns across runs would split into more than one group.
+        assert (
+            list_item_identity({"copy_id": "R:602", "site_ref": "orthosteric"}, "copy_id", 0)
+            == "R:602"
+        )
+        assert (
+            list_item_identity({"copy_id": "R:602", "site_ref": "intracellular"}, "copy_id", 1)
+            == "R:602"
+        )
+
+    def test_distinct_ligand_copies_stay_distinct(self) -> None:
+        # Two different physical copies (distinct copy_id) never merge.
+        a = list_item_identity({"copy_id": "R:601", "site_ref": "orthosteric"}, "copy_id", 0)
+        b = list_item_identity({"copy_id": "R:602", "site_ref": "orthosteric"}, "copy_id", 1)
+        assert a != b
+
 
 class TestSafeNameNormalize:
     """The SAFE (rule-based, no fuzzy) name normalizer for grouping keys."""

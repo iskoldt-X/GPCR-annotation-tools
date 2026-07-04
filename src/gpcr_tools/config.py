@@ -427,6 +427,12 @@ LIST_ITEM_KEY_FIELDS: MappingProxyType[str, str] = MappingProxyType(
         # built from the normalized name PLUS a chain-set suffix — see
         # ``list_item_identity``.
         "auxiliary_proteins": "name",
+        # Per-copy ligand site/role assignments: one row per physical ligand copy,
+        # grouped across runs by its author-identifier ("<auth_asym_id>:<auth_seq_id>",
+        # e.g. "R:602"). The copy_id IS the physical-copy identity, so votes on each
+        # copy's site_ref / role aggregate per copy (see ``list_item_identity`` for
+        # why the copy_id is used alone, never suffixed with its site_ref).
+        "ligand_copies": "copy_id",
     }
 )
 
@@ -603,16 +609,27 @@ def list_item_identity(item: dict[str, Any], key_field: str, idx: int) -> str:
         return f"{normalized}|ch:{chains}" if chains else normalized
 
     if not is_empty_key(group_key):
-        # A ligand modelled at two distinct sites is emitted as two entries with
-        # the same component id but different site_ref; without the site in the
-        # identity the two would collapse into one during voting. Only ligands
-        # carry site_ref, so other list types are unaffected. (A single-site
-        # ligand keys as "comp:site"; if some runs in a batch instead emit
-        # 'unknown', those key as "comp" and surface as a real cross-run
+        # A compound-level ligand modelled at two distinct sites is emitted as two
+        # entries with the same component id but different site_ref; without the
+        # site in the identity the two would collapse into one during voting. That
+        # split is confined to the ligands list (key_field == "chem_comp_id"). (A
+        # single-site ligand keys as "comp:site"; if some runs in a batch instead
+        # emit 'unknown', those key as "comp" and surface as a real cross-run
         # disagreement -- which is correct to flag, not hide.)
-        site_ref = item.get("site_ref")
-        if site_ref and not is_empty_key(site_ref) and str(site_ref).lower() != SITE_REF_UNKNOWN:
-            return f"{group_key}:{site_ref}"
+        #
+        # The per-copy ligand_copies rows (key_field == "copy_id") also carry a
+        # site_ref, but they must key on the copy_id ALONE: the copy_id is the
+        # physical-copy identity, so a copy whose site_ref churns across runs stays
+        # ONE group that votes (and surfaces a near-tie), never split by site into
+        # more groups than there are physical copies.
+        if key_field == "chem_comp_id":
+            site_ref = item.get("site_ref")
+            if (
+                site_ref
+                and not is_empty_key(site_ref)
+                and str(site_ref).lower() != SITE_REF_UNKNOWN
+            ):
+                return f"{group_key}:{site_ref}"
         return str(group_key)
     # Keyless ligand (no component id): SAFE-normalize the fallback name so
     # spelling/formatting variants of one keyless entity share a group.
