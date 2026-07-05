@@ -170,6 +170,22 @@ GEMINI_UPLOAD_BASE_BACKOFF: float = 2.0
 # runs across jobs (so 200 ~= 20 PDBs at the default 10 runs each). Tunable.
 GEMINI_BATCH_MAX_REQUESTS: int = 200
 
+# Sequential submission (``annotate --batch --sequential``): submit ONE shard of
+# at most this many PDBs per invocation, refusing to submit while a prior job is
+# still in flight. Repeated (external cron / manual) invocations then advance the
+# corpus one shard at a time instead of firing every shard's job into flight at
+# once — which would overrun the provider's enqueued-token ceiling on a full
+# corpus. Only the sequential path reads this; the back-to-back default path is
+# unchanged.
+GEMINI_BATCH_SHARD_PDBS: int = 1000
+
+# Per-job request cap for sequential submission. A single shard of
+# GEMINI_BATCH_SHARD_PDBS PDBs x GEMINI_DEFAULT_RUNS runs (~10,000 requests) packs
+# into ONE job, comfortably under the provider's 50,000-requests-per-job ceiling.
+# Distinct from GEMINI_BATCH_MAX_REQUESTS (the small per-job cap for the
+# back-to-back default path), which is intentionally left untouched.
+GEMINI_BATCH_SEQUENTIAL_MAX_REQUESTS: int = 15000
+
 # Batch jobs are tracked in a registry (state/batch_jobs.json) keyed by job
 # name, so a sharded submission's multiple jobs are all tracked and recovered
 # (the legacy single-file pointer could hold only one). Bumped if the shape
