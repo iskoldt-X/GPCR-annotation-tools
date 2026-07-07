@@ -1429,6 +1429,9 @@ ALERT_PREFIX_ALPHA5_GRAFT: str = "[ALPHA5 GRAFT]"
 ALERT_PREFIX_UNRECOGNISED_G_ALPHA: str = "[UNRECOGNISED G-ALPHA]"
 ALERT_PREFIX_G_PROTEIN_LIGAND: str = "[G PROTEIN PEPTIDE AS LIGAND]"
 ALERT_PREFIX_MULTIPLE_AGONISTS: str = "[MULTIPLE AGONISTS]"
+# An active-state call sits alongside an inactive-stabilising ligand (inverse
+# agonist) with no G protein transducer modelled -- advisory to confirm the state.
+ALERT_PREFIX_STATE_CONFIRMATION: str = "[STATE CONFIRMATION]"
 # A G protein subunit fragment the model misfiled under auxiliary_proteins /
 # ligands, moved into the G protein record by its subunit slug.
 ALERT_PREFIX_G_PROTEIN_RELOCATED: str = "[G PROTEIN SUBUNIT RELOCATED]"

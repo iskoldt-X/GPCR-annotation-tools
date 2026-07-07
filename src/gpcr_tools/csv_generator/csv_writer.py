@@ -331,12 +331,19 @@ def transform_for_csv(pdb_id: str, data: dict) -> dict[str, list[dict[str, str]]
                 "ChainID": lig_chain,
                 "label_asym_id": lig_label,
                 "Name": lig_name,
-                # The schema tells the model to emit the string "None" when there
-                # is no PubChem id; normalize that sentinel to empty rather than
-                # writing a literal "None" into the numeric column.
-                "PubChemID": ""
-                if is_empty_key(lig.get("pubchem_id"))
-                else sanitize_value(lig.get("pubchem_id")),
+                # Prefer the authoritative, structure-derived CID (matched from
+                # the PDBe nonpolymer entity) over the model's self-reported id;
+                # fall back to the model's id only when the authoritative one is
+                # absent. The schema tells the model to emit the string "None"
+                # when there is no PubChem id; normalize that sentinel to empty
+                # rather than writing a literal "None" into the numeric column.
+                "PubChemID": sanitize_value(lig.get("api_pubchem_cid"))
+                if not is_empty_key(lig.get("api_pubchem_cid"))
+                else (
+                    ""
+                    if is_empty_key(lig.get("pubchem_id"))
+                    else sanitize_value(lig.get("pubchem_id"))
+                ),
                 "Role": sanitize_value((lig.get("role") or {}).get("value")),
                 # A dual-role ligand the model split per site carries a site_ref
                 # (e.g. orthosteric / allosteric); blank for an ordinary ligand.

@@ -91,11 +91,15 @@ def oligomer_gating_warnings(oligo: dict | None) -> list[str]:
 def has_gating_controversy(controversies: dict | None) -> bool:
     """Whether any vote-aggregation controversy should gate review.
 
-    Minority-omission advisories (records tagged ``gating=False``: an entity some
-    runs reported but the chosen run omitted) are surfaced to the curator but do
-    not gate. Every other controversy -- a near-tie / genuine disagreement, and
-    any record without an explicit ``gating`` flag (default ``True``) -- gates.
-    Tolerant of ``None`` / an empty map (contributes nothing).
+    Advisory-only controversies (records tagged ``gating=False``) are surfaced
+    to the curator but do not gate. These include a minority omission (an entity
+    some runs reported but the chosen run omitted) and any near-tie / genuine
+    disagreement on a field that cannot encode a real error once identity is
+    settled -- a lexical ``name`` wording variant, or a ``pubchem_id`` split
+    with a blank shipped value or an authoritative ``api_pubchem_cid`` backstop.
+    Every other controversy, and any record without an explicit ``gating`` flag
+    (default ``True``), gates. Tolerant of ``None`` / an empty map (contributes
+    nothing).
     """
     if not controversies:
         return False

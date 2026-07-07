@@ -16,6 +16,7 @@ from gpcr_tools.config import (
     LIST_ITEM_KEY_FIELDS,
     SOFT_FIELD_KEYS,
     VOTE_NEAR_TIE_MARGIN,
+    is_empty_key,
 )
 from gpcr_tools.config import (
     list_item_identity as _list_item_identity,
@@ -314,7 +315,24 @@ def find_discrepancies(
             all_votes_val = (
                 (all_votes_data.get(key) or {}) if isinstance(all_votes_data, dict) else {}
             )
-            discrepancies.extend(find_discrepancies(run_val, maj_val, all_votes_val, new_path))
+            child = find_discrepancies(run_val, maj_val, all_votes_val, new_path)
+            # A pubchem_id vote controversy cannot encode a real error when the
+            # shipped value is blank (nothing was asserted) or an authoritative
+            # api_pubchem_cid was resolved for this ligand (the CID is settled
+            # outside the vote). Mark only those advisory-only (gating=False) so
+            # they stay visible without blocking accept-all; every other
+            # pubchem_id split keeps gating. api_pubchem_cid is a sibling leaf of
+            # this ligand dict, so it is only in scope at this level.
+            if (
+                key == "pubchem_id"
+                and child
+                and (
+                    is_empty_key(run_val) or not is_empty_key(best_run_data.get("api_pubchem_cid"))
+                )
+            ):
+                for record in child:
+                    record["gating"] = False
+            discrepancies.extend(child)
         return discrepancies
 
     if isinstance(majority_data, list):
@@ -390,27 +408,39 @@ def find_discrepancies(
                 and best_run_data.casefold() == majority_data.casefold()
             ):
                 return discrepancies
-            discrepancies.append(
-                {
+            record = {
+                "path": path,
+                "best_run_value": best_run_data,
+                "majority_vote_value": majority_data,
+                "all_votes": all_votes_data,
+            }
+            # A vote controversy on a terminal ``name`` (a ligand name or an
+            # auxiliary-protein name) is always lexical: the entity identity is
+            # fixed by the group key (het chem_comp_id / aux name key) before the
+            # name leaf is voted, so a differing wording cannot encode a wrong
+            # entity. Mark it advisory-only (gating=False), mirroring the
+            # minority-omission carve-out above, so it stays visible for review
+            # without blocking one-click accept-all.
+            if current_key == "name":
+                record["gating"] = False
+            discrepancies.append(record)
+        else:
+            margin = _vote_margin(all_votes_data)
+            if margin is not None and margin <= VOTE_NEAR_TIE_MARGIN:
+                record = {
                     "path": path,
                     "best_run_value": best_run_data,
                     "majority_vote_value": majority_data,
                     "all_votes": all_votes_data,
+                    "needs_review": True,
+                    "vote_margin": margin,
                 }
-            )
-        else:
-            margin = _vote_margin(all_votes_data)
-            if margin is not None and margin <= VOTE_NEAR_TIE_MARGIN:
-                discrepancies.append(
-                    {
-                        "path": path,
-                        "best_run_value": best_run_data,
-                        "majority_vote_value": majority_data,
-                        "all_votes": all_votes_data,
-                        "needs_review": True,
-                        "vote_margin": margin,
-                    }
-                )
+                # Same lexical-name carve-out as the differing-value branch: a
+                # near-tie between name wordings cannot change the entity, so
+                # surface it for review without gating accept-all.
+                if current_key == "name":
+                    record["gating"] = False
+                discrepancies.append(record)
         return discrepancies
 
     return []

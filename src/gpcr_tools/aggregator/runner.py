@@ -81,6 +81,7 @@ from gpcr_tools.validator.cache import (
     ValidationCache,
 )
 from gpcr_tools.validator.chimera import get_chimera_analysis
+from gpcr_tools.validator.consistency import state_ligand_consistency_warnings
 from gpcr_tools.validator.integrity_checker import validate_all
 from gpcr_tools.validator.ligand_validator import validate_and_enrich_ligands
 from gpcr_tools.validator.oligomer import (
@@ -297,6 +298,11 @@ def _build_validation_report(
     # Non-GPCR polymer chains present in the structure but never annotated by the
     # model (the oligomer missed-protomer check covers GPCR chains only).
     report["critical_warnings"].extend(reconcile_missed_polymers(enriched_entry, best_run_data))
+
+    # Coupling-aware state/ligand advisory: an active-state call carrying an
+    # inactive-stabilising ligand with no transducer modelled asks a curator to
+    # confirm the state.
+    report["critical_warnings"].extend(state_ligand_consistency_warnings(best_run_data))
 
     # Detect-stage REVIEW signals -> curator critical warnings. This is the
     # production consumer of the detect review route (advisory signals already

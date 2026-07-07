@@ -136,8 +136,9 @@ def main(target_pdb: str | None = None, auto_accept: bool = False) -> None:
             choices = ["r", "s", "f"]
             prompt_txt = "Select mode ([bold]r[/]eview, [bold]s[/]kip, [bold]f[/]ix issues only"
 
-            # Minority-omission advisories stay in `controversies` (so review mode
-            # still shows them) but must not block accept-all -- only gating
+            # Advisory-only records (minority omissions, and lexical name /
+            # backstopped pubchem_id variants) stay in `controversies` (so review
+            # mode still shows them) but must not block accept-all -- only gating
             # controversies (near-ties / real disagreements) do.
             if not has_crit_issues and not has_gating_controversy(controversies):
                 choices.insert(0, "a")

@@ -1099,6 +1099,84 @@ class TestNameCaseFolding:
         assert votes["name"].get("Cholesterol") == 5
 
 
+class TestNameGating:
+    # A vote controversy on a terminal ``name`` leaf (ligand name /
+    # auxiliary-protein name) is always lexical once the entity identity is
+    # fixed by the group key, so it is surfaced for review but tagged
+    # ``gating=False`` (advisory only, does not block one-click accept-all).
+
+    def test_name_disagreement_is_advisory(self) -> None:
+        # Best-run name differs from the majority by more than case: the record
+        # is still surfaced but must carry gating=False.
+        best = {"name": "11-cis-retinal"}
+        majority = {"name": "Retinal"}
+        votes = {"name": {"Retinal": 6, "11-cis-retinal": 4}}
+        discs = find_discrepancies(best, majority, votes)
+        flagged = [d for d in discs if d["path"] == "name"]
+        assert len(flagged) == 1
+        assert flagged[0]["gating"] is False
+
+    def test_name_near_tie_is_advisory(self) -> None:
+        # A near-tie between distinct name wordings (best matches majority) is
+        # surfaced for review but must not gate accept-all.
+        best = {"name": "Retinal"}
+        majority = {"name": "Retinal"}
+        votes = {"name": {"Retinal": 5, "Vitamin A": 5}}
+        discs = find_discrepancies(best, majority, votes)
+        flagged = [d for d in discs if d["path"] == "name"]
+        assert len(flagged) == 1
+        assert flagged[0]["needs_review"] is True
+        assert flagged[0]["gating"] is False
+
+    def test_non_name_disagreement_still_gates(self) -> None:
+        # Control: an unrelated scalar leaf (role) disagreement carries no
+        # gating key, so it keeps the default gating=True behaviour.
+        best = {"role": "antagonist"}
+        majority = {"role": "agonist"}
+        votes = {"role": {"agonist": 6, "antagonist": 4}}
+        discs = find_discrepancies(best, majority, votes)
+        flagged = [d for d in discs if d["path"] == "role"]
+        assert len(flagged) == 1
+        assert "gating" not in flagged[0]
+
+
+class TestPubchemGating:
+    # A ``pubchem_id`` vote controversy cannot encode a real error when the
+    # shipped value is blank (nothing asserted) or an authoritative
+    # ``api_pubchem_cid`` was resolved for the ligand; only those are tagged
+    # advisory-only. Every other pubchem_id split keeps gating.
+
+    def test_empty_shipped_value_is_advisory(self) -> None:
+        best = {"pubchem_id": "", "api_pubchem_cid": None}
+        majority = {"pubchem_id": "123"}
+        votes = {"pubchem_id": {"123": 6, "": 4}}
+        discs = find_discrepancies(best, majority, votes)
+        flagged = [d for d in discs if d["path"] == "pubchem_id"]
+        assert len(flagged) == 1
+        assert flagged[0]["gating"] is False
+
+    def test_authoritative_cid_present_is_advisory(self) -> None:
+        best = {"pubchem_id": "999", "api_pubchem_cid": "123"}
+        majority = {"pubchem_id": "123"}
+        votes = {"pubchem_id": {"123": 6, "999": 4}}
+        discs = find_discrepancies(best, majority, votes)
+        flagged = [d for d in discs if d["path"] == "pubchem_id"]
+        assert len(flagged) == 1
+        assert flagged[0]["gating"] is False
+
+    def test_real_dispute_without_backstop_still_gates(self) -> None:
+        # Non-empty shipped value AND no authoritative api_pubchem_cid: this is
+        # a genuine dispute that must keep gating (no gating key => default
+        # True). Regression guard for the "do not blanket-suppress" rule.
+        best = {"pubchem_id": "999"}
+        majority = {"pubchem_id": "123"}
+        votes = {"pubchem_id": {"123": 6, "999": 4}}
+        discs = find_discrepancies(best, majority, votes)
+        flagged = [d for d in discs if d["path"] == "pubchem_id"]
+        assert len(flagged) == 1
+        assert "gating" not in flagged[0]
+
+
 class TestObjectListScoring:
     def test_object_list_scored_by_structured_match(self) -> None:
         # An object list (ligands) must contribute to the score via per-item

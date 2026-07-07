@@ -1063,6 +1063,36 @@ def test_pubchem_none_sentinel_blanked():
     assert rows[1]["PubChemID"] == "271"
 
 
+def test_pubchem_authoritative_cid_wins():
+    """The authoritative, structure-derived CID (api_pubchem_cid) must take
+    precedence over a differing model-reported pubchem_id; when it is absent or
+    empty the column falls back to the model's pubchem_id."""
+    data = {
+        "ligands": [
+            # Authoritative present and differing -> authoritative wins.
+            {
+                "name": "A",
+                "chem_comp_id": "ATP",
+                "chain_id": "A",
+                "pubchem_id": "999999",
+                "api_pubchem_cid": "5957",
+            },
+            # Authoritative explicitly None (the shape the validator produces
+            # when the PDBe entity has no CID) -> fall back to model's id.
+            {
+                "name": "B",
+                "chem_comp_id": "GDP",
+                "chain_id": "B",
+                "pubchem_id": "271",
+                "api_pubchem_cid": None,
+            },
+        ]
+    }
+    rows = transform_for_csv("X1", data)["ligands.csv"]
+    assert rows[0]["PubChemID"] == "5957"
+    assert rows[1]["PubChemID"] == "271"
+
+
 def test_append_to_csvs_upserts_by_pdb(configure_paths):
     """Re-curating a PDB replaces its rows instead of appending duplicates;
     other PDBs are preserved."""
