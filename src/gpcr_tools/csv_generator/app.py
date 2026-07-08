@@ -30,6 +30,7 @@ from gpcr_tools.csv_generator.ui import (
     create_display_copy,
     display_critical_warnings_summary,
     display_dashboard_header,
+    display_decision_brief,
     display_oligomer_analysis_panel,
     display_pdb_footer,
 )
@@ -102,6 +103,13 @@ def main(target_pdb: str | None = None, auto_accept: bool = False) -> None:
             if not main_data:
                 update_processed_log(pdb_id, "failed")
                 continue
+
+            # Read-only decision brief for gated structures: identity, the
+            # oligomer and G-protein calls, and the severity-ordered per-signal
+            # decision list, shown before the raw summary so the curator sees why
+            # this structure needs a human. Informational only; it does not write
+            # or edit (by-path editing is a later increment).
+            display_decision_brief(pdb_id, main_data, controversies, validation_data)
 
             console.print(
                 Panel(

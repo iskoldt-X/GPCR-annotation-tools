@@ -1571,6 +1571,46 @@ AUTO_RESOLVE_KEYS: frozenset[str] = frozenset(
     }
 )
 
+# Terminal keys that carry a structure's identity or biology -- the value a
+# curator must decide deliberately, never inherit from a pre-selected default
+# when the runs genuinely disagree. A contested SEMANTIC leaf is offered with NO
+# default, so a bare Enter cannot silently commit an identity call; a
+# display-string field (a ligand/protein `name`, a `pubchem_id`) is deliberately
+# absent and keeps its default. Each entry is the terminal key exactly as it
+# appears at the end of a controversy path (the last dotted segment,
+# list-index brackets stripped):
+#   value                decision-unit value (functional state, oligomeric
+#                        state, ligand role, auxiliary-protein type)
+#   role                 per-copy ligand pharmacological role
+#   site_ref             ligand / per-copy binding-site position
+#   type                 ligand molecular type (small-molecule / lipid /
+#                        peptide / protein / na / none) -- a flat leaf, so its
+#                        disagreements bypass the per-copy `role.value` guard
+#                        above and must be pinned here on their own
+#   uniprot_entry_name   receptor and G-protein-subunit identity
+#   state                functional-state block
+#   oligomeric_state     receptor oligomeric-state block
+#   is_functional_ligand incidental-candidate functional-vs-structural call
+#   is_chimeric          engineered chimeric G-protein flag
+#   family / subtype / functional_coupling
+#                        G-alpha coupling-family and subtype identity
+SEMANTIC_CONTROVERSY_KEYS: frozenset[str] = frozenset(
+    {
+        "value",
+        "role",
+        "site_ref",
+        "type",
+        "uniprot_entry_name",
+        "state",
+        "oligomeric_state",
+        "is_functional_ligand",
+        "is_chimeric",
+        "family",
+        "subtype",
+        "functional_coupling",
+    }
+)
+
 VALIDATION_FATAL_KEYWORDS: tuple[str, ...] = (
     "ghost chain",
     "ghost ligand",

@@ -1,0 +1,86 @@
+[
+    {
+        "path": "signaling_partners.g_protein.is_chimeric",
+        "best_run_value": false,
+        "majority_vote_value": true,
+        "all_votes": {
+            "false": 4,
+            "true": 6
+        }
+    },
+    {
+        "path": "ligand_copies[Q:1006].role",
+        "best_run_value": "Agonist",
+        "majority_vote_value": "Agonist",
+        "all_votes": {
+            "Agonist": 5,
+            "Co-agonist": 5
+        },
+        "needs_review": true,
+        "vote_margin": 0
+    },
+    {
+        "path": "ligand_copies[Q:1007].role",
+        "best_run_value": "Agonist",
+        "majority_vote_value": "Agonist",
+        "all_votes": {
+            "Agonist": 5,
+            "Co-agonist": 5
+        },
+        "needs_review": true,
+        "vote_margin": 0
+    },
+    {
+        "path": "ligand_copies[R:1006].role",
+        "best_run_value": "Agonist",
+        "majority_vote_value": "Agonist",
+        "all_votes": {
+            "Agonist": 5,
+            "Co-agonist": 5
+        },
+        "needs_review": true,
+        "vote_margin": 0
+    },
+    {
+        "path": "ligand_copies[R:1007].role",
+        "best_run_value": "Agonist",
+        "majority_vote_value": "Agonist",
+        "all_votes": {
+            "Agonist": 5,
+            "Co-agonist": 5
+        },
+        "needs_review": true,
+        "vote_margin": 0
+    },
+    {
+        "path": "ligands[CLR:membrane_facing].role.value",
+        "best_run_value": "Cofactor",
+        "majority_vote_value": "Cofactor",
+        "all_votes": {
+            "PAM": 2,
+            "Cofactor": 3
+        },
+        "needs_review": true,
+        "vote_margin": 1
+    },
+    {
+        "path": "ligands[U0G:orthosteric].name",
+        "best_run_value": "25CN-NBOH",
+        "majority_vote_value": "25CN-NBOH",
+        "all_votes": {
+            "25CN-NBOH": 5,
+            "25-CN-NBOH": 5
+        },
+        "needs_review": true,
+        "vote_margin": 0
+    },
+    {
+        "path": "ligands[K6G:intracellular].type",
+        "best_run_value": "lipid",
+        "majority_vote_value": "small-molecule",
+        "all_votes": {
+            "small-molecule": 5,
+            "lipid": 5
+        }
+    }
+]

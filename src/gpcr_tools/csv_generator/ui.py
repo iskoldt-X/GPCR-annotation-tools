@@ -39,6 +39,7 @@ from gpcr_tools.config import (
     VALIDATION_SKIPPED_APO,
     ensure_alert_prefix,
 )
+from gpcr_tools.validator.decisions import DecisionItem, enumerate_decisions
 
 # ── Console Setup ───────────────────────────────────────────────────────
 
@@ -94,6 +95,98 @@ def display_critical_warnings_summary(validation_data: dict) -> bool:
             title=f"[bold red]CRITICAL VALIDATION FINDINGS ({count})[/]",
             border_style="red",
             box=box.DOUBLE,
+        )
+    )
+    return True
+
+
+# ── Decision Brief ──────────────────────────────────────────────────────
+
+
+def _decision_row_style(item: DecisionItem) -> str:
+    """Rich style for one brief row: advisory forks read dim, gating signals warn."""
+    if not item.gating:
+        return "dim"
+    return "warning"
+
+
+def display_decision_brief(
+    pdb_id: str,
+    main_data: dict,
+    controversies: dict,
+    validation_data: dict,
+) -> bool:
+    """Read-only decision brief shown at the top of a gated structure.
+
+    Summarises WHY a structure needs a human before the raw review begins:
+    identity, the oligomer call, a one-line G-protein summary, and the
+    severity-ordered per-signal decision list from
+    :func:`gpcr_tools.validator.decisions.enumerate_decisions`. It is purely
+    informational -- it never writes, prompts, or edits (by-path editing is a
+    later increment). Renders nothing (returns ``False``) for a structure with no
+    gating signal. Returns ``True`` when a brief was rendered.
+    """
+    items = enumerate_decisions(main_data, validation_data, controversies)
+    if not any(item.gating for item in items):
+        return False
+
+    receptor = main_data.get("receptor_info") or {}
+    oligo = main_data.get("oligomer_analysis") or {}
+    g_protein = (main_data.get("signaling_partners") or {}).get("g_protein") or {}
+    alpha = g_protein.get("alpha_subunit") or {}
+
+    identity = Text()
+    identity.append("Receptor: ", style="bold")
+    identity.append(receptor.get("uniprot_entry_name") or "?", style="cyan")
+    identity.append(f"   chains {receptor.get('chain_id') or '?'}", style="white")
+    status = receptor.get("validation_status")
+    if status:
+        identity.append(f"   status {status}", style="dim")
+
+    classification = oligo.get("classification") or "UNKNOWN"
+    chain_count = oligo.get("receptor_count")
+    if chain_count is None:
+        chain_count = len(oligo.get("all_gpcr_chains") or [])
+    oligo_line = Text()
+    oligo_line.append("Oligomer: ", style="bold")
+    oligo_line.append(f"{classification} ({chain_count} GPCR chain(s))", style="white")
+
+    gprot_line = Text()
+    gprot_line.append("G-protein: ", style="bold")
+    if g_protein:
+        chimeric = g_protein.get("is_chimeric")
+        chimerism = (
+            "chimeric"
+            if chimeric is True
+            else ("non-chimeric" if chimeric is False else "chimerism unconfirmed")
+        )
+        gprot_line.append(
+            f"alpha {alpha.get('uniprot_entry_name') or '?'} ({chimerism})", style="white"
+        )
+    else:
+        gprot_line.append("none reported", style="dim")
+
+    gating_count = sum(1 for item in items if item.gating)
+    table = Table(box=box.SIMPLE, expand=True, show_header=True, padding=(0, 1))
+    table.add_column("Category", style="bold", width=20)
+    table.add_column("Where", style="cyan", width=32, overflow="fold")
+    table.add_column("Decision", ratio=1, overflow="fold")
+    for item in items:
+        style = _decision_row_style(item)
+        table.add_row(
+            Text(item.category, style=style),
+            Text(item.path or "(structure-level)", style=style),
+            Text(item.summary, style=style),
+        )
+
+    console.print(
+        Panel(
+            Group(identity, oligo_line, gprot_line, Text(), table),
+            title=f"[bold]DECISION BRIEF — {pdb_id} ({gating_count} to review)[/]",
+            subtitle="[dim]read-only overview[/]",
+            border_style="yellow",
+            box=box.DOUBLE,
+            padding=(1, 2),
         )
     )
     return True

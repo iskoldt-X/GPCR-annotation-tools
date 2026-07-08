@@ -6,6 +6,7 @@ resolution, auto-resolve for trivial keys, and top-level block orchestration.
 
 import copy
 import json
+from collections.abc import Iterable
 from typing import Any
 
 from rich import box
@@ -20,8 +21,10 @@ from gpcr_tools.config import (
     AUTO_RESOLVE_KEYS,
     BLACKLISTED_KEYS,
     LIST_ITEM_KEY_FIELDS,
+    SEMANTIC_CONTROVERSY_KEYS,
     TOPLEVEL_BLOCK_KEYS,
     VALIDATION_GHOST_LIGAND,
+    VOTE_NEAR_TIE_MARGIN,
     list_item_identity,
 )
 from gpcr_tools.csv_generator.audit import log_audit_trail
@@ -183,6 +186,52 @@ def get_verified_paths(main_data: dict) -> set:
                 for field in vf:
                     verified.add(f"{block_name}.{field}")
     return verified
+
+
+# ── Controversy Default Suppression ─────────────────────────────────────
+
+
+def _top_two_vote_margin(vote_counts: Iterable[int]) -> int | None:
+    """Votes separating the top two candidates: (top count) - (runner-up count).
+
+    Returns ``None`` when there are fewer than two candidates, so a single value
+    -- a consensus, whatever its count -- is never treated as a near-tie. (This
+    mirrors the vote aggregator's own near-tie guard: one candidate cannot tie
+    with a runner-up that does not exist.) A tie between the top two, e.g. a 5:5
+    split, yields 0. Non-integer counts are coerced.
+    """
+    counts = sorted((int(c) for c in vote_counts), reverse=True)
+    if len(counts) < 2:
+        return None
+    return counts[0] - counts[1]
+
+
+def fork_requires_explicit_choice(
+    terminal_key: str,
+    best_run_value: Any,
+    majority_vote_value: Any,
+    vote_counts: Iterable[int],
+) -> bool:
+    """Whether a contested leaf must be offered with NO pre-selected default.
+
+    A default lets a bare Enter commit a value -- fine for a wording variant, but
+    unsafe for a genuine disagreement on a value that carries the structure's
+    identity or biology. So a default is suppressed only for a SEMANTIC terminal
+    key (:data:`SEMANTIC_CONTROVERSY_KEYS`) whose disagreement is real: the best
+    run disagrees with the majority vote, OR the top-two vote margin is within
+    :data:`VOTE_NEAR_TIE_MARGIN` (a near-tie -- e.g. a 5:5 split, margin 0). A
+    display-string field (a ligand/protein ``name``, a ``pubchem_id``) always
+    keeps its default, as does a semantic field whose best run and majority agree
+    by a comfortable margin. A lone candidate is a consensus, not a near-tie, so
+    a unanimous value (including a unanimous low-confidence flag, which carries no
+    per-value votes) keeps its default.
+    """
+    if terminal_key not in SEMANTIC_CONTROVERSY_KEYS:
+        return False
+    if best_run_value != majority_vote_value:
+        return True
+    margin = _top_two_vote_margin(vote_counts)
+    return margin is not None and margin <= VOTE_NEAR_TIE_MARGIN
 
 
 # ── Review Functions ────────────────────────────────────────────────────
@@ -401,11 +450,31 @@ def review_leaf(
 
         default_choice = option_choices[target_default_idx] if option_choices else "e"
 
-        choice = Prompt.ask(
+        # A genuine disagreement on an identity/biology-bearing value must NOT
+        # pre-select a default: a bare Enter would otherwise silently commit it.
+        # Build the prompt kwargs conditionally so the default is OMITTED (never
+        # passed as None) in that case, and Rich re-asks cleanly on empty input.
+        terminal_key = path.split(".")[-1]
+        if "[" in terminal_key:
+            terminal_key = terminal_key.split("[")[0]
+        suppress_default = fork_requires_explicit_choice(
+            terminal_key,
+            best_run_value,
+            majority_value,
+            [candidate["count"] for candidate in candidates],
+        )
+        prompt_kwargs: dict[str, Any] = {"choices": prompt_choices}
+        if not suppress_default:
+            prompt_kwargs["default"] = default_choice
+
+        raw_choice = Prompt.ask(
             "\n[prompt]Select option, [bold]s[/]kip, [bold]e[/]dit, or [bold]q[/]uit:[/]",
-            choices=prompt_choices,
-            default=default_choice,
-        ).lower()
+            **prompt_kwargs,
+        )
+        # Defensive: Prompt.ask returns the chosen string, but never let a
+        # non-string slip through to .lower() and crash the review -- fall back
+        # to the explicit edit path rather than committing anything silently.
+        choice = raw_choice.lower() if isinstance(raw_choice, str) else "e"
 
         if choice == "q":
             return None
