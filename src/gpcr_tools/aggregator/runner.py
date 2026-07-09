@@ -476,8 +476,8 @@ def _rebuild_small_molecule_rows_from_per_copy(
         for ident in all_idents:
             base = row_by_ident.get(ident)
             majority = isfunc_by_ident.get(ident)
-            site = voted_ident_to_site.get(ident)
-            copies = voted_sites.get(site, []) if site is not None else []
+            voted_site = voted_ident_to_site.get(ident)
+            copies = voted_sites.get(voted_site, []) if voted_site is not None else []
             if base is not None:
                 # Anchor row: keep it, re-stamping only a definitive majority verdict
                 # (True revives an outlier drop; False drops it and follows its copies
@@ -497,7 +497,7 @@ def _rebuild_small_molecule_rows_from_per_copy(
                 # site's majority vote, never the borrowed sibling-site template.
                 row = copy.deepcopy(template_by_comp[comp_id])
                 row["chem_comp_id"] = comp_id
-                row["site_ref"] = site
+                row["site_ref"] = voted_site
                 _apply_per_site_from_majority(row, mv_ligand_by_ident.get(ident))
                 _stamp_is_functional(row, True)
                 row["chain_id"] = _chains(copies)
@@ -512,7 +512,7 @@ def _rebuild_small_molecule_rows_from_per_copy(
                 # so the curator panel never shows another site's prose on it.
                 row = copy.deepcopy(template_by_comp[comp_id])
                 row["chem_comp_id"] = comp_id
-                row["site_ref"] = site
+                row["site_ref"] = voted_site
                 _apply_per_site_from_majority(row, mv_ligand_by_ident.get(ident))
                 _stamp_is_functional(row, False)
                 row["chain_id"] = _chains(copies)
