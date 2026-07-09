@@ -674,6 +674,50 @@ VALIDATION_RECEPTOR_NO_API_DATA: str = "RECEPTOR_NO_API_DATA"
 # identity cannot be confirmed here, so this state gates one-click accept.
 VALIDATION_RECEPTOR_RCSB_UNMAPPED: str = "RECEPTOR_RCSB_UNMAPPED"
 
+
+def sanitize_value(value: Any) -> str:
+    """Convert a value to a clean string (``None`` -> ``""``, else ``str().strip()``)."""
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def ligand_row_dropped(lig: Any) -> bool:
+    """Whether a ligand row is filtered out of ``ligands.csv`` before it is written.
+
+    The single source of truth for the writer loop's skip decision, shared with the
+    per-site residue partition (so a physical copy is never attributed to a
+    binding-site row that never reaches output) AND with the aggregator's rebuild
+    (so "does this component still have a surviving row?" matches the CSV's own drop
+    decision, with no drift). A row is dropped when:
+
+    * it is not a dict (cannot be a valid row);
+    * it is a GHOST ligand the validator could not find in the structure, unless a
+      curator explicitly kept it (writing it would record an interaction for a
+      molecule absent from the deposition);
+    * it is an apo / "no ligand" placeholder (SKIPPED_APO, or a value-level Apo
+      marker) -- not a bound ligand, so it must not become an interaction row;
+    * it is a dual-use molecule the model explicitly judged non-functional
+      (``pharmacological_role_check.is_functional_ligand`` is False). A missing or
+      null verdict means "not assessed" and does NOT drop the row.
+    """
+    if not isinstance(lig, dict):
+        return True
+    if lig.get("validation_status") == VALIDATION_GHOST_LIGAND and not lig.get(
+        "curator_kept_ghost"
+    ):
+        return True
+    if (
+        lig.get("validation_status") == VALIDATION_SKIPPED_APO
+        or sanitize_value(lig.get("type")) == "none"
+        or sanitize_value(lig.get("name")) == "Apo"
+        or sanitize_value((lig.get("role") or {}).get("value")) == "Apo (no ligand)"
+    ):
+        return True
+    prc = lig.get("pharmacological_role_check")
+    return isinstance(prc, dict) and prc.get("is_functional_ligand") is False
+
+
 # ---------------------------------------------------------------------------
 # Ligand exclude list (common buffers, ions, artifacts, detergents, matrix lipids)
 # ---------------------------------------------------------------------------

@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import tempfile
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -68,6 +69,7 @@ from gpcr_tools.config import (
     VALIDATION_EXCLUDED_BUFFER,
     get_config,
     is_empty_key,
+    ligand_row_dropped,
     list_item_identity,
 )
 from gpcr_tools.detector.signals import (
@@ -277,6 +279,28 @@ def _stamp_is_functional(row: dict[str, Any], value: Any) -> None:
     prc["is_functional_ligand"] = value
 
 
+def _majority_copy_role(copies: list[dict[str, Any]]) -> str:
+    """Most common non-empty ``role`` value across a set of per-copy vote rows.
+
+    A per-copy ``role`` is either a plain string (``"Cofactor"``) or the wrapped
+    ``{"value": ...}`` shape a ligand row uses; both are folded to the bare string.
+    Ties break deterministically on the alphabetically-last value (``max`` over
+    ``(count, value)``). Empty when no copy carries a role. Used only to label a
+    rebuilt ``site_ref = unknown`` row -- the honest majority role of the copies
+    that could not be attributed to a site.
+    """
+    counter: Counter[str] = Counter()
+    for copy_row in copies:
+        role = copy_row.get("role") if isinstance(copy_row, dict) else None
+        value = role.get("value") if isinstance(role, dict) else role
+        value = _copy_token(value)
+        if value:
+            counter[value] += 1
+    if not counter:
+        return ""
+    return max(counter.items(), key=lambda kv: (kv[1], kv[0]))[0]
+
+
 # Per-site decision + narrative fields on a ligand row. Everything else a ligand
 # row carries (name / SMILES / InChIKey / pubchem / type / is_endogenous /
 # validation_status / synonyms) is component-intrinsic chemistry that travels with
@@ -356,9 +380,17 @@ def _rebuild_small_molecule_rows_from_per_copy(
     * ``chain_id`` is re-derived from the author chains of the copies actually
       grouped onto that site (empty when none), so it reflects the physical copies
       rather than an inherited template chain set.
+    * Copies the runs voted ``unknown`` / left un-sited are gathered into ONE
+      ``site_ref = unknown`` row of that component (reusing an existing unknown row
+      when present, else built from the chemistry template with its per-site decision
+      cleared to "not assessed" and its role taken from the copies' majority). Their
+      binding site is what is uncertain, so that uncertainty lives in the Site column;
+      the residue tokens stay clean, never marked. (A component with ONLY unknown
+      copies is left to pass through untouched -- see the grouping note below.)
 
     Finally the record's ``ligand_copies`` is set to the majority-voted list, so the
-    CSV writer re-partitions each row's copies from the same voted attribution.
+    CSV writer re-partitions each row's copies from the same voted attribution --
+    including the ``unknown`` copies onto the unknown row.
     """
     ligands = best_run_data.get("ligands")
     if not isinstance(ligands, list):
@@ -421,11 +453,16 @@ def _rebuild_small_molecule_rows_from_per_copy(
         isfunc_by_ident[ident] = prc.get("is_functional_ligand") if isinstance(prc, dict) else None
         mv_ligand_by_ident[ident] = entry
 
-    # Group each physical copy by (component, majority-voted site). 'unknown'/absent
-    # sites are not grouped into a row (they surface via the CSV homeless bucket),
-    # but their component is still recorded so an all-unknown component falls back
-    # to pass-through rather than losing its best-run row.
+    # Group each physical copy by (component, majority-voted site). A copy whose
+    # voted site is 'unknown'/absent is collected separately per component: for a
+    # component that also has at least one real-site copy (so it is rebuilt below),
+    # those un-sited copies become one honest ``site_ref = unknown`` row instead of
+    # riding tagged onto a sibling site's row. A component with ONLY unknown copies
+    # is NOT promoted to a rebuild here: it passes through unchanged (its rows already
+    # list their copies cleanly), so an all-unknown component never loses its best-run
+    # row or grows a redundant empty sibling.
     groups: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    unknown_by_comp: dict[str, list[dict[str, Any]]] = {}
     for copy_row in voted_copies:
         if not isinstance(copy_row, dict):
             continue
@@ -438,6 +475,7 @@ def _rebuild_small_molecule_rows_from_per_copy(
         # entries -- both use the raw enum value, with a case-insensitive unknown test.
         site = _copy_token(copy_row.get("site_ref"))
         if not site or site.lower() == SITE_REF_UNKNOWN:
+            unknown_by_comp.setdefault(comp_id, []).append(copy_row)
             continue
         groups.setdefault(comp_id, {}).setdefault(site, []).append(copy_row)
 
@@ -465,7 +503,7 @@ def _rebuild_small_molecule_rows_from_per_copy(
             continue  # this component's rows are all emitted at its first occurrence
         emitted.add(comp_id)
 
-        voted_sites = groups[comp_id]
+        voted_sites = groups.get(comp_id, {})
         # Site identity <-> the component:site path, for both the component's own
         # post-prune rows (its anchors) and its per-copy voted sites.
         voted_ident_to_site = {
@@ -473,6 +511,7 @@ def _rebuild_small_molecule_rows_from_per_copy(
             for site in voted_sites
         }
         all_idents = sorted(idents_by_comp.get(comp_id, set()) | set(voted_ident_to_site))
+        row_start = len(new_ligands)
         for ident in all_idents:
             base = row_by_ident.get(ident)
             majority = isfunc_by_ident.get(ident)
@@ -518,6 +557,51 @@ def _rebuild_small_molecule_rows_from_per_copy(
                 row["chain_id"] = _chains(copies)
                 new_ligands.append(row)
             # else: no post-prune row, no majority-True, no copies -> nothing to build.
+
+        # Un-sited copies of a rebuilt component: gather every copy the runs voted
+        # 'unknown'/absent into ONE honest ``site_ref = unknown`` row rather than
+        # tagging them onto a sibling site's row. The residue token (author chain :
+        # residue number) is always certain; only the binding site is not, so the
+        # uncertainty lives in the Site column, not a mark on the residue.
+        #
+        # Guard: surface the un-sited copies only when the component STILL has at
+        # least one surviving (non-dropped) row. A molecule the majority judged
+        # non-functional at every real site has no surviving row at all (e.g. a
+        # buffer such as 6D26's succinate); it drops entirely, and its un-sited
+        # copies leave with it rather than reappearing as a lone unknown row --
+        # consistent with "non-functional -> not emitted".
+        comp_rows = new_ligands[row_start:]
+        survivors = [row for row in comp_rows if not ligand_row_dropped(row)]
+        unknown_copies = unknown_by_comp.get(comp_id, [])
+        if unknown_copies and survivors:
+            # Reuse a surviving unknown row this component already emitted (a
+            # post-prune row whose site is 'unknown'); otherwise build a new one from
+            # a SURVIVING chemistry template of the component -- never a dropped
+            # ghost/apo/non-functional row, which ligand_row_dropped would then eat,
+            # silently losing the copies. The guard above guarantees survivors[0].
+            unknown_row = next(
+                (
+                    row
+                    for row in survivors
+                    if _copy_token(row.get("site_ref")).lower() == SITE_REF_UNKNOWN
+                ),
+                None,
+            )
+            if unknown_row is None:
+                unknown_row = copy.deepcopy(survivors[0])
+                unknown_row["chem_comp_id"] = comp_id
+                unknown_row["site_ref"] = SITE_REF_UNKNOWN
+                new_ligands.append(unknown_row)
+            # Identical treatment whether reused or freshly built: clear any borrowed
+            # sibling-site decision + narrative (the site is genuinely unknown, so
+            # is_functional stays "not assessed" -> None and the row survives to the
+            # CSV), set role from the copies' own majority, and re-derive chain from
+            # those copies -- so a reused row never keeps stale sibling prose.
+            _apply_per_site_from_majority(unknown_row, None)
+            majority_role = _majority_copy_role(unknown_copies)
+            if majority_role:
+                unknown_row["role"] = {"value": majority_role}
+            unknown_row["chain_id"] = _chains(unknown_copies)
 
     best_run_data["ligands"] = new_ligands
     # deepcopy so the aggregated record owns its per-copy list (see note above).

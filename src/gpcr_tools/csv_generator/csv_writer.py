@@ -12,30 +12,11 @@ from gpcr_tools.config import (
     AUX_PROTEIN_DISPATCH,
     CSV_SCHEMA,
     SITE_REF_UNKNOWN,
-    VALIDATION_GHOST_LIGAND,
-    VALIDATION_SKIPPED_APO,
     get_config,
     is_empty_key,
+    ligand_row_dropped,
+    sanitize_value,
 )
-
-# Tags a physical ligand copy that cannot be attributed to a specific binding site.
-# This mark is applied ONLY when the copy's per-copy site vote is 'unknown'/absent,
-# or points to a site that has NO ligand row at all (a compound-level vs per-copy
-# disagreement): the copy is still listed (never silently dropped) but tagged, so
-# the residue column never implies a confident site it lacks.
-#
-# It is NOT applied when the copy voted to a site whose row EXISTED but was DROPPED
-# (a non-functional / ghost / apo filter): that copy follows its row out of the
-# output entirely -- neither placed nor tagged -- so a dropped structural lipid takes
-# its copies with it instead of flooding a surviving sibling row with tagged copies.
-RESIDUE_SITE_UNDETERMINED_MARK = " (?)"
-
-
-def sanitize_value(value: Any) -> str:
-    """Convert a value to a clean string for CSV output."""
-    if value is None:
-        return ""
-    return str(value).strip()
 
 
 def _primary_chain(value: Any) -> str:
@@ -53,41 +34,6 @@ def _primary_chain(value: Any) -> str:
     # Split on comma or semicolon, tolerating optional spaces, to match the chain
     # parsers used elsewhere in the codebase; take the first (primary complex).
     return text.replace(";", ",").split(",")[0].strip()
-
-
-def _ligand_row_dropped(lig: Any) -> bool:
-    """Whether a ligand row is filtered out of ``ligands.csv`` before it is written.
-
-    The single source of truth for the writer loop's skip decision, shared with
-    the per-site residue partition so a physical copy is never attributed to a
-    binding-site row that never reaches output (which would silently lose it).
-    A row is dropped when:
-
-    * it is not a dict (cannot be a valid row);
-    * it is a GHOST ligand the validator could not find in the structure, unless a
-      curator explicitly kept it (writing it would record an interaction for a
-      molecule absent from the deposition);
-    * it is an apo / "no ligand" placeholder (SKIPPED_APO, or a value-level Apo
-      marker) -- not a bound ligand, so it must not become an interaction row;
-    * it is a dual-use molecule the model explicitly judged non-functional
-      (``pharmacological_role_check.is_functional_ligand`` is False). A missing or
-      null verdict means "not assessed" and does NOT drop the row.
-    """
-    if not isinstance(lig, dict):
-        return True
-    if lig.get("validation_status") == VALIDATION_GHOST_LIGAND and not lig.get(
-        "curator_kept_ghost"
-    ):
-        return True
-    if (
-        lig.get("validation_status") == VALIDATION_SKIPPED_APO
-        or sanitize_value(lig.get("type")) == "none"
-        or sanitize_value(lig.get("name")) == "Apo"
-        or sanitize_value((lig.get("role") or {}).get("value")) == "Apo (no ligand)"
-    ):
-        return True
-    prc = lig.get("pharmacological_role_check")
-    return isinstance(prc, dict) and prc.get("is_functional_ligand") is False
 
 
 def _per_site_label_and_residue_columns(
@@ -112,22 +58,25 @@ def _per_site_label_and_residue_columns(
     copy-for-copy on every row (the CSV schema's ``label_asym_id`` <-> residue
     contract).
 
-    Only rows that SURVIVE to output are partitioned (``_ligand_row_dropped``).
-    A copy voted to a site whose row was DROPPED (a non-functional / ghost / apo
-    filter) follows that row out of the output -- it is neither placed nor tagged,
-    so a structural lipid the majority judged non-functional takes its copies with
-    it instead of flooding a surviving sibling row. A copy voted to a site with NO
-    ligand row at all (a compound-level vs per-copy disagreement) is still tagged
-    and surfaced, never silently lost.
+    Only rows that SURVIVE to output are partitioned (``ligand_row_dropped``).
+    ``unknown`` is treated as an ordinary binding site: a copy the runs could not
+    place is voted ``unknown`` and lands on the compound's ``site_ref = unknown``
+    row (which the aggregator builds for exactly these copies), residue token clean
+    -- the uncertainty lives in the Site column, never as a mark on the residue. A
+    copy voted to a site whose row was DROPPED (a non-functional / ghost / apo
+    filter) follows that row out of the output, so a structural lipid the majority
+    judged non-functional takes its copies with it instead of flooding a surviving
+    sibling row.
 
-    Honest fallbacks (never silently wrong):
+    Honest fallbacks (never silently wrong, never silently lost):
       * No per-copy votes for this record (pre-feature data, or votes dropped
         upstream) -> every row keeps the full component-id-join list, unchanged.
       * A single-copy compound, or a polymer/keyless ligand with no instances ->
         nothing to partition; listed exactly as before.
-      * A copy whose vote is 'unknown'/absent, or voted to a site with no ligand
-        row at all, is not attributed to any site: it is appended once (to the
-        compound's first surviving row), tagged, so it is surfaced rather than lost.
+      * A copy the aggregator did not route to a surviving site (an absent vote, or
+        legacy data with no ``unknown`` row) is never dropped: it joins the
+        compound's ``unknown`` row when one exists, else its first surviving row --
+        always with a clean residue token.
 
     Returns a list parallel to *ligands* (same length and order); each element is
     that row's ``(label_asym_id, Residue_seq_id)`` pair.
@@ -166,11 +115,11 @@ def _per_site_label_and_residue_columns(
         return "" if is_empty_key(text) else text.lower()
 
     # Group the SURVIVING ligand rows by component id so a compound's per-copy votes
-    # can be split across its site rows (and a homeless copy attached exactly once).
+    # can be split across its site rows (``unknown`` among them, an ordinary site).
     # Dropped rows are excluded as placement targets, but their sites are recorded
     # per component so a copy voted to a dropped row's site can follow it out
-    # (rather than flood a surviving sibling row) -- distinct from a copy voted to a
-    # site that has no row at all, which is still tagged and surfaced.
+    # (rather than flood a surviving sibling row) -- distinct from an un-sited copy,
+    # which lands on the compound's ``unknown`` row (or, absent one, its first row).
     rows_by_comp: dict[str, list[int]] = {}
     row_site: dict[int, str] = {}
     dropped_sites_by_comp: dict[str, set[str]] = {}
@@ -180,7 +129,7 @@ def _per_site_label_and_residue_columns(
         comp_id = sanitize_value(lig.get("chem_comp_id"))
         if is_empty_key(comp_id):
             continue  # keyless (peptide/glycan): no per-copy residues, as before
-        if _ligand_row_dropped(lig):
+        if ligand_row_dropped(lig):
             dropped_sites_by_comp.setdefault(comp_id, set()).add(_norm_site(lig.get("site_ref")))
             continue
         row_site[idx] = _norm_site(lig.get("site_ref"))
@@ -209,30 +158,30 @@ def _per_site_label_and_residue_columns(
         homeless: list[tuple[str, str]] = []
         for label, residue in tokens:
             voted = _norm_site(votes[residue]) if residue in votes else ""
-            if voted and voted != SITE_REF_UNKNOWN and voted in existing_sites:
+            if voted and voted in existing_sites:
+                # A real site (``unknown`` included) with a surviving row: the copy
+                # lands on it. An un-sited copy voted ``unknown`` lands on the
+                # compound's ``unknown`` row the aggregator built for exactly these.
                 by_site.setdefault(voted, []).append((label, residue))
-            elif voted and voted != SITE_REF_UNKNOWN and voted in dropped_sites:
+            elif voted and voted in dropped_sites:
                 # The copy voted to a site whose row was filtered out (a
                 # non-functional / ghost / apo drop): it follows that row out
                 # rather than flooding a surviving sibling row of the same compound.
                 continue
             else:
-                # 'unknown'/absent vote, or a vote to a site with no ligand row at
-                # all: cannot be attributed -> keep it (tagged) rather than drop it,
-                # so no such copy is ever silently lost.
+                # A copy the aggregator did not route to a surviving site (an absent
+                # vote, or legacy data with no ``unknown`` row): never dropped -- it
+                # falls back to the compound's ``unknown`` row (or its first surviving
+                # row when there is none), always with a clean residue token.
                 homeless.append((label, residue))
 
-        for position, idx in enumerate(idxs):
+        # Row that absorbs any residual un-sited copy: the compound's ``unknown`` row
+        # when it has one, else its first surviving row.
+        fallback_idx = next((idx for idx in idxs if row_site[idx] == SITE_REF_UNKNOWN), idxs[0])
+        for idx in idxs:
             placed = list(by_site.get(row_site[idx], []))
-            if position == 0 and homeless:
-                # Attach every un-attributable copy exactly once, on the first
-                # surviving row. Only the residue token carries the mark (the
-                # column that would otherwise imply a confident site); the label
-                # stays a clean identifier, still 1:1 with it by position.
-                placed.extend(
-                    (label, f"{residue}{RESIDUE_SITE_UNDETERMINED_MARK}")
-                    for label, residue in homeless
-                )
+            if idx == fallback_idx and homeless:
+                placed.extend(homeless)
             results[idx] = _join(placed)
 
     return results
@@ -322,9 +271,10 @@ def transform_for_csv(pdb_id: str, data: dict) -> dict[str, list[dict[str, str]]
         # "no ligand" placeholder, or a dual-use molecule the model judged
         # non-functional -- is skipped. The SAME predicate drives the per-site
         # partition above, so a copy voted to a dropped row's site follows that
-        # row OUT of the output (rather than flooding a surviving sibling row);
-        # only a copy voted to a site with no row at all is surfaced (tagged).
-        if _ligand_row_dropped(lig):
+        # row OUT of the output (rather than flooding a surviving sibling row); an
+        # un-sited copy instead lands cleanly on the compound's ``unknown`` row (or,
+        # absent one, its first surviving row) -- never a residue mark.
+        if ligand_row_dropped(lig):
             continue
         smiles = lig.get("SMILES_stereo") or lig.get("SMILES") or ""
         lig_chain = sanitize_value(lig.get("chain_id"))

@@ -881,10 +881,13 @@ class TestPerSiteResidueFiltering:
         # The two rows are genuinely distinct (the original bug was identical lists).
         assert by_site["orthosteric"] != by_site["membrane_facing"]
 
-    def test_undetermined_copy_is_tagged_not_dropped(self, sample_pdb_data):
-        # One copy is voted orthosteric; a second is voted 'unknown' and a third is
-        # absent from ligand_copies entirely. Both un-attributable copies must be
-        # surfaced (tagged), never silently dropped.
+    def test_undetermined_copy_lands_on_unknown_row_clean(self, sample_pdb_data):
+        # Post-aggregator shape: the compound has an orthosteric row AND a
+        # Site=unknown row (the aggregator builds the latter for copies it could not
+        # place). One copy is voted orthosteric, one 'unknown', and a third is absent
+        # from the votes. The unknown and absent copies land on the Site=unknown row
+        # with CLEAN residue tokens -- the uncertainty is in the Site column, never a
+        # mark on the residue -- and nothing is dropped nor falsely sited.
         sample_pdb_data["oligomer_analysis"] = {
             "nonpolymer_instance_index": {
                 "CLR": [
@@ -899,20 +902,19 @@ class TestPerSiteResidueFiltering:
             {"copy_id": "R:602", "site_ref": "unknown", "role": {"value": "Cofactor"}},
             # R:603 deliberately absent from the per-copy votes.
         ]
-        sample_pdb_data["ligands"] = [self._lig("orthosteric")]
-        residue = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]["Residue_seq_id"]
-        # The determined copy is attributed cleanly; the unknown and absent copies
-        # are both present but tagged, so nothing is lost and nothing is falsely
-        # claimed to sit at the orthosteric site.
-        assert "R:601" in residue
-        assert "R:602 (?)" in residue
-        assert "R:603 (?)" in residue
-        # The orthosteric copy is NOT tagged.
-        assert "R:601 (?)" not in residue
+        sample_pdb_data["ligands"] = [self._lig("orthosteric"), self._lig("unknown")]
+        by_site = self._residue_by_site(transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"])
+        # The determined copy sits on its real site; the unknown and absent copies
+        # both land on the Site=unknown row, clean -- nothing lost, nothing mismarked.
+        assert by_site["orthosteric"] == "R:601"
+        assert by_site["unknown"] == "R:602, R:603"
+        assert not any("(?)" in residue for residue in by_site.values())
 
-    def test_orphan_vote_not_lost(self, sample_pdb_data):
-        # A copy voted to a site that has NO matching ligand row (compound-level vs
-        # per-copy disagreement) must fall back, tagged, rather than be orphaned.
+    def test_orphan_vote_falls_back_clean_never_lost(self, sample_pdb_data):
+        # Legacy / non-aggregated shape: a copy voted to a site that has NO matching
+        # ligand row, and there is no Site=unknown row to catch it. It must never be
+        # dropped -- it falls back to the compound's first surviving row with a CLEAN
+        # residue token (never a "(?)" mark).
         sample_pdb_data["oligomer_analysis"] = {
             "nonpolymer_instance_index": {
                 "CLR": [
@@ -928,8 +930,8 @@ class TestPerSiteResidueFiltering:
         ]
         sample_pdb_data["ligands"] = [self._lig("orthosteric")]
         residue = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]["Residue_seq_id"]
-        assert "R:601" in residue
-        assert "R:602 (?)" in residue
+        assert residue == "R:601, R:602"
+        assert "(?)" not in residue
 
     def test_copy_follows_a_dropped_nonfunctional_row_out(self, sample_pdb_data):
         # A cholesterol modelled at two sites where the membrane row was judged

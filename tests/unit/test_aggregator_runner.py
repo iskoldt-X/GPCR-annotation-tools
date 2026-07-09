@@ -1104,10 +1104,12 @@ class TestRebuildSmallMoleculeRowsFromPerCopy:
         _rebuild_small_molecule_rows_from_per_copy(best, mv)
         assert best["ligands"] == [drug]  # identical object, untouched
 
-    def test_partial_unknown_keeps_real_site_and_leaves_unknown_to_surface(self):
+    def test_partial_unknown_gets_its_own_clean_unknown_row(self):
         # Some copies voted a real site, one voted 'unknown'. The real-site row is
-        # rebuilt; the unknown copy is not dropped -- it stays in the shipped
-        # per-copy list for the CSV writer's homeless bucket to surface.
+        # rebuilt; the un-sited copy is gathered into ONE honest Site=unknown row of
+        # the same compound (chemistry from the template, per-site decision cleared to
+        # "not assessed", role from the copies' majority, chain from the copies)
+        # rather than tagged onto the sibling. Its residue stays clean in the CSV.
         best = {
             "ligands": [_sm_lig("CLR", SITE_REF_MEMBRANE_FACING, is_functional=True)],
             "oligomer_analysis": {
@@ -1124,8 +1126,197 @@ class TestRebuildSmallMoleculeRowsFromPerCopy:
             "ligands": [_sm_lig("CLR", SITE_REF_MEMBRANE_FACING, is_functional=True)],
         }
         _rebuild_small_molecule_rows_from_per_copy(best, mv)
-        assert _rows(best) == [("CLR", SITE_REF_MEMBRANE_FACING, True)]
+        assert _rows(best) == [
+            ("CLR", SITE_REF_MEMBRANE_FACING, True),
+            ("CLR", SITE_REF_UNKNOWN, None),  # honest unknown-site row, not assessed
+        ]
+        unknown_row = best["ligands"][1]
+        assert unknown_row["chain_id"] == "R"  # from the un-sited copy, not the template
+        assert (unknown_row.get("role") or {}).get("value") == "Cofactor"  # copies' majority
         assert best["ligand_copies"] == mv["ligand_copies"]  # unknown copy retained
+
+    def test_unknown_copies_reuse_existing_unknown_row(self):
+        # The best run already emitted a Site=unknown row for the compound (carrying a
+        # STALE sibling role "PAM"). The un-sited copies attach to THAT row rather than
+        # spawning a duplicate; its chain is re-derived from them AND its role/soft
+        # fields are recomputed from the copies' own majority (here "Cofactor"),
+        # exactly as the freshly-built branch does -- no stale sibling prose survives.
+        best = {
+            "ligands": [
+                _sm_lig("CA", SITE_REF_ORTHOSTERIC, is_functional=True, chain_id="A"),
+                _lig(
+                    chem_comp_id="CA",
+                    site_ref=SITE_REF_UNKNOWN,
+                    validation_status=VALIDATION_MATCHED_SMALL_MOLECULE,
+                    pharmacological_role_check=None,
+                    chain_id="",
+                    role={"value": "PAM"},  # stale sibling role that must be overwritten
+                    site_ref_justification="borrowed prose",
+                ),
+            ],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "CA": [_inst("A", "1", "K"), _inst("B", "2", "L"), _inst("C", "3", "M")]
+                }
+            },
+        }
+        mv = {
+            "ligand_copies": [
+                _pc("A:1", SITE_REF_ORTHOSTERIC),
+                _pc("B:2", SITE_REF_UNKNOWN, role="Cofactor"),
+                _pc("C:3", SITE_REF_UNKNOWN, role="Cofactor"),
+            ],
+            "ligands": [
+                _sm_lig("CA", SITE_REF_ORTHOSTERIC, is_functional=True),
+                _sm_lig("CA", SITE_REF_UNKNOWN, is_functional=None),
+            ],
+        }
+        _rebuild_small_molecule_rows_from_per_copy(best, mv)
+        # Exactly one unknown row (reused, not duplicated).
+        assert _rows(best).count(("CA", SITE_REF_UNKNOWN, None)) == 1
+        by_site = {lig["site_ref"]: lig for lig in best["ligands"]}
+        unknown_row = by_site[SITE_REF_UNKNOWN]
+        assert unknown_row["chain_id"] == "B, C"
+        # Role now = the copies' majority, NOT the stale "PAM"; soft prose cleared.
+        assert (unknown_row.get("role") or {}).get("value") == "Cofactor"
+        assert unknown_row.get("site_ref_justification") is None
+
+    def test_unknown_copies_build_clean_unknown_row_end_to_end(self):
+        # 7M3F CaSR-shaped: 4 calcium copies -- 2 voted a real site, 2 voted
+        # 'unknown'. After the rebuild + CSV partition the two un-sited copies sit on
+        # a clean Site=unknown row (chemistry from the template, residue tokens clean,
+        # no "(?)"), NOT tagged onto the real-site row.
+        from gpcr_tools.csv_generator.csv_writer import transform_for_csv
+
+        best = {
+            "ligands": [
+                _sm_lig("CA", SITE_REF_ORTHOSTERIC, is_functional=None, name="Calcium ion")
+            ],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "CA": [
+                        _inst("A", "907", "L"),
+                        _inst("B", "908", "W"),
+                        _inst("A", "908", "M"),
+                        _inst("A", "909", "N"),
+                    ]
+                }
+            },
+        }
+        mv = {
+            "ligand_copies": [
+                _pc("A:907", SITE_REF_ORTHOSTERIC),
+                _pc("B:908", SITE_REF_ORTHOSTERIC),
+                _pc("A:908", SITE_REF_UNKNOWN),
+                _pc("A:909", SITE_REF_UNKNOWN),
+            ],
+            "ligands": [_sm_lig("CA", SITE_REF_ORTHOSTERIC, is_functional=None)],
+        }
+        _rebuild_small_molecule_rows_from_per_copy(best, mv)
+        rows = transform_for_csv("7M3F", best)["ligands.csv"]
+        by_site = {r["Site"]: r for r in rows}
+        assert set(by_site) == {SITE_REF_ORTHOSTERIC, SITE_REF_UNKNOWN}
+        assert by_site[SITE_REF_ORTHOSTERIC]["Residue_seq_id"] == "A:907, B:908"
+        assert by_site[SITE_REF_UNKNOWN]["Residue_seq_id"] == "A:908, A:909"
+        assert by_site[SITE_REF_UNKNOWN]["Name"] == "CA"  # chemistry from the template
+        assert by_site[SITE_REF_UNKNOWN]["ChainID"] == "A"
+        assert not any("(?)" in r["Residue_seq_id"] for r in rows)
+
+    def test_all_nonfunctional_component_emits_no_unknown_row(self):
+        # 6D26/SIN-shaped: a buffer the majority judged non-functional at every real
+        # site has NO surviving row. Its copies voted to those (dropped) sites follow
+        # them out, and -- crucially -- the copies voted 'unknown' do NOT reappear as
+        # a lone Site=unknown row: with no surviving row, the whole molecule (and its
+        # un-sited copies) drops, consistent with "non-functional -> not emitted".
+        from gpcr_tools.csv_generator.csv_writer import transform_for_csv
+
+        best = {
+            "ligands": [
+                _sm_lig("SIN", SITE_REF_MEMBRANE_FACING, is_functional=False),
+                _sm_lig("SIN", SITE_REF_INTRACELLULAR, is_functional=False),
+                _sm_lig("FSY", SITE_REF_ORTHOSTERIC, is_functional=None, name="agonist"),
+            ],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "SIN": [
+                        _inst("A", "2411", "L"),
+                        _inst("A", "2412", "M"),
+                        _inst("A", "2414", "O"),
+                        _inst("A", "2415", "P"),
+                    ],
+                    "FSY": [_inst("A", "2401", "B")],
+                }
+            },
+        }
+        mv = {
+            "ligand_copies": [
+                _pc("A:2401", SITE_REF_ORTHOSTERIC),
+                _pc("A:2411", SITE_REF_MEMBRANE_FACING),
+                _pc("A:2412", SITE_REF_INTRACELLULAR),
+                _pc("A:2414", SITE_REF_UNKNOWN),
+                _pc("A:2415", SITE_REF_UNKNOWN),
+            ],
+            "ligands": [
+                _sm_lig("SIN", SITE_REF_MEMBRANE_FACING, is_functional=False),
+                _sm_lig("SIN", SITE_REF_INTRACELLULAR, is_functional=False),
+                _sm_lig("FSY", SITE_REF_ORTHOSTERIC, is_functional=None),
+            ],
+        }
+        _rebuild_small_molecule_rows_from_per_copy(best, mv)
+        # No SIN unknown row is fabricated; SIN keeps only its two dropped markers.
+        assert ("SIN", SITE_REF_UNKNOWN, None) not in _rows(best)
+        rows = transform_for_csv("6D26", best)["ligands.csv"]
+        # In the CSV, SIN vanishes entirely (all rows dropped, un-sited copies with
+        # it); only the surviving FSY row ships, with no "(?)" anywhere.
+        assert [r["Name"] for r in rows] == ["FSY"]
+        assert not any("(?)" in r["Residue_seq_id"] for r in rows)
+
+    def test_unknown_row_built_from_surviving_template_never_silently_dropped(self):
+        # The component's FIRST post-prune row is a GHOST (dropped by the CSV), but it
+        # also has a surviving functional row. The unknown row must borrow chemistry
+        # from the SURVIVING row -- not the ghost -- so the new unknown row is not
+        # itself eaten by ligand_row_dropped, and its un-sited copy is never lost.
+        from gpcr_tools.config import VALIDATION_GHOST_LIGAND
+        from gpcr_tools.csv_generator.csv_writer import transform_for_csv
+
+        ghost = _lig(
+            chem_comp_id="CLR",
+            site_ref=SITE_REF_ALLOSTERIC_7TM,
+            validation_status=VALIDATION_GHOST_LIGAND,
+            role={"value": "Cofactor"},
+            pharmacological_role_check={"is_functional_ligand": True},
+        )
+        best = {
+            "ligands": [
+                ghost,  # first row of the component -> the naive chemistry template
+                _sm_lig("CLR", SITE_REF_MEMBRANE_FACING, is_functional=True),
+            ],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "CLR": [_inst("R", "601", "F"), _inst("R", "602", "G"), _inst("R", "603", "H")]
+                }
+            },
+        }
+        mv = {
+            "ligand_copies": [
+                _pc("R:601", SITE_REF_ALLOSTERIC_7TM),
+                _pc("R:602", SITE_REF_MEMBRANE_FACING),
+                _pc("R:603", SITE_REF_UNKNOWN),
+            ],
+            "ligands": [
+                _sm_lig("CLR", SITE_REF_ALLOSTERIC_7TM, is_functional=True),
+                _sm_lig("CLR", SITE_REF_MEMBRANE_FACING, is_functional=True),
+            ],
+        }
+        _rebuild_small_molecule_rows_from_per_copy(best, mv)
+        unknown_rows = [lig for lig in best["ligands"] if lig.get("site_ref") == SITE_REF_UNKNOWN]
+        assert len(unknown_rows) == 1
+        # Built from the surviving row's chemistry, so NOT a ghost -> survives the CSV.
+        assert unknown_rows[0].get("validation_status") != VALIDATION_GHOST_LIGAND
+        rows = transform_for_csv("XXXX", best)["ligands.csv"]
+        by_site = {r["Site"]: r for r in rows}
+        assert by_site[SITE_REF_UNKNOWN]["Residue_seq_id"] == "R:603"  # copy not lost
+        assert not any("(?)" in r["Residue_seq_id"] for r in rows)
 
     def test_keyless_ligand_passed_through_in_place(self):
         # A keyless entity (peptide / apo, no chem_comp_id) is passed through
