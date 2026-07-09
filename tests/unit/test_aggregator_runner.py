@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 
 import pytest
@@ -10,8 +11,10 @@ from gpcr_tools.aggregator.runner import (
     _build_validation_report,
     _coupling_protomer,
     _prune_excluded_buffer_ligands,
+    _rebuild_small_molecule_rows_from_per_copy,
     _write_outputs,
 )
+from gpcr_tools.aggregator.voting import find_discrepancies
 from gpcr_tools.config import (
     ALERT_MULTI_COPY_LIGAND,
     CHIMERA_STATUS_NO_G_PROTEIN,
@@ -22,6 +25,11 @@ from gpcr_tools.config import (
     CHIMERA_SUBTYPE_INSEPARABLE_SET,
     CHIMERA_SUBTYPE_LOW_CONFIDENCE,
     CHIMERA_SUBTYPE_RESOLVED,
+    SITE_REF_ALLOSTERIC_7TM,
+    SITE_REF_INTRACELLULAR,
+    SITE_REF_MEMBRANE_FACING,
+    SITE_REF_ORTHOSTERIC,
+    SITE_REF_UNKNOWN,
     SUBTYPE_BASIS_CONSTRUCT_NAME,
     SUBTYPE_BASIS_FAMILY_VERIFIED,
     SUBTYPE_BASIS_RESOLVED,
@@ -865,3 +873,693 @@ class TestPruneExcludedBufferLigands:
         }
         _prune_excluded_buffer_ligands(best)
         assert best["ligands"] == [None, "stray", normal]
+
+
+# ---------------------------------------------------------------------------
+# Per-copy small-molecule row rebuild
+# ---------------------------------------------------------------------------
+
+
+def _pc(copy_id, site, role="Cofactor", confidence="Medium"):
+    """A per-copy vote row (as it appears in majority_votes['ligand_copies'])."""
+    return {"copy_id": copy_id, "site_ref": site, "role": {"value": role}, "confidence": confidence}
+
+
+def _inst(auth_asym, auth_seq, label):
+    """A nonpolymer instance-index entry (author chain / residue / mmCIF label)."""
+    return {"auth_asym_id": auth_asym, "auth_seq_id": auth_seq, "label_asym_id": label}
+
+
+def _sm_lig(comp, site, is_functional=None, **overrides):
+    """A small-molecule ligand row with a component id, site, and functional verdict."""
+    prc = None if is_functional is None else {"is_functional_ligand": is_functional}
+    return _lig(
+        chem_comp_id=comp,
+        site_ref=site,
+        validation_status=VALIDATION_MATCHED_SMALL_MOLECULE,
+        pharmacological_role_check=prc,
+        role={"value": "Cofactor"},
+        **overrides,
+    )
+
+
+def _rows(best):
+    """(chem_comp_id, site_ref, is_functional) for each rebuilt ligand row."""
+    out = []
+    for lig in best["ligands"]:
+        prc = lig.get("pharmacological_role_check") if isinstance(lig, dict) else None
+        isf = prc.get("is_functional_ligand") if isinstance(prc, dict) else None
+        out.append((lig.get("chem_comp_id"), lig.get("site_ref"), isf))
+    return out
+
+
+class TestRebuildSmallMoleculeRowsFromPerCopy:
+    """Small-molecule ligand rows are re-derived from the aggregated per-copy site
+    votes, so a physical copy is grouped under the site the runs agreed on rather
+    than inheriting one outlier best run's copy list. Row set / membership / site
+    come from the voted per-copy assignment; keep/drop and is_functional from the
+    in-memory majority vote; chemistry (and existence) from the post-prune list."""
+
+    def test_split_one_inflated_row_into_two_by_voted_site(self):
+        # 7E2X-shaped: one CLR copy is a pocket PAM, the rest are membrane lipids.
+        # The best run carried both rows but flipped the membrane row's verdict to
+        # non-functional; the majority keeps it functional. The rebuild produces
+        # both rows, each holding only the copies voted to its site.
+        best = {
+            "ligands": [
+                _sm_lig("CLR", SITE_REF_ALLOSTERIC_7TM, is_functional=True),
+                _sm_lig("CLR", SITE_REF_MEMBRANE_FACING, is_functional=False),  # best-run outlier
+            ],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "CLR": [_inst("R", "602", "F"), _inst("R", "603", "G"), _inst("R", "604", "H")]
+                }
+            },
+        }
+        mv = {
+            "ligand_copies": [
+                _pc("R:602", SITE_REF_ALLOSTERIC_7TM),
+                _pc("R:603", SITE_REF_MEMBRANE_FACING),
+                _pc("R:604", SITE_REF_MEMBRANE_FACING),
+            ],
+            "ligands": [
+                _sm_lig("CLR", SITE_REF_ALLOSTERIC_7TM, is_functional=True),
+                _sm_lig("CLR", SITE_REF_MEMBRANE_FACING, is_functional=True),  # majority verdict
+            ],
+        }
+        _rebuild_small_molecule_rows_from_per_copy(best, mv)
+        assert _rows(best) == [
+            ("CLR", SITE_REF_ALLOSTERIC_7TM, True),
+            ("CLR", SITE_REF_MEMBRANE_FACING, True),
+        ]
+        # The record now ships the voted per-copy list, so the CSV writer
+        # re-partitions each row's copies from the same attribution.
+        assert best["ligand_copies"] == mv["ligand_copies"]
+
+    def test_majority_non_functional_row_stamped_false_and_copies_follow_out(self):
+        # A structural lipid the MAJORITY judged non-functional is stamped False
+        # (over the best run's outlier True). The row is still emitted (recorded for
+        # the curator); the CSV writer then drops it AND follows its copies out --
+        # they must not flood the surviving sibling row as tagged homeless copies.
+        from gpcr_tools.csv_generator.csv_writer import transform_for_csv
+
+        best = {
+            "ligands": [
+                _sm_lig("CLR", SITE_REF_ALLOSTERIC_7TM, is_functional=True),
+                _sm_lig("CLR", SITE_REF_MEMBRANE_FACING, is_functional=True),  # best-run outlier
+            ],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "CLR": [_inst("R", "602", "F"), _inst("R", "603", "G")]
+                }
+            },
+        }
+        mv = {
+            "ligand_copies": [
+                _pc("R:602", SITE_REF_ALLOSTERIC_7TM),
+                _pc("R:603", SITE_REF_MEMBRANE_FACING),
+            ],
+            "ligands": [
+                _sm_lig("CLR", SITE_REF_ALLOSTERIC_7TM, is_functional=True),
+                _sm_lig("CLR", SITE_REF_MEMBRANE_FACING, is_functional=False),  # majority verdict
+            ],
+        }
+        _rebuild_small_molecule_rows_from_per_copy(best, mv)
+        # Both groups emitted; the membrane group now carries the majority False.
+        assert _rows(best) == [
+            ("CLR", SITE_REF_ALLOSTERIC_7TM, True),
+            ("CLR", SITE_REF_MEMBRANE_FACING, False),
+        ]
+        rows = transform_for_csv("XXXX", best)["ligands.csv"]
+        by_site = {r["Site"]: r for r in rows}
+        # The non-functional membrane row is dropped, and its copy follows it out:
+        # the surviving allosteric row keeps only its own copy, no "(?)" inflation.
+        assert set(by_site) == {SITE_REF_ALLOSTERIC_7TM}
+        assert by_site[SITE_REF_ALLOSTERIC_7TM]["Residue_seq_id"] == "R:602"
+
+    def test_resurrects_row_the_best_run_wrongly_dropped(self):
+        # 8Y69-shaped silent drop: the only CLR row carries the best run's False
+        # verdict (the CSV writer would drop it, leaving no sibling row). The
+        # majority verdict is True, so the rebuild stamps True and the row survives.
+        best = {
+            "ligands": [_sm_lig("CLR", SITE_REF_MEMBRANE_FACING, is_functional=False)],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "CLR": [_inst("D", "901", "I"), _inst("H", "301", "J")]
+                }
+            },
+        }
+        mv = {
+            "ligand_copies": [
+                _pc("D:901", SITE_REF_MEMBRANE_FACING),
+                _pc("H:301", SITE_REF_MEMBRANE_FACING),
+            ],
+            "ligands": [_sm_lig("CLR", SITE_REF_MEMBRANE_FACING, is_functional=True)],
+        }
+        _rebuild_small_molecule_rows_from_per_copy(best, mv)
+        assert _rows(best) == [("CLR", SITE_REF_MEMBRANE_FACING, True)]
+
+    def test_null_verdict_site_with_no_post_prune_row_is_not_fabricated(self):
+        # The per-copy votes place the copies at a site (membrane) that has NO
+        # post-prune row of this component and NO majority-True call -- so that
+        # site must NOT be fabricated into a shipped row by borrowing the
+        # component's chemistry from another site. The compound-level allosteric
+        # row (which no per-copy group reached) is kept (never silently deleted),
+        # and the membrane copies leave via a dropped follow-out marker instead of
+        # flooding the surviving allosteric row.
+        from gpcr_tools.csv_generator.csv_writer import transform_for_csv
+
+        best = {
+            "ligands": [
+                _sm_lig("C8E", SITE_REF_ALLOSTERIC_7TM, is_functional=None, name="detergent")
+            ],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {"C8E": [_inst("A", "1", "L"), _inst("A", "2", "N")]}
+            },
+        }
+        mv = {
+            "ligand_copies": [
+                _pc("A:1", SITE_REF_MEMBRANE_FACING),
+                _pc("A:2", SITE_REF_MEMBRANE_FACING),
+            ],
+            # No C8E:membrane_facing ligand vote -> "not assessed" (null), and there
+            # is no post-prune membrane row -> the site is not fabricated.
+            "ligands": [_sm_lig("C8E", SITE_REF_ALLOSTERIC_7TM, is_functional=None)],
+        }
+        _rebuild_small_molecule_rows_from_per_copy(best, mv)
+        # The kept allosteric anchor row (uncovered by any group -> no derived chain)
+        # plus the dropped membrane follow-out marker (never shipped).
+        assert _rows(best) == [
+            ("C8E", SITE_REF_ALLOSTERIC_7TM, None),
+            ("C8E", SITE_REF_MEMBRANE_FACING, False),
+        ]
+        # Chemistry is carried over from the component's post-prune row.
+        assert best["ligands"][0]["name"] == "detergent"
+        rows = transform_for_csv("XXXX", best)["ligands.csv"]
+        # Only the allosteric row ships; the membrane marker is dropped and takes its
+        # two copies with it -- no "(?)" inflation on the surviving row.
+        assert [r["Site"] for r in rows] == [SITE_REF_ALLOSTERIC_7TM]
+        assert rows[0]["Residue_seq_id"] == ""
+        assert not any("(?)" in r["Residue_seq_id"] for r in rows)
+
+    def test_orphan_component_pruned_from_list_builds_no_row(self):
+        # PLM is on both the incidental roster and the exclude list, so the buffer
+        # prune removed it from the ligand list while its copies remain in the
+        # per-copy roster. With no surviving chemistry template it builds no row --
+        # and its homeless copies never fabricate one. CLR is unaffected.
+        best = {
+            "ligands": [_sm_lig("CLR", SITE_REF_ALLOSTERIC_7TM, is_functional=True)],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "CLR": [_inst("R", "602", "F")],
+                    "PLM": [_inst("R", "606", "J")],  # pruned from ligands
+                }
+            },
+        }
+        mv = {
+            "ligand_copies": [
+                _pc("R:602", SITE_REF_ALLOSTERIC_7TM),
+                _pc("R:606", SITE_REF_MEMBRANE_FACING),  # PLM copy, no home component
+            ],
+            "ligands": [
+                _sm_lig("CLR", SITE_REF_ALLOSTERIC_7TM, is_functional=True),
+                _sm_lig("PLM", SITE_REF_MEMBRANE_FACING, is_functional=False),
+            ],
+        }
+        _rebuild_small_molecule_rows_from_per_copy(best, mv)
+        assert _rows(best) == [("CLR", SITE_REF_ALLOSTERIC_7TM, True)]
+
+    def test_all_unknown_component_passes_through_unchanged(self):
+        # A real drug whose copies all voted 'unknown' has no real-site group, so
+        # it is passed through untouched -- never dropped for want of a placed copy.
+        drug = _sm_lig("ZMA", SITE_REF_ORTHOSTERIC, is_functional=None, name="antagonist")
+        best = {
+            "ligands": [drug],
+            "oligomer_analysis": {"nonpolymer_instance_index": {"ZMA": [_inst("A", "500", "B")]}},
+        }
+        mv = {
+            "ligand_copies": [_pc("A:500", SITE_REF_UNKNOWN)],
+            "ligands": [_sm_lig("ZMA", SITE_REF_ORTHOSTERIC, is_functional=None)],
+        }
+        _rebuild_small_molecule_rows_from_per_copy(best, mv)
+        assert best["ligands"] == [drug]  # identical object, untouched
+
+    def test_partial_unknown_keeps_real_site_and_leaves_unknown_to_surface(self):
+        # Some copies voted a real site, one voted 'unknown'. The real-site row is
+        # rebuilt; the unknown copy is not dropped -- it stays in the shipped
+        # per-copy list for the CSV writer's homeless bucket to surface.
+        best = {
+            "ligands": [_sm_lig("CLR", SITE_REF_MEMBRANE_FACING, is_functional=True)],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "CLR": [_inst("R", "602", "F"), _inst("R", "603", "G")]
+                }
+            },
+        }
+        mv = {
+            "ligand_copies": [
+                _pc("R:602", SITE_REF_MEMBRANE_FACING),
+                _pc("R:603", SITE_REF_UNKNOWN),
+            ],
+            "ligands": [_sm_lig("CLR", SITE_REF_MEMBRANE_FACING, is_functional=True)],
+        }
+        _rebuild_small_molecule_rows_from_per_copy(best, mv)
+        assert _rows(best) == [("CLR", SITE_REF_MEMBRANE_FACING, True)]
+        assert best["ligand_copies"] == mv["ligand_copies"]  # unknown copy retained
+
+    def test_keyless_ligand_passed_through_in_place(self):
+        # A keyless entity (peptide / apo, no chem_comp_id) is passed through
+        # untouched and keeps its position relative to a rebuilt small molecule.
+        peptide = _lig(chem_comp_id=None, name="Stalk peptide", validation_status="MATCHED_POLYMER")
+        best = {
+            "ligands": [
+                peptide,
+                _sm_lig("CLR", SITE_REF_MEMBRANE_FACING, is_functional=True),
+            ],
+            "oligomer_analysis": {"nonpolymer_instance_index": {"CLR": [_inst("R", "602", "F")]}},
+        }
+        mv = {
+            "ligand_copies": [_pc("R:602", SITE_REF_MEMBRANE_FACING)],
+            "ligands": [_sm_lig("CLR", SITE_REF_MEMBRANE_FACING, is_functional=True)],
+        }
+        _rebuild_small_molecule_rows_from_per_copy(best, mv)
+        assert best["ligands"][0] is peptide
+        assert _rows(best)[1] == ("CLR", SITE_REF_MEMBRANE_FACING, True)
+
+    def test_no_per_copy_votes_leaves_record_untouched(self):
+        # Pre-feature data (no per-copy list) -> the whole ligand list ships as-is.
+        original = [_sm_lig("CLR", SITE_REF_MEMBRANE_FACING, is_functional=False)]
+        best = {"ligands": list(original), "oligomer_analysis": {"nonpolymer_instance_index": {}}}
+        _rebuild_small_molecule_rows_from_per_copy(best, {"ligand_copies": []})
+        assert best["ligands"] == original
+        assert "ligand_copies" not in best
+
+    def test_missing_instance_index_leaves_record_untouched(self):
+        # Without a nonpolymer instance index there is no copy->component map, so
+        # the rebuild cannot run and the list ships unchanged.
+        original = [_sm_lig("CLR", SITE_REF_MEMBRANE_FACING, is_functional=False)]
+        best = {"ligands": list(original), "oligomer_analysis": {}}
+        mv = {"ligand_copies": [_pc("R:602", SITE_REF_MEMBRANE_FACING)]}
+        _rebuild_small_molecule_rows_from_per_copy(best, mv)
+        assert best["ligands"] == original
+
+    def test_combines_with_csv_writer_repartition_no_inflation(self):
+        # End-to-end: the rebuilt rows plus the CSV writer's per-site partition
+        # must compose -- each site row lists only its own copies, with no homeless
+        # "(?)" inflation on a sibling row.
+        from gpcr_tools.csv_generator.csv_writer import transform_for_csv
+
+        best = {
+            "ligands": [
+                _sm_lig("CLR", SITE_REF_ALLOSTERIC_7TM, is_functional=True),
+                _sm_lig("CLR", SITE_REF_MEMBRANE_FACING, is_functional=False),
+            ],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "CLR": [
+                        _inst("R", "602", "F"),
+                        _inst("R", "603", "G"),
+                        _inst("R", "604", "H"),
+                    ]
+                }
+            },
+        }
+        mv = {
+            "ligand_copies": [
+                _pc("R:602", SITE_REF_ALLOSTERIC_7TM),
+                _pc("R:603", SITE_REF_MEMBRANE_FACING),
+                _pc("R:604", SITE_REF_MEMBRANE_FACING),
+            ],
+            "ligands": [
+                _sm_lig("CLR", SITE_REF_ALLOSTERIC_7TM, is_functional=True),
+                _sm_lig("CLR", SITE_REF_MEMBRANE_FACING, is_functional=True),
+            ],
+        }
+        _rebuild_small_molecule_rows_from_per_copy(best, mv)
+        rows = transform_for_csv("XXXX", best)["ligands.csv"]
+        by_site = {r["Site"]: r for r in rows}
+        assert set(by_site) == {SITE_REF_ALLOSTERIC_7TM, SITE_REF_MEMBRANE_FACING}
+        assert by_site[SITE_REF_ALLOSTERIC_7TM]["Residue_seq_id"] == "R:602"
+        assert by_site[SITE_REF_MEMBRANE_FACING]["Residue_seq_id"] == "R:603, R:604"
+        assert not any("(?)" in r["Residue_seq_id"] for r in rows)
+
+    def test_best_run_false_row_with_null_majority_stays_dropped(self):
+        # 7D77-shaped: a post-prune row the best run judged non-functional (False)
+        # whose majority verdict is "not assessed" (null). A null majority must NOT
+        # overwrite the False, so the row stays dropped and its copies follow it out
+        # -- the surviving sibling keeps only its own copy, no "(?)" inflation.
+        from gpcr_tools.csv_generator.csv_writer import transform_for_csv
+
+        best = {
+            "ligands": [
+                _sm_lig("CLR", SITE_REF_ALLOSTERIC_7TM, is_functional=True),
+                _sm_lig("CLR", SITE_REF_MEMBRANE_FACING, is_functional=False),
+            ],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "CLR": [_inst("R", "602", "F"), _inst("R", "603", "G")]
+                }
+            },
+        }
+        mv = {
+            "ligand_copies": [
+                _pc("R:602", SITE_REF_ALLOSTERIC_7TM),
+                _pc("R:603", SITE_REF_MEMBRANE_FACING),
+            ],
+            # No membrane majority vote -> null -> must not lift the best-run False.
+            "ligands": [_sm_lig("CLR", SITE_REF_ALLOSTERIC_7TM, is_functional=True)],
+        }
+        _rebuild_small_molecule_rows_from_per_copy(best, mv)
+        assert _rows(best) == [
+            ("CLR", SITE_REF_ALLOSTERIC_7TM, True),
+            ("CLR", SITE_REF_MEMBRANE_FACING, False),  # stayed dropped, not lifted to null
+        ]
+        rows = transform_for_csv("XXXX", best)["ligands.csv"]
+        assert [r["Site"] for r in rows] == [SITE_REF_ALLOSTERIC_7TM]
+        assert rows[0]["Residue_seq_id"] == "R:602"
+        assert "(?)" not in rows[0]["Residue_seq_id"]
+
+    def test_site_pruned_from_component_that_survives_elsewhere_not_revived(self):
+        # 7D76/7D77-shaped: the component survives post-prune at one site
+        # (intracellular, an incidental lipid rescued as functional) but was
+        # buffer-pruned at another (membrane). The per-copy votes place copies at
+        # the pruned membrane site with only a null majority -- that site must NOT be
+        # revived as a shipped row by borrowing the surviving site's template. Its
+        # copies leave via a dropped follow-out marker (no "(?)" inflation), and the
+        # marker's chain_id is derived from those copies, not the template chain.
+        from gpcr_tools.csv_generator.csv_writer import transform_for_csv
+
+        best = {
+            "ligands": [
+                # PLM survives post-prune only at intracellular (rescued as functional);
+                # its membrane site was buffer-pruned, so it is absent from the list.
+                _sm_lig("PLM", SITE_REF_INTRACELLULAR, is_functional=True, chain_id="A")
+            ],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "PLM": [_inst("A", "401", "E"), _inst("R", "602", "G"), _inst("R", "603", "H")]
+                }
+            },
+        }
+        mv = {
+            "ligand_copies": [
+                _pc("A:401", SITE_REF_INTRACELLULAR),
+                _pc("R:602", SITE_REF_MEMBRANE_FACING),
+                _pc("R:603", SITE_REF_MEMBRANE_FACING),
+            ],
+            "ligands": [
+                _sm_lig("PLM", SITE_REF_INTRACELLULAR, is_functional=True),
+                # membrane: no majority verdict -> null; no post-prune row either.
+            ],
+        }
+        _rebuild_small_molecule_rows_from_per_copy(best, mv)
+        assert _rows(best) == [
+            ("PLM", SITE_REF_INTRACELLULAR, True),
+            ("PLM", SITE_REF_MEMBRANE_FACING, False),  # dropped follow-out marker
+        ]
+        rows = transform_for_csv("XXXX", best)["ligands.csv"]
+        # Only the surviving intracellular row ships; the pruned membrane site is not
+        # revived, and its copies leave with the marker instead of piling on as (?).
+        assert [r["Site"] for r in rows] == [SITE_REF_INTRACELLULAR]
+        assert rows[0]["Residue_seq_id"] == "A:401"
+        assert "(?)" not in rows[0]["Residue_seq_id"]
+
+    def test_majority_true_row_with_no_per_copy_support_is_kept(self):
+        # 8XQL/GOQ-shaped: two majority-True functional rows (allosteric + a second
+        # site), but the per-copy votes only reach the second site (the allosteric
+        # copy the best run filed there is, by majority, at the other site). The
+        # allosteric functional row must NOT be silently deleted for want of a
+        # placed copy; it is kept (with chain derived from its -- empty -- copy set).
+        best = {
+            "ligands": [
+                _sm_lig("GOQ", SITE_REF_ALLOSTERIC_7TM, is_functional=True, chain_id="R"),
+                _sm_lig("GOQ", SITE_REF_INTRACELLULAR, is_functional=True, chain_id="R"),
+            ],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "GOQ": [_inst("R", "501", "F"), _inst("R", "502", "G")]
+                }
+            },
+        }
+        mv = {
+            "ligand_copies": [
+                _pc("R:501", SITE_REF_INTRACELLULAR),
+                _pc("R:502", SITE_REF_INTRACELLULAR),
+            ],
+            "ligands": [
+                _sm_lig("GOQ", SITE_REF_ALLOSTERIC_7TM, is_functional=True),
+                _sm_lig("GOQ", SITE_REF_INTRACELLULAR, is_functional=True),
+            ],
+        }
+        _rebuild_small_molecule_rows_from_per_copy(best, mv)
+        assert _rows(best) == [
+            ("GOQ", SITE_REF_ALLOSTERIC_7TM, True),  # kept, not deleted
+            ("GOQ", SITE_REF_INTRACELLULAR, True),
+        ]
+        by_site = {lig["site_ref"]: lig for lig in best["ligands"]}
+        # The covered row's chain is derived from its two copies; the uncovered row
+        # has no placed copy, so its chain is empty (matching its empty residues).
+        assert by_site[SITE_REF_INTRACELLULAR]["chain_id"] == "R"
+        assert by_site[SITE_REF_ALLOSTERIC_7TM]["chain_id"] == ""
+
+    def test_rebuilt_row_chain_id_derived_from_copy_chains(self):
+        # 4WW3-shaped: the post-prune template carries a single-chain chain_id, but
+        # the copies grouped onto the site span two chains. The rebuilt row's
+        # chain_id is re-derived from the copies' author chains (sorted, de-duped),
+        # not inherited from the template.
+        best = {
+            "ligands": [_sm_lig("TWT", SITE_REF_MEMBRANE_FACING, is_functional=True, chain_id="B")],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "TWT": [_inst("A", "301", "F"), _inst("B", "301", "G")]
+                }
+            },
+        }
+        mv = {
+            "ligand_copies": [
+                _pc("B:301", SITE_REF_MEMBRANE_FACING),
+                _pc("A:301", SITE_REF_MEMBRANE_FACING),
+            ],
+            "ligands": [_sm_lig("TWT", SITE_REF_MEMBRANE_FACING, is_functional=True)],
+        }
+        _rebuild_small_molecule_rows_from_per_copy(best, mv)
+        assert best["ligands"][0]["chain_id"] == "A, B"
+
+    def test_flagship_7e2x_cholesterol_row_contract(self):
+        # 7E2X flagship: 10 cholesterol copies, one an allosteric PAM and the rest
+        # membrane structural lipid. The best run split them into two rows but the
+        # majority judges the membrane row non-functional. After the rebuild + CSV
+        # partition the membrane row is dropped and takes its copies with it, so a
+        # single cholesterol row ships (the allosteric PAM) with exactly its one
+        # copy and zero "(?)" inflation.
+        from gpcr_tools.csv_generator.csv_writer import transform_for_csv
+
+        membrane_copies = [_inst("R", str(602 + i), chr(ord("F") + i)) for i in range(10)]
+        best = {
+            "ligands": [
+                _sm_lig("CLR", SITE_REF_ALLOSTERIC_7TM, is_functional=True),
+                _sm_lig("CLR", SITE_REF_MEMBRANE_FACING, is_functional=None),
+            ],
+            "oligomer_analysis": {"nonpolymer_instance_index": {"CLR": membrane_copies}},
+        }
+        mv = {
+            "ligand_copies": [_pc("R:602", SITE_REF_ALLOSTERIC_7TM)]
+            + [_pc(f"R:{603 + i}", SITE_REF_MEMBRANE_FACING) for i in range(9)],
+            "ligands": [
+                _sm_lig("CLR", SITE_REF_ALLOSTERIC_7TM, is_functional=True),
+                _sm_lig("CLR", SITE_REF_MEMBRANE_FACING, is_functional=False),  # majority
+            ],
+        }
+        _rebuild_small_molecule_rows_from_per_copy(best, mv)
+        rows = transform_for_csv("7E2X", best)["ligands.csv"]
+        clr_rows = [r for r in rows if r["Name"] == "CLR"]
+        assert len(clr_rows) == 1
+        assert clr_rows[0]["Site"] == SITE_REF_ALLOSTERIC_7TM
+        assert clr_rows[0]["Residue_seq_id"] == "R:602"
+        assert not any("(?)" in r["Residue_seq_id"] for r in rows)
+
+    def test_revived_row_role_and_narrative_come_from_majority_not_sibling(self):
+        # 7V3Z / 7XBX-shaped: the best run kept ONE cholesterol row (allosteric_7tm,
+        # a PAM with pocket-specific justification prose). The majority attributes
+        # extra copies to a second site (membrane_facing) whose voted role is a
+        # different value (Cofactor) and whose narrative fields are un-votable (null).
+        # The revived membrane row must borrow only CHEMISTRY from the surviving
+        # allosteric template -- its role.value, evidence, and site_ref_justification
+        # must come from the membrane majority vote (Cofactor / cleared), never the
+        # allosteric sibling's "PAM" + "groove between TM2-4" prose.
+        allosteric_template = _sm_lig(
+            "CLR",
+            SITE_REF_ALLOSTERIC_7TM,
+            is_functional=True,
+            name="CHOLESTEROL",
+            SMILES="C(sibling)",
+            InChIKey="HVYWMOMLDIMFJA-DPAQBDIFSA-N",
+            site_ref_justification="Binds a discrete pocket (groove between TM2-4).",
+        )
+        allosteric_template["role"] = {
+            "value": "PAM",
+            "confidence": "High",
+            "evidence": {"reasoning": "acts as a PAM", "source": "Paper"},
+        }
+        allosteric_template["pharmacological_role_check"] = {
+            "is_functional_ligand": True,
+            "confidence": "High",
+            "evidence": "described as a functional PAM",
+        }
+        best = {
+            "ligands": [allosteric_template],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "CLR": [_inst("A", "601", "F"), _inst("A", "602", "G")]
+                }
+            },
+        }
+        # The membrane majority: a DIFFERENT role value, un-votable soft fields
+        # nulled by the voting stage.
+        mv_membrane = _sm_lig(
+            "CLR", SITE_REF_MEMBRANE_FACING, is_functional=True, site_ref_justification=None
+        )
+        mv_membrane["role"] = {"value": "Cofactor", "confidence": None, "evidence": None}
+        mv_membrane["pharmacological_role_check"] = {
+            "is_functional_ligand": True,
+            "confidence": None,
+            "evidence": None,
+        }
+        mv = {
+            "ligand_copies": [
+                _pc("A:601", SITE_REF_ALLOSTERIC_7TM, role="PAM"),
+                _pc("A:602", SITE_REF_MEMBRANE_FACING, role="Cofactor"),
+            ],
+            "ligands": [
+                _sm_lig("CLR", SITE_REF_ALLOSTERIC_7TM, is_functional=True),
+                mv_membrane,
+            ],
+        }
+        _rebuild_small_molecule_rows_from_per_copy(best, mv)
+        by_site = {lig["site_ref"]: lig for lig in best["ligands"]}
+        membrane = by_site[SITE_REF_MEMBRANE_FACING]
+        # P1: the revived row's decision fields are the membrane majority's, NOT the
+        # allosteric sibling template's.
+        assert membrane["role"]["value"] == "Cofactor"
+        assert membrane["pharmacological_role_check"]["is_functional_ligand"] is True
+        # P2: the sibling site's explanatory prose does NOT ride along.
+        assert membrane["role"]["evidence"] is None
+        assert membrane.get("site_ref_justification") is None
+        assert membrane["pharmacological_role_check"]["evidence"] is None
+        assert "TM2-4" not in json.dumps(membrane)
+        # Chemistry (component-intrinsic) still comes from the surviving template.
+        assert membrane["name"] == "CHOLESTEROL"
+        assert membrane["SMILES"] == "C(sibling)"
+        assert membrane["InChIKey"] == "HVYWMOMLDIMFJA-DPAQBDIFSA-N"
+        # The surviving anchor row is untouched (its own site's decision + prose).
+        assert by_site[SITE_REF_ALLOSTERIC_7TM]["role"]["value"] == "PAM"
+
+    def test_dropped_marker_narrative_cleared_when_no_majority_entry(self):
+        # A dropped follow-out marker built for a site with NO majority ligand entry
+        # (a structural lipid the prune removed) must not display the borrowed
+        # sibling site's role/prose on the curator panel: role is cleared to None and
+        # every narrative field is empty, even though it borrows the sibling chemistry.
+        template = _sm_lig(
+            "PLM",
+            SITE_REF_INTRACELLULAR,
+            is_functional=True,
+            name="PALMITATE",
+            site_ref_justification="Buried in the intracellular cavity.",
+        )
+        template["role"] = {
+            "value": "Cofactor",
+            "evidence": {"reasoning": "coordinates the pocket"},
+        }
+        best = {
+            "ligands": [template],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "PLM": [_inst("A", "401", "E"), _inst("R", "602", "G")]
+                }
+            },
+        }
+        mv = {
+            "ligand_copies": [
+                _pc("A:401", SITE_REF_INTRACELLULAR),
+                _pc("R:602", SITE_REF_MEMBRANE_FACING),
+            ],
+            # No PLM:membrane_facing vote -> null -> the marker gets cleared narrative.
+            "ligands": [_sm_lig("PLM", SITE_REF_INTRACELLULAR, is_functional=True)],
+        }
+        _rebuild_small_molecule_rows_from_per_copy(best, mv)
+        marker = {lig["site_ref"]: lig for lig in best["ligands"]}[SITE_REF_MEMBRANE_FACING]
+        assert marker["pharmacological_role_check"]["is_functional_ligand"] is False  # dropped
+        assert marker["role"] is None
+        assert marker.get("site_ref_justification") is None
+        assert "intracellular cavity" not in json.dumps(marker)
+        assert marker["name"] == "PALMITATE"  # chemistry still borrowed
+
+    def test_rebuild_does_not_mutate_majority_votes(self):
+        # The rebuild consumes majority_votes to source per-site decisions but must
+        # NEVER mutate it: the same vote structure feeds the discrepancy pass /
+        # voting log, and an in-place edit here would corrupt that shared state.
+        best = {
+            "ligands": [
+                _sm_lig("CLR", SITE_REF_ALLOSTERIC_7TM, is_functional=True),
+                _sm_lig("CLR", SITE_REF_MEMBRANE_FACING, is_functional=False),  # outlier
+            ],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "CLR": [_inst("R", "602", "F"), _inst("R", "603", "G")]
+                }
+            },
+        }
+        mv = {
+            "ligand_copies": [
+                _pc("R:602", SITE_REF_ALLOSTERIC_7TM),
+                _pc("R:603", SITE_REF_MEMBRANE_FACING),
+            ],
+            "ligands": [
+                _sm_lig("CLR", SITE_REF_ALLOSTERIC_7TM, is_functional=True),
+                _sm_lig("CLR", SITE_REF_MEMBRANE_FACING, is_functional=True),  # revives sibling
+            ],
+        }
+        mv_before = copy.deepcopy(mv)
+        _rebuild_small_molecule_rows_from_per_copy(best, mv)
+        assert mv == mv_before  # untouched, deep-equal
+
+    def test_discrepancy_gate_survives_rebuild_value_flip(self):
+        # P3 core: mirror the runner's step 9 -> step 10c order. The best run judged
+        # a ligand non-functional (is_functional False); the majority says True. The
+        # discrepancy is computed FIRST (step 9). Then the rebuild (step 10c) stamps
+        # the shipped row to the majority True -- making the shipped value AGREE with
+        # the majority. The already-computed discrepancy must still be present and
+        # unchanged: the review gate must NOT vanish just because the rebuild
+        # reconciled the shipped value.
+        best = {
+            "ligands": [
+                # best-run outlier verdict: non-functional (role matches majority so
+                # the ONLY discrepancy is the is_functional verdict).
+                _sm_lig("CLR", SITE_REF_ALLOSTERIC_7TM, is_functional=False)
+            ],
+            "oligomer_analysis": {"nonpolymer_instance_index": {"CLR": [_inst("R", "602", "F")]}},
+        }
+        mv = {
+            "ligand_copies": [_pc("R:602", SITE_REF_ALLOSTERIC_7TM)],
+            "ligands": [
+                # majority verdict disagrees with the best run: functional.
+                _sm_lig("CLR", SITE_REF_ALLOSTERIC_7TM, is_functional=True)
+            ],
+        }
+
+        # Step 9: discrepancies computed on the PRE-rebuild best run.
+        discrepancies = find_discrepancies(best, mv, {})
+        isfunc_disc = [d for d in discrepancies if d["path"].endswith("is_functional_ligand")]
+        assert len(isfunc_disc) == 1
+        assert isfunc_disc[0]["best_run_value"] is False
+        assert isfunc_disc[0]["majority_vote_value"] is True
+        discrepancies_snapshot = copy.deepcopy(discrepancies)
+
+        # Step 10c: the rebuild reconciles the shipped row to the majority verdict.
+        _rebuild_small_molecule_rows_from_per_copy(best, mv)
+        prc = best["ligands"][0]["pharmacological_role_check"]
+        assert prc["is_functional_ligand"] is True  # shipped value now agrees
+
+        # The gate is unchanged: the disagreement the curator must see is still there.
+        assert discrepancies == discrepancies_snapshot
+        assert [d for d in discrepancies if d["path"].endswith("is_functional_ligand")]

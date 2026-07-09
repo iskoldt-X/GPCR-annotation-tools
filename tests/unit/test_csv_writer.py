@@ -931,6 +931,38 @@ class TestPerSiteResidueFiltering:
         assert "R:601" in residue
         assert "R:602 (?)" in residue
 
+    def test_copy_follows_a_dropped_nonfunctional_row_out(self, sample_pdb_data):
+        # A cholesterol modelled at two sites where the membrane row was judged
+        # non-functional (dropped). Its copy must follow that row OUT of the CSV --
+        # neither placed nor tagged onto the surviving allosteric row. This is the
+        # difference from the orphan case above: here a DROPPED row exists for the
+        # voted site, so the copy is dropped rather than surfaced as homeless.
+        sample_pdb_data["oligomer_analysis"] = {
+            "nonpolymer_instance_index": {
+                "CLR": [
+                    {"auth_asym_id": "R", "label_asym_id": "F", "auth_seq_id": "601"},
+                    {"auth_asym_id": "R", "label_asym_id": "G", "auth_seq_id": "602"},
+                ]
+            }
+        }
+        sample_pdb_data["ligand_copies"] = [
+            {"copy_id": "R:601", "site_ref": "allosteric_7tm", "role": {"value": "Cofactor"}},
+            {"copy_id": "R:602", "site_ref": "membrane_facing", "role": {"value": "Cofactor"}},
+        ]
+        sample_pdb_data["ligands"] = [
+            self._lig("allosteric_7tm"),
+            self._lig(
+                "membrane_facing",
+                pharmacological_role_check={"is_functional_ligand": False},  # dropped
+            ),
+        ]
+        rows = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"]
+        # Only the allosteric row ships; the membrane row is dropped.
+        assert [r["Site"] for r in rows] == ["allosteric_7tm"]
+        # Its copy follows the dropped row out: allosteric keeps only R:601, no tag.
+        assert rows[0]["Residue_seq_id"] == "R:601"
+        assert "(?)" not in rows[0]["Residue_seq_id"]
+
     def test_no_ligand_copies_matches_current_behavior(self, sample_pdb_data):
         # Regression guard: with NO ligand_copies on the record, the residue column
         # must be the full component-id join on every row -- byte-identical to the
@@ -1001,12 +1033,13 @@ class TestPerSiteResidueFiltering:
         assert by_site["membrane_facing"]["label_asym_id"] == "G"
         assert by_site["membrane_facing"]["Residue_seq_id"] == "R:602"
 
-    def test_copy_on_dropped_sibling_row_not_lost(self, sample_pdb_data):
-        # A compound's copy must not vanish when its matched site's row is a sibling
-        # the writer loop skips. CLR with 3 copies: 2 voted to a NON-functional
-        # 'membrane_facing' row + 1 to a functional row. The non-functional row is
-        # dropped, but its 2 copies must still be surfaced (tagged) on the surviving
-        # row of the same compound -- never silently dropped.
+    def test_copies_follow_a_dropped_nonfunctional_sibling_row_out(self, sample_pdb_data):
+        # When a compound's site row is dropped as non-functional, the copies voted
+        # to that site follow the row OUT of the CSV rather than piling onto the
+        # surviving sibling row as tagged homeless copies. CLR with 3 copies: 2
+        # voted to a NON-functional 'membrane_facing' row + 1 to a functional
+        # 'orthosteric' row. The non-functional row (and its 2 copies) are dropped;
+        # the surviving row lists ONLY its own copy, with no "(?)" inflation.
         sample_pdb_data["oligomer_analysis"] = {
             "nonpolymer_instance_index": {
                 "CLR": [
@@ -1031,13 +1064,9 @@ class TestPerSiteResidueFiltering:
         # Non-functional sibling dropped -> only the functional row survives.
         assert len(rows) == 1
         residue = rows[0]["Residue_seq_id"]
-        # No copy disappears: the attributed copy is clean; the two whose site's row
-        # was dropped are tagged rather than lost.
-        assert "R:601" in residue
-        assert "R:601 (?)" not in residue
-        assert "R:602 (?)" in residue
-        assert "R:603 (?)" in residue
-        # label stays 1:1 with residue even for the rescued copies.
+        # The copies of the dropped row follow it out; the surviving row is clean.
+        assert residue == "R:601"
+        assert "(?)" not in residue
         assert len(rows[0]["label_asym_id"].split(", ")) == len(residue.split(", "))
 
 

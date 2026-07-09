@@ -61,11 +61,14 @@ from gpcr_tools.config import (
     FULL_G_ALPHA_CANDIDATES,
     LOW_CONFIDENCE_LEVELS,
     POLYMER_FEATURES_CACHE_NAME,
+    SITE_REF_UNKNOWN,
     SUBTYPE_BASIS_CONSTRUCT_NAME,
     SUBTYPE_BASIS_FAMILY_VERIFIED,
     SUBTYPE_BASIS_RESOLVED,
     VALIDATION_EXCLUDED_BUFFER,
     get_config,
+    is_empty_key,
+    list_item_identity,
 )
 from gpcr_tools.detector.signals import (
     SIGNAL_CHIMERIC_GPROTEIN,
@@ -247,6 +250,278 @@ def _is_excluded_buffer_drop(lig: dict[str, Any]) -> bool:
     prc = lig.get("pharmacological_role_check")
     rescued = isinstance(prc, dict) and prc.get("is_functional_ligand") is True
     return not rescued
+
+
+def _copy_token(value: Any) -> str:
+    """Normalise a copy-identifier fragment to the spelling the CSV writer uses.
+
+    A copy identifier is ``"<auth_asym_id>:<auth_seq_id>"`` built with ``str().strip()``
+    on each side, so the reverse index below keys on exactly the tokens the per-copy
+    ``copy_id`` votes and the CSV residue tokens carry.
+    """
+    return "" if value is None else str(value).strip()
+
+
+def _copy_chain(copy_id: Any) -> str:
+    """Author chain id from a per-copy identifier ``"<auth_asym_id>:<auth_seq_id>"``."""
+    token = _copy_token(copy_id)
+    return token.split(":", 1)[0] if ":" in token else token
+
+
+def _stamp_is_functional(row: dict[str, Any], value: Any) -> None:
+    """Set ``pharmacological_role_check.is_functional_ligand`` on *row* in place."""
+    prc = row.get("pharmacological_role_check")
+    if not isinstance(prc, dict):
+        prc = {}
+        row["pharmacological_role_check"] = prc
+    prc["is_functional_ligand"] = value
+
+
+# Per-site decision + narrative fields on a ligand row. Everything else a ligand
+# row carries (name / SMILES / InChIKey / pubchem / type / is_endogenous /
+# validation_status / synonyms) is component-intrinsic chemistry that travels with
+# the compound regardless of which site the copy sits at. These three keys are the
+# ones that describe a SPECIFIC binding site: the voted decision (``role.value`` and
+# ``pharmacological_role_check.is_functional_ligand``) and the free-text prose that
+# explains that decision (``role.evidence`` / ``pharmacological_role_check.evidence``
+# / ``site_ref_justification`` -- all in ``config.SOFT_FIELD_KEYS`` as explanatory,
+# never-voted writing). When a row is rebuilt by borrowing another site's chemistry
+# template, these must NOT ride along from that sibling site.
+_PER_SITE_DECISION_KEYS: tuple[str, ...] = (
+    "role",
+    "pharmacological_role_check",
+    "site_ref_justification",
+)
+
+
+def _apply_per_site_from_majority(row: dict[str, Any], mv_entry: Any) -> None:
+    """Replace *row*'s per-site decision + narrative fields with the majority vote.
+
+    A rebuilt/revived row borrows its chemistry from a surviving row of the SAME
+    compound at ANOTHER site (the only place the enriched chemistry lives), so that
+    template's ``role`` / ``pharmacological_role_check`` / ``site_ref_justification``
+    describe the wrong site. Overwrite them with the majority-voted values for THIS
+    ``component:site`` identity, which already carry the voted decision (role.value,
+    is_functional_ligand) with the un-votable soft fields (evidence / confidence /
+    justification) nulled out by the voting stage. When no majority entry exists for
+    this identity, clear them to ``None`` -- an honest "not assessed" rather than the
+    sibling site's prose. The caller stamps the final ``is_functional_ligand`` after
+    this (True to revive, False for a dropped follow-out marker).
+    """
+    for key in _PER_SITE_DECISION_KEYS:
+        row[key] = copy.deepcopy(mv_entry.get(key)) if isinstance(mv_entry, dict) else None
+
+
+def _rebuild_small_molecule_rows_from_per_copy(
+    best_run_data: dict[str, Any],
+    majority_votes: Any,
+) -> None:
+    """Re-derive small-molecule ligand rows from the aggregated per-copy site votes.
+
+    The shipped ligand list is otherwise taken verbatim from the single selected
+    best run, whose per-copy site attribution can be an outlier: a physical copy
+    then lands on the wrong binding-site row -- one row inflated with copies that
+    belong elsewhere, or a whole row dropped so its copies have nowhere to go. This
+    step re-anchors each keyed small molecule on its post-prune rows and uses the
+    aggregated (majority-voted) per-copy attribution only to move copies onto the
+    site the runs agreed on, revive a row an outlier best run wrongly dropped, and
+    let a copy follow a dropped row out.
+
+    Runs as the final aggregation step, AFTER discrepancy detection (so the
+    best-run-vs-majority review gate is already computed against the original best
+    run and preserved) and AFTER the excluded-buffer prune (so the post-prune list
+    is the chemistry-and-existence source). Only the shipped / CSV ligand list is
+    rebuilt; nothing the discrepancy pass compared is rewritten.
+
+    The rule, per ``(component, binding-site)`` of a keyed small molecule that has
+    at least one mapped per-copy group and a surviving post-prune chemistry
+    template (everything else -- keyless peptide/glycan/apo rows, and components the
+    buffer prune removed entirely -- passes through untouched):
+
+    * ``is_functional_ligand`` follows the in-memory majority vote for that exact
+      ``component:site`` identity (never the on-disk voting log, which records only
+      disagreements, nor the best run's own outlier verdict): a majority **True**
+      keeps/revives the row, **False** makes the CSV writer drop it and follow its
+      copies out, and a majority **null** ("not assessed" / no such vote) does NOT
+      overwrite -- the row keeps whatever verdict the post-prune row itself carried.
+    * The row set is anchored on the post-prune rows. A post-prune row is kept
+      (revived if the majority says True over an outlier drop). A per-copy group at
+      a site with **no** post-prune row of that component is only turned into a
+      shipped row when the majority explicitly says True; a group whose majority is
+      null/False builds only a dropped follow-out marker (never a shipped row), so
+      structural-lipid copies leave with it instead of flooding a surviving sibling.
+      A post-prune row of the component whose site no per-copy group covers is kept
+      as-is unless the majority says False -- so a real functional row the per-copy
+      votes simply did not reach is never silently deleted.
+    * ``chain_id`` is re-derived from the author chains of the copies actually
+      grouped onto that site (empty when none), so it reflects the physical copies
+      rather than an inherited template chain set.
+
+    Finally the record's ``ligand_copies`` is set to the majority-voted list, so the
+    CSV writer re-partitions each row's copies from the same voted attribution.
+    """
+    ligands = best_run_data.get("ligands")
+    if not isinstance(ligands, list):
+        return
+    if not isinstance(majority_votes, dict):
+        return
+    voted_copies = majority_votes.get("ligand_copies")
+    if not isinstance(voted_copies, list) or not voted_copies:
+        return  # no per-copy attribution to rebuild from -> ship best run as-is
+
+    instance_index = (best_run_data.get("oligomer_analysis") or {}).get("nonpolymer_instance_index")
+    if not isinstance(instance_index, dict):
+        return
+
+    # Reverse index: copy identifier -> component id, from the structure's roster.
+    token_to_comp: dict[str, str] = {}
+    for comp_id, instances in instance_index.items():
+        if not isinstance(comp_id, str) or not isinstance(instances, list):
+            continue
+        for inst in instances:
+            if not isinstance(inst, dict):
+                continue
+            token = (
+                f"{_copy_token(inst.get('auth_asym_id'))}:{_copy_token(inst.get('auth_seq_id'))}"
+            )
+            token_to_comp[token] = comp_id
+
+    # Post-prune chemistry: a representative row per component (chemistry is
+    # component-intrinsic, used only when a per-copy group has no exact per-site
+    # row), the exact per-site row keyed by its component:site identity, and the
+    # component's own set of post-prune site identities (its anchor rows). Keyed
+    # small molecules only; keyless rows (peptide / glycan / apo) are left out so
+    # they pass through.
+    template_by_comp: dict[str, dict[str, Any]] = {}
+    row_by_ident: dict[str, dict[str, Any]] = {}
+    idents_by_comp: dict[str, set[str]] = {}
+    for lig in ligands:
+        if not isinstance(lig, dict):
+            continue
+        comp_id = _copy_token(lig.get("chem_comp_id"))
+        if is_empty_key(comp_id):
+            continue
+        template_by_comp.setdefault(comp_id, lig)
+        ident = list_item_identity(lig, "chem_comp_id", 0)
+        row_by_ident.setdefault(ident, lig)
+        idents_by_comp.setdefault(comp_id, set()).add(ident)
+
+    # Per component:site ligand identity, from the in-memory vote result: the
+    # majority is_functional (None "not assessed" / no such group keeps; only False
+    # drops) and the full voted entry, so a rebuilt row's per-site decision +
+    # narrative fields come from the majority vote for its OWN site rather than the
+    # sibling-site chemistry template it borrows.
+    isfunc_by_ident: dict[str, Any] = {}
+    mv_ligand_by_ident: dict[str, dict[str, Any]] = {}
+    for idx, entry in enumerate(majority_votes.get("ligands") or []):
+        if not isinstance(entry, dict):
+            continue
+        ident = list_item_identity(entry, "chem_comp_id", idx)
+        prc = entry.get("pharmacological_role_check")
+        isfunc_by_ident[ident] = prc.get("is_functional_ligand") if isinstance(prc, dict) else None
+        mv_ligand_by_ident[ident] = entry
+
+    # Group each physical copy by (component, majority-voted site). 'unknown'/absent
+    # sites are not grouped into a row (they surface via the CSV homeless bucket),
+    # but their component is still recorded so an all-unknown component falls back
+    # to pass-through rather than losing its best-run row.
+    groups: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for copy_row in voted_copies:
+        if not isinstance(copy_row, dict):
+            continue
+        comp_id = token_to_comp.get(_copy_token(copy_row.get("copy_id")))
+        if comp_id is None:
+            continue  # unmappable copy: leave the component's rows to pass-through
+        # Group by the site verbatim (the schema pins it to the shared, all-lowercase
+        # site_ref enum), so the component:site identity built from this site below
+        # matches the one list_item_identity derives from the ligands / majority-vote
+        # entries -- both use the raw enum value, with a case-insensitive unknown test.
+        site = _copy_token(copy_row.get("site_ref"))
+        if not site or site.lower() == SITE_REF_UNKNOWN:
+            continue
+        groups.setdefault(comp_id, {}).setdefault(site, []).append(copy_row)
+
+    # A component is rebuilt only when it has a real-site per-copy group AND a
+    # surviving post-prune chemistry template. Everything else passes through.
+    rebuilt_comps = {c for c in groups if c in template_by_comp}
+    if not rebuilt_comps:
+        # deepcopy so the aggregated record owns its per-copy list rather than
+        # aliasing the in-memory vote structure (which best_run_data is otherwise
+        # fully independent of, being a deepcopy of the selected run).
+        best_run_data["ligand_copies"] = copy.deepcopy(voted_copies)
+        return
+
+    def _chains(copies: list[dict[str, Any]]) -> str:
+        return ", ".join(sorted({c for c in (_copy_chain(r.get("copy_id")) for r in copies) if c}))
+
+    new_ligands: list[Any] = []
+    emitted: set[str] = set()
+    for lig in ligands:
+        comp_id = _copy_token(lig.get("chem_comp_id")) if isinstance(lig, dict) else ""
+        if comp_id not in rebuilt_comps:
+            new_ligands.append(lig)  # keyless / no per-copy / all-unknown: unchanged
+            continue
+        if comp_id in emitted:
+            continue  # this component's rows are all emitted at its first occurrence
+        emitted.add(comp_id)
+
+        voted_sites = groups[comp_id]
+        # Site identity <-> the component:site path, for both the component's own
+        # post-prune rows (its anchors) and its per-copy voted sites.
+        voted_ident_to_site = {
+            list_item_identity({"chem_comp_id": comp_id, "site_ref": site}, "chem_comp_id", 0): site
+            for site in voted_sites
+        }
+        all_idents = sorted(idents_by_comp.get(comp_id, set()) | set(voted_ident_to_site))
+        for ident in all_idents:
+            base = row_by_ident.get(ident)
+            majority = isfunc_by_ident.get(ident)
+            site = voted_ident_to_site.get(ident)
+            copies = voted_sites.get(site, []) if site is not None else []
+            if base is not None:
+                # Anchor row: keep it, re-stamping only a definitive majority verdict
+                # (True revives an outlier drop; False drops it and follows its copies
+                # out; null leaves the post-prune verdict untouched). An anchor row no
+                # per-copy group reached (copies == []) is still kept -- a real
+                # functional row the votes did not cover is never silently deleted.
+                row = copy.deepcopy(base)
+                if majority is True or majority is False:
+                    _stamp_is_functional(row, majority)
+                row["chain_id"] = _chains(copies)
+                new_ligands.append(row)
+            elif majority is True:
+                # No post-prune row here, but the majority explicitly calls it a
+                # functional ligand -> revive it, borrowing only the component's
+                # CHEMISTRY from another site's template. The per-site decision +
+                # narrative (role.value / evidence / justification) come from THIS
+                # site's majority vote, never the borrowed sibling-site template.
+                row = copy.deepcopy(template_by_comp[comp_id])
+                row["chem_comp_id"] = comp_id
+                row["site_ref"] = site
+                _apply_per_site_from_majority(row, mv_ligand_by_ident.get(ident))
+                _stamp_is_functional(row, True)
+                row["chain_id"] = _chains(copies)
+                new_ligands.append(row)
+            elif copies:
+                # No post-prune row and no majority-functional call, but copies vote
+                # here (a structural lipid the prune removed, or a null-verdict group):
+                # emit a dropped follow-out marker -- never shipped -- so those copies
+                # leave with it rather than flooding a surviving sibling as homeless.
+                # Same rule: only chemistry is borrowed; the marker's own per-site
+                # decision + narrative come from the majority vote (empty when none),
+                # so the curator panel never shows another site's prose on it.
+                row = copy.deepcopy(template_by_comp[comp_id])
+                row["chem_comp_id"] = comp_id
+                row["site_ref"] = site
+                _apply_per_site_from_majority(row, mv_ligand_by_ident.get(ident))
+                _stamp_is_functional(row, False)
+                row["chain_id"] = _chains(copies)
+                new_ligands.append(row)
+            # else: no post-prune row, no majority-True, no copies -> nothing to build.
+
+    best_run_data["ligands"] = new_ligands
+    # deepcopy so the aggregated record owns its per-copy list (see note above).
+    best_run_data["ligand_copies"] = copy.deepcopy(voted_copies)
 
 
 def _build_validation_report(
@@ -666,6 +941,7 @@ def aggregate_pdb(
         9. Compute discrepancies
         10. Chimera analysis
         10b. Prune excluded-buffer ligands
+        10c. Rebuild small-molecule rows from per-copy site votes
         11. Assemble validation report
         12. Atomic write block
 
@@ -796,6 +1072,19 @@ def aggregate_pdb(
         # key on comp id -- ligands[<comp_id>] -- so they are position-stable and
         # not the reason for this ordering.)
         _prune_excluded_buffer_ligands(best_run_data)
+
+        # 10c. Re-derive each small-molecule ligand row from the aggregated
+        # per-copy site attribution, so a physical copy is placed on the
+        # binding-site row the runs agreed on rather than inheriting one outlier
+        # run's copy list (which can inflate one row or drop another). Runs AFTER
+        # discrepancy detection (step 9) so the best-run-vs-majority review gate is
+        # already computed and preserved, and AFTER the buffer prune (step 10b) so
+        # the post-prune list is the chemistry-and-existence source. Runs BEFORE
+        # the validation report (step 11) for the same reason the buffer prune
+        # does: the integrity checker emits positional ligands[N] paths that curate
+        # parses into index cleanups, so the ligand list must be in its final shape
+        # before those paths are produced.
+        _rebuild_small_molecule_rows_from_per_copy(best_run_data, majority_votes)
 
         # 11. Assemble validation report
         v_cache = validation_cache if not skip_api_checks else None

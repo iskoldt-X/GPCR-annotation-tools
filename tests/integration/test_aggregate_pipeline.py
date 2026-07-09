@@ -389,6 +389,58 @@ class TestFlags:
 
 
 # ---------------------------------------------------------------------------
+# Per-copy row rebuild ordering (step 9 before step 10c; votes not mutated)
+# ---------------------------------------------------------------------------
+
+
+class TestPerCopyRebuildOrdering:
+    """The per-copy small-molecule row rebuild (step 10c) runs AFTER discrepancy
+    detection (step 9) and never mutates the shared majority-vote structure, so the
+    best-run-vs-majority review gate is computed on the pre-rebuild best run and
+    preserved (a rebuild that reconciles a shipped value to the majority must not
+    make the already-computed disagreement vanish)."""
+
+    def test_discrepancies_computed_before_rebuild_and_votes_not_mutated(
+        self, aggregate_workspace: Path
+    ) -> None:
+        import copy
+
+        from gpcr_tools.aggregator import runner as runner_mod
+
+        real_find = runner_mod.find_discrepancies
+        real_rebuild = runner_mod._rebuild_small_molecule_rows_from_per_copy
+        calls: list[str] = []
+        mv_mutated: list[bool] = []
+
+        def spy_find(best_run_data, majority_data, all_votes_data, path=""):
+            calls.append("find_discrepancies")
+            return real_find(best_run_data, majority_data, all_votes_data, path)
+
+        def spy_rebuild(best_run_data, majority_votes):
+            calls.append("rebuild")
+            before = copy.deepcopy(majority_votes)
+            out = real_rebuild(best_run_data, majority_votes)
+            mv_mutated.append(majority_votes != before)
+            return out
+
+        with (
+            patch("gpcr_tools.validator.oligomer.scan_all_chains_7tm", return_value=({}, None)),
+            patch.object(runner_mod, "find_discrepancies", spy_find),
+            patch.object(runner_mod, "_rebuild_small_molecule_rows_from_per_copy", spy_rebuild),
+        ):
+            result = aggregate_pdb("TEST1", skip_api_checks=True)
+
+        assert result.success is True
+        # Both steps ran, and discrepancy detection (step 9) came strictly before the
+        # per-copy rebuild (step 10c).
+        assert "find_discrepancies" in calls and "rebuild" in calls
+        assert calls.index("find_discrepancies") < calls.index("rebuild")
+        # The rebuild consumed the majority votes without mutating them (the vote
+        # structure the voting log / gate is built from stays intact).
+        assert mv_mutated == [False]
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
