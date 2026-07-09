@@ -714,9 +714,11 @@ LIGAND_EXCLUDE_LIST: frozenset[str] = frozenset(
         "FE",
         "HG",
         "CD",
+        "NI",  # nickel from His-tag / IMAC purification and crystallization; a metal ion like ZN/MN/FE above, never a receptor ligand
         "NAD",
         "NADP",
         "FAD",
+        "FMN",  # flavin mononucleotide -- redox cofactor of flavoprotein fusion partners (e.g. flavodoxin); a sibling of FAD above, never a receptor ligand
         "COA",
         "NAG",
         "MAN",
@@ -751,6 +753,12 @@ LIGAND_EXCLUDE_LIST: frozenset[str] = frozenset(
         "D10",  # decane
         "TAR",  # D-tartaric acid
         "TLA",  # L-tartaric acid
+        "NH4",  # ammonium -- crystallization-buffer salt
+        "SCN",  # thiocyanate -- crystallization precipitant salt
+        # "Unknown atom or ion": a density the depositor could not chemically
+        # identify. It carries no name / formula / SMILES, so it can never be a
+        # cataloged ligand row.
+        "UNX",
     }
 )
 
