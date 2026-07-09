@@ -229,11 +229,13 @@ class TestLigandLists:
             assert code in INCIDENTAL_CANDIDATES
             assert code not in LIGAND_EXCLUDE_LIST
 
-    def test_incidental_override_member_present(self) -> None:
-        # The incidental fork un-strips a member that is also on the exclude
-        # list (PLM); that override must keep at least one such member so the
-        # bypass path stays exercised.
-        assert "PLM" in (INCIDENTAL_CANDIDATES & LIGAND_EXCLUDE_LIST)
+    def test_incidental_candidates_never_hard_excluded(self) -> None:
+        # Incidental candidates must reach the model for a role judgment, so no
+        # incidental candidate may also sit on the hard exclude list -- the two
+        # sets are disjoint. (The prompt-builder un-strip step and the detector
+        # ``- INCIDENTAL_CANDIDATES`` subtractions are defensive guards should the
+        # sets ever overlap again; this invariant asserts they do not today.)
+        assert not (INCIDENTAL_CANDIDATES & LIGAND_EXCLUDE_LIST)
 
 
 @pytest.fixture(autouse=True)

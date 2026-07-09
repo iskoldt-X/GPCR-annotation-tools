@@ -768,7 +768,6 @@ LIGAND_EXCLUDE_LIST: frozenset[str] = frozenset(
         "MAN",
         "GAL",
         "FUC",
-        "PLM",
         # Lipidic-cubic-phase host / matrix lipids (monoacylglycerols). Synthetic
         # crystallization matrix, never a functional ligand.
         "OLC",  # monoolein (glyceryl monooleate)
@@ -803,14 +802,20 @@ LIGAND_EXCLUDE_LIST: frozenset[str] = frozenset(
         # identify. It carries no name / formula / SMILES, so it can never be a
         # cataloged ligand row.
         "UNX",
+        # "Unknown ligand": a modeled small molecule the depositor could not
+        # chemically identify -- a sibling of UNX with no name / formula / SMILES,
+        # so it likewise can never be a cataloged ligand row.
+        "UNL",
     }
 )
 
 # Incidental-candidate molecules: present in many structures as EITHER a functional ligand OR
 # an incidental / structural lipid. The incidental-candidate prompt fork presents
-# them to the model (any member on LIGAND_EXCLUDE_LIST, e.g. PLM, is un-stripped
-# from the simplified metadata so the model can see it) and guides it to judge
-# the role, recording a dedicated pharmacological_role_check. ~CLR 22% / PLM 5% of corpus.
+# them to the model and guides it to judge the role, recording a dedicated
+# pharmacological_role_check. No incidental candidate is on LIGAND_EXCLUDE_LIST today, so
+# every one reaches the model directly; the un-strip step (see prompt_builder) is a
+# defensive guard that keeps any molecule ever listed on both sets visible to the model
+# rather than silently hard-excluded. ~CLR 22% / PLM 5% of corpus.
 #
 # The additions below are biological lipids / metabolites that flood structures as
 # membrane or matrix components yet are the endogenous agonist at their cognate

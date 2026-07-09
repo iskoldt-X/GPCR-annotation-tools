@@ -78,9 +78,10 @@ class TestEnrichedParsing:
         assert _gpcr_auth_chains(_entry(gpcr_slug="gnas2_human")) == set()
 
     def test_candidate_comp_ids_keeps_real_and_incidental_candidate(self) -> None:
-        # Use an incidental_candidate molecule that is ALSO on the exclude list (PLM), so the
-        # "- INCIDENTAL_CANDIDATES" override is genuinely exercised (it must survive).
-        incidental_candidate = sorted(INCIDENTAL_CANDIDATES & LIGAND_EXCLUDE_LIST)[0]
+        # An incidental candidate (a possible functional ligand) is kept alongside a
+        # real drug: incidental candidates are not on the hard exclude list, so they
+        # always survive the buffer strip and reach the model.
+        incidental_candidate = sorted(INCIDENTAL_CANDIDATES)[0]
         assert _candidate_comp_ids(_entry(("A1AEI", incidental_candidate))) == {
             "A1AEI",
             incidental_candidate,

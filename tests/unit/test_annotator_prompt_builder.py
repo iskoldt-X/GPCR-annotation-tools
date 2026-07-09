@@ -102,7 +102,7 @@ def test_build_prompt_parts():
 
 
 def test_incidental_candidate_molecule_not_stripped():
-    # Accommodate, not conceal: PLM (exclude-list AND incidental_candidate) stays visible to
+    # Accommodate, not conceal: an incidental_candidate (PLM) stays visible to
     # the model; an ordinary buffer (HOH) is still stripped.
     enriched_data = {
         "data": {

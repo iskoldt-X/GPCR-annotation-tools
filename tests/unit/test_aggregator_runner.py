@@ -692,8 +692,10 @@ def _comp_ids(best):
 class TestPruneExcludedBufferLigands:
     """Excluded-buffer ligands (detergents / cryo-additives / matrix lipids such
     as BOG / NAG) are dropped from the aggregated record at the aggregation layer,
-    so they never reach the curator or the CSV -- while a genuinely-functional
-    incidental lipid the model judged real survives."""
+    so they never reach the curator or the CSV -- unless the model explicitly
+    judged one a functional ligand, in which case it is rescued. That rescue is a
+    defensive branch: the exclude list and the incidental roster are disjoint, so
+    an excluded buffer carrying a functional verdict is not expected today."""
 
     def test_excluded_buffer_dropped(self):
         # 5WKT-shaped: BOG / NAG tagged EXCLUDED_BUFFER, no role check, role
@@ -717,29 +719,32 @@ class TestPruneExcludedBufferLigands:
         _prune_excluded_buffer_ligands(best)
         assert best["ligands"] == []
 
-    def test_functional_incidental_lipid_survives(self):
-        # PLM the model judged a real functional ligand (is_functional_ligand True)
-        # is rescued and kept even though it carries the EXCLUDED_BUFFER tag.
+    def test_excluded_buffer_with_functional_verdict_survives(self):
+        # Defensive rescue branch: an excluded buffer the model judged a real
+        # functional ligand (is_functional_ligand True) is kept despite its
+        # EXCLUDED_BUFFER tag. No molecule triggers this in production today (the
+        # exclude list and the incidental roster are disjoint), so it guards the
+        # invariant rather than a live case.
         best = {
             "ligands": [
                 _lig(
-                    chem_comp_id="PLM",
+                    chem_comp_id="LMT",
                     validation_status=VALIDATION_EXCLUDED_BUFFER,
                     pharmacological_role_check={"is_functional_ligand": True},
                 )
             ]
         }
         _prune_excluded_buffer_ligands(best)
-        assert _comp_ids(best) == ["PLM"]
+        assert _comp_ids(best) == ["LMT"]
 
-    def test_non_functional_incidental_lipid_dropped(self):
-        # 2HPY / 3PQR-shaped: PLM tagged EXCLUDED_BUFFER with the model's verdict
-        # is_functional_ligand False -> the `is True` rescue does NOT fire, so it
-        # is dropped (palmitoylation PTM, not a bound ligand).
+    def test_excluded_buffer_without_functional_verdict_dropped(self):
+        # An excluded buffer whose role check does not affirm a functional ligand
+        # (is_functional_ligand False) is NOT rescued -> the `is True` identity
+        # check gates the rescue, so the buffer prune drops it.
         best = {
             "ligands": [
                 _lig(
-                    chem_comp_id="PLM",
+                    chem_comp_id="LMT",
                     validation_status=VALIDATION_EXCLUDED_BUFFER,
                     pharmacological_role_check={"is_functional_ligand": False},
                 )
@@ -1063,16 +1068,16 @@ class TestRebuildSmallMoleculeRowsFromPerCopy:
         assert not any("(?)" in r["Residue_seq_id"] for r in rows)
 
     def test_orphan_component_pruned_from_list_builds_no_row(self):
-        # PLM is on both the incidental roster and the exclude list, so the buffer
-        # prune removed it from the ligand list while its copies remain in the
-        # per-copy roster. With no surviving chemistry template it builds no row --
-        # and its homeless copies never fabricate one. CLR is unaffected.
+        # PLM has a copy in the per-copy roster but no row in the shipped ligand
+        # list, so there is no surviving chemistry template for it. It therefore
+        # builds no row -- and its homeless copy never fabricates one. CLR is
+        # unaffected.
         best = {
             "ligands": [_sm_lig("CLR", SITE_REF_ALLOSTERIC_7TM, is_functional=True)],
             "oligomer_analysis": {
                 "nonpolymer_instance_index": {
                     "CLR": [_inst("R", "602", "F")],
-                    "PLM": [_inst("R", "606", "J")],  # pruned from ligands
+                    "PLM": [_inst("R", "606", "J")],  # no row in the ligand list
                 }
             },
         }
@@ -1431,19 +1436,19 @@ class TestRebuildSmallMoleculeRowsFromPerCopy:
         assert "(?)" not in rows[0]["Residue_seq_id"]
 
     def test_site_pruned_from_component_that_survives_elsewhere_not_revived(self):
-        # 7D76/7D77-shaped: the component survives post-prune at one site
-        # (intracellular, an incidental lipid rescued as functional) but was
-        # buffer-pruned at another (membrane). The per-copy votes place copies at
-        # the pruned membrane site with only a null majority -- that site must NOT be
-        # revived as a shipped row by borrowing the surviving site's template. Its
-        # copies leave via a dropped follow-out marker (no "(?)" inflation), and the
-        # marker's chain_id is derived from those copies, not the template chain.
+        # 7D76/7D77-shaped: the component has a row at one site (intracellular, a
+        # matched lipid the model kept as functional) but no row at another
+        # (membrane). The per-copy votes place copies at the membrane site
+        # with only a null majority -- that site must NOT be revived as a shipped
+        # row by borrowing the surviving site's template. Its copies leave via a
+        # dropped follow-out marker (no "(?)" inflation), and the marker's chain_id
+        # is derived from those copies, not the template chain.
         from gpcr_tools.csv_generator.csv_writer import transform_for_csv
 
         best = {
             "ligands": [
-                # PLM survives post-prune only at intracellular (rescued as functional);
-                # its membrane site was buffer-pruned, so it is absent from the list.
+                # PLM has a row only at intracellular (a matched lipid kept as
+                # functional); the membrane site has no row in the list.
                 _sm_lig("PLM", SITE_REF_INTRACELLULAR, is_functional=True, chain_id="A")
             ],
             "oligomer_analysis": {
@@ -1647,7 +1652,7 @@ class TestRebuildSmallMoleculeRowsFromPerCopy:
 
     def test_dropped_marker_narrative_cleared_when_no_majority_entry(self):
         # A dropped follow-out marker built for a site with NO majority ligand entry
-        # (a structural lipid the prune removed) must not display the borrowed
+        # (a lipid absent from the surviving ligand list) must not display the borrowed
         # sibling site's role/prose on the curator panel: role is cleared to None and
         # every narrative field is empty, even though it borrows the sibling chemistry.
         template = _sm_lig(

@@ -207,7 +207,7 @@ def _gate_keyless_pubchem_ids(
     from its own memory).  Any ligand carrying a ``chem_comp_id`` is left
     untouched: a matched
     small molecule keeps the authoritative CID copied from enriched data, and an
-    excluded buffer (e.g. a structural lipid such as PLM) carries a CID echoed from
+    excluded buffer (e.g. a detergent such as LMT) carries a CID echoed from
     that same metadata -- neither is a from-memory guess, and matched CIDs also
     carry occasional sparse-synonym entries that a synonym check would wrongly
     reject.
@@ -223,7 +223,7 @@ def _gate_keyless_pubchem_ids(
             continue  # Matched small molecule -> authoritative CID, leave it.
         comp_id = lig.get("chem_comp_id")
         if comp_id and str(comp_id).strip().lower() not in EMPTY_VALUES:
-            # A keyed component (e.g. an excluded buffer like PLM) is identified by
+            # A keyed component (e.g. an excluded buffer like LMT) is identified by
             # its chem_comp_id and its CID is echoed from metadata, not guessed.
             continue
         cid = lig.get("pubchem_id")
