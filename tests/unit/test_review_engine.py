@@ -6,6 +6,7 @@ Tests focus on controversy detection, auto-resolve, and significance checks.
 import pytest
 
 from gpcr_tools import config
+from gpcr_tools.csv_generator.exceptions import ReviewAbortedError
 from gpcr_tools.csv_generator.review_engine import (
     _list_item_path,
     _resolve_list_key_field,
@@ -13,6 +14,9 @@ from gpcr_tools.csv_generator.review_engine import (
     has_downstream_controversy,
     has_gating_controversy,
     is_controversy_significant,
+    review_leaf,
+    review_node,
+    review_toplevel_blocks,
 )
 
 
@@ -214,3 +218,102 @@ class TestConfidenceStyle:
         from gpcr_tools.csv_generator.review_engine import _confidence_style
 
         assert _confidence_style("Medium") == "warning"
+
+
+class _ScriptedResponses:
+    """Deterministic stand-in for a monkeypatched Prompt.ask / Confirm.ask.
+
+    Each call pops the next scripted response; raises if the queue runs dry.
+    """
+
+    def __init__(self, responses: list) -> None:
+        self._responses = list(responses)
+
+    def __call__(self, *args, **kwargs):
+        assert self._responses, f"scripted responses exhausted: args={args}, kwargs={kwargs}"
+        return self._responses.pop(0)
+
+
+class TestNullLeafAcceptedNotAborted:
+    """A JSON ``null`` leaf accepted during review must survive as ``None`` in the
+    result, never be mistaken for the 'q' quit signal. Quitting raises
+    ``ReviewAbortedError`` (a control-flow signal) so the two can no longer collide
+    on a bare ``return None``.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _silence_audit(self, monkeypatch):
+        # These tests assert value-shape preservation, not audit content. The
+        # accept path calls log_audit_trail -> get_config() (default workspace
+        # /workspace), so no-op it to keep the tests hermetic and off any real
+        # workspace's audit trail.
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.log_audit_trail",
+            lambda *a, **k: None,
+        )
+
+    def test_deep_review_dict_preserves_null_leaf(self, monkeypatch):
+        # A non-blacklisted leaf whose value is null, accepted with "y", must be
+        # kept as None in the returned dict — not collapse the whole node to None.
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Prompt.ask",
+            _ScriptedResponses(["y"]),
+        )
+        node = {"annotation_note": None}
+        result = review_node(
+            "XXXX", node, {}, path="key_findings", force_deep=True, validation_data={}
+        )
+        assert result == {"annotation_note": None}
+        assert result["annotation_note"] is None
+
+    def test_deep_review_list_row_preserves_null_soft_fields(self, monkeypatch):
+        # A ligand row carrying the site-undetermined "unknown" shape (soft
+        # fields left null == "not assessed"), accepted leaf-by-leaf, must be
+        # preserved intact rather than aborting the review at the first null.
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Prompt.ask",
+            _ScriptedResponses(["y", "y", "y"]),
+        )
+        ligands = [
+            {
+                "chem_comp_id": "CA",
+                "site_ref_justification": None,
+                "pharmacological_role_check": None,
+            }
+        ]
+        result = review_node(
+            "XXXX", ligands, {}, path="ligands", force_deep=True, validation_data={}
+        )
+        assert result == [
+            {
+                "chem_comp_id": "CA",
+                "site_ref_justification": None,
+                "pharmacological_role_check": None,
+            }
+        ]
+        assert result[0]["site_ref_justification"] is None
+        assert result[0]["pharmacological_role_check"] is None
+
+    def test_review_leaf_quit_raises(self, monkeypatch):
+        # The genuine quit path is now an exception, not a None return.
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Prompt.ask",
+            _ScriptedResponses(["q"]),
+        )
+        with pytest.raises(ReviewAbortedError):
+            review_leaf("XXXX", "some-value", {}, "receptor_info.chain_id", {})
+
+    def test_toplevel_quit_at_leaf_raises(self, monkeypatch):
+        # Declining a clean block enters deep review; quitting at a leaf aborts
+        # the whole review via ReviewAbortedError rather than returning None.
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Confirm.ask",
+            _ScriptedResponses([False]),
+        )
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Prompt.ask",
+            _ScriptedResponses(["q"]),
+        )
+        main_data = {"structure_info": {"method": "X-RAY DIFFRACTION"}}
+        with pytest.raises(ReviewAbortedError):
+            review_toplevel_blocks("XXXX", main_data, {}, {})

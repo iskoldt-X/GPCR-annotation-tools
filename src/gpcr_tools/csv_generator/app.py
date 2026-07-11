@@ -20,7 +20,7 @@ from gpcr_tools.csv_generator.data_loader import (
     load_pdb_data,
     update_processed_log,
 )
-from gpcr_tools.csv_generator.exceptions import CsvSchemaMismatchError
+from gpcr_tools.csv_generator.exceptions import CsvSchemaMismatchError, ReviewAbortedError
 from gpcr_tools.csv_generator.review_engine import (
     has_gating_controversy,
     review_toplevel_blocks,
@@ -171,8 +171,6 @@ def main(target_pdb: str | None = None, auto_accept: bool = False) -> None:
                 final_data = review_toplevel_blocks(
                     pdb_id, copy.deepcopy(main_data), controversies, validation_data
                 )
-                if final_data is None:
-                    raise KeyboardInterrupt
 
             if mode == "f":
                 final_data = review_toplevel_blocks(
@@ -182,8 +180,6 @@ def main(target_pdb: str | None = None, auto_accept: bool = False) -> None:
                     validation_data,
                     fix_mode=True,
                 )
-                if final_data is None:
-                    raise KeyboardInterrupt
 
             if final_data is not None:
                 console.print(
@@ -214,7 +210,7 @@ def main(target_pdb: str | None = None, auto_accept: bool = False) -> None:
                     )
                     log_audit_trail(pdb_id, "*", "csv_write_declined", "N/A", "DEFERRED")
 
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ReviewAbortedError):
         console.print("\n[yellow]Exiting...[/yellow]")
     except EOFError:
         # stdin closed / exhausted (e.g. piped input ran out, or a

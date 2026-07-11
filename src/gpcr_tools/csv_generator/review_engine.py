@@ -7,7 +7,7 @@ resolution, auto-resolve for trivial keys, and top-level block orchestration.
 import copy
 import json
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, cast
 
 from rich import box
 from rich.console import Group
@@ -28,6 +28,7 @@ from gpcr_tools.config import (
     list_item_identity,
 )
 from gpcr_tools.csv_generator.audit import log_audit_trail
+from gpcr_tools.csv_generator.exceptions import ReviewAbortedError
 from gpcr_tools.csv_generator.ui import (
     console,
     create_display_copy,
@@ -245,7 +246,7 @@ def review_decision_unit(
     validation_data: dict,
     fix_mode: bool = False,
     verified_paths: set | None = None,
-) -> dict | None:
+) -> dict:
     """Review a decision unit (dict with value/confidence/evidence)."""
     display_validation_alert(path, validation_data)
 
@@ -273,15 +274,19 @@ def review_decision_unit(
 
     if has_downstream_controversy(path, controversies):
         console.print(Panel("[bold yellow]Controversy detected downstream.[/]", style="yellow"))
-        return review_node(
-            pdb_id,
-            d_node,
-            controversies,
-            path,
-            True,
-            validation_data,
-            fix_mode,
-            verified_paths,
+        # force_deep review of a decision-unit dict always yields a dict back.
+        return cast(
+            dict,
+            review_node(
+                pdb_id,
+                d_node,
+                controversies,
+                path,
+                True,
+                validation_data,
+                fix_mode,
+                verified_paths,
+            ),
         )
 
     action = Prompt.ask(
@@ -297,17 +302,21 @@ def review_decision_unit(
         log_audit_trail(pdb_id, path, "skip_field", d_node.get("value"), d_node.get("value"))
         return d_node
     if action == "q":
-        return None
+        raise ReviewAbortedError()
     if action == "d":
-        return review_node(
-            pdb_id,
-            d_node,
-            controversies,
-            path,
-            True,
-            validation_data,
-            fix_mode,
-            verified_paths,
+        # force_deep review of a decision-unit dict always yields a dict back.
+        return cast(
+            dict,
+            review_node(
+                pdb_id,
+                d_node,
+                controversies,
+                path,
+                True,
+                validation_data,
+                fix_mode,
+                verified_paths,
+            ),
         )
     if action == "e":
         orig_val = d_node["value"]
@@ -327,7 +336,7 @@ def review_leaf(
     path: str,
     validation_data: dict,
     verified_paths: set | None = None,
-) -> Any | None:
+) -> Any:
     """Review a leaf value (scalar or non-decision-unit)."""
     display_validation_alert(path, validation_data)
 
@@ -477,7 +486,7 @@ def review_leaf(
         choice = raw_choice.lower() if isinstance(raw_choice, str) else "e"
 
         if choice == "q":
-            return None
+            raise ReviewAbortedError()
         if choice == "s":
             log_audit_trail(pdb_id, path, "skip_field", leaf_val, leaf_val)
             return leaf_val
@@ -507,7 +516,7 @@ def review_leaf(
             default="y",
         ).lower()
         if action == "q":
-            return None
+            raise ReviewAbortedError()
         if action in ("y", "s"):
             audit_action = "accept" if action == "y" else "skip_field"
             log_audit_trail(pdb_id, path, audit_action, leaf_val, leaf_val)
@@ -529,7 +538,7 @@ def review_node(
     validation_data: dict | None = None,
     fix_mode: bool = False,
     verified_paths: set | None = None,
-) -> Any | None:
+) -> Any:
     """Recursively review a JSON node (dict, list, or leaf)."""
     if validation_data is None:
         validation_data = {}
@@ -595,8 +604,6 @@ def review_node(
                 fix_mode,
                 verified_paths,
             )
-            if res is None:
-                return None
             new_dict[key] = res
         return new_dict
 
@@ -623,8 +630,6 @@ def review_node(
                 fix_mode,
                 verified_paths,
             )
-            if res is None:
-                return None
             new_list.append(res)
         return new_list
     else:
@@ -673,7 +678,7 @@ def review_toplevel_blocks(
     controversies: dict,
     validation_data: dict,
     fix_mode: bool = False,
-) -> dict | None:
+) -> dict:
     """Review each top-level block with appropriate context and UI."""
     verified_paths = get_verified_paths(main_data)
     final_data: dict = {}
@@ -709,8 +714,6 @@ def review_toplevel_blocks(
                     fix_mode,
                     verified_paths,
                 )
-                if resolved_block is None:
-                    return None
                 final_data[key] = resolved_block
                 log_audit_trail(pdb_id, key, "auto_accept_trivial_block", "N/A", "ACCEPTED")
             else:
@@ -803,7 +806,7 @@ def review_toplevel_blocks(
                 )
 
                 if action == "q":
-                    return None
+                    raise ReviewAbortedError()
                 if action == "s":
                     core_blocks = {"receptor_info", "ligands", "signaling_partners"}
                     if key in core_blocks and not Confirm.ask(
@@ -883,8 +886,6 @@ def review_toplevel_blocks(
                         False,
                         verified_paths,
                     )
-                    if res is None:
-                        return None
                     final_data[key] = res
                     break
             continue
@@ -911,8 +912,6 @@ def review_toplevel_blocks(
                     fix_mode,
                     verified_paths,
                 )
-                if res is None:
-                    return None
                 final_data[key] = res
 
     # Preserve any non-reviewed keys
