@@ -423,6 +423,18 @@ def find_discrepancies(
             # without blocking one-click accept-all.
             if current_key == "name":
                 record["gating"] = False
+            # A per-copy ``role`` vote controversy (a ligand_copies sidecar row)
+            # cannot encode a shipped error: the CSV Role column is taken from the
+            # compound-level ligand (``ligands[].role``), while a ligand_copies
+            # row's role is read nowhere in the CSV or validation path. Mark it
+            # advisory-only (gating=False), mirroring the name carve-out above, so
+            # it stays visible for review without blocking one-click accept-all.
+            # The compound-level role controversy has terminal key ``value`` (path
+            # ``ligands[...].role.value``), so it is not matched and keeps gating;
+            # per-copy ``site_ref`` (which does drive CSV residue partitioning)
+            # also keeps gating.
+            if current_key == "role" and path.startswith("ligand_copies["):
+                record["gating"] = False
             discrepancies.append(record)
         else:
             margin = _vote_margin(all_votes_data)
@@ -439,6 +451,12 @@ def find_discrepancies(
                 # near-tie between name wordings cannot change the entity, so
                 # surface it for review without gating accept-all.
                 if current_key == "name":
+                    record["gating"] = False
+                # Same per-copy role carve-out as the differing-value branch: a
+                # near-tie on a ligand_copies row's role cannot change a shipped
+                # value (the CSV role comes from the compound-level ligand), so
+                # surface it for review without gating accept-all.
+                if current_key == "role" and path.startswith("ligand_copies["):
                     record["gating"] = False
                 discrepancies.append(record)
         return discrepancies

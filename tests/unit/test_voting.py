@@ -1177,6 +1177,75 @@ class TestPubchemGating:
         assert "gating" not in flagged[0]
 
 
+class TestPerCopyRoleGating:
+    # A per-copy role vote controversy (a ligand_copies sidecar row) cannot
+    # encode a shipped error: the CSV Role column is taken from the
+    # compound-level ligand, and a ligand_copies row's role is read nowhere in
+    # the CSV/validation path. It is surfaced for review but tagged
+    # ``gating=False`` (advisory only). Per-copy ``site_ref``, which does drive
+    # CSV residue partitioning, keeps gating; so does the compound-level role.
+
+    def test_per_copy_role_disagreement_is_advisory(self) -> None:
+        # Best-run per-copy role differs from the majority: still surfaced, but
+        # advisory-only, so it does not block one-click accept-all.
+        best = {
+            "ligand_copies": [{"copy_id": "R:602", "site_ref": "orthosteric", "role": "antagonist"}]
+        }
+        majority = {
+            "ligand_copies": [{"copy_id": "R:602", "site_ref": "orthosteric", "role": "agonist"}]
+        }
+        votes = {"ligand_copies": [{"role": {"agonist": 6, "antagonist": 4}}]}
+        discs = find_discrepancies(best, majority, votes)
+        flagged = [d for d in discs if d["path"] == "ligand_copies[R:602].role"]
+        assert len(flagged) == 1
+        assert flagged[0]["gating"] is False
+
+    def test_per_copy_role_near_tie_is_advisory(self) -> None:
+        # A near-tie on a per-copy role (best matches majority) is surfaced for
+        # review but must not gate accept-all.
+        best = {
+            "ligand_copies": [{"copy_id": "R:602", "site_ref": "orthosteric", "role": "agonist"}]
+        }
+        majority = {
+            "ligand_copies": [{"copy_id": "R:602", "site_ref": "orthosteric", "role": "agonist"}]
+        }
+        votes = {"ligand_copies": [{"role": {"agonist": 5, "co-agonist": 5}}]}
+        discs = find_discrepancies(best, majority, votes)
+        flagged = [d for d in discs if d["path"] == "ligand_copies[R:602].role"]
+        assert len(flagged) == 1
+        assert flagged[0]["needs_review"] is True
+        assert flagged[0]["gating"] is False
+
+    def test_per_copy_site_ref_disagreement_still_gates(self) -> None:
+        # Control: a per-copy site_ref disagreement drives which residues land in
+        # which site row of the CSV, so it keeps gating (no gating key => default
+        # True). The role carve-out must not touch site_ref.
+        best = {
+            "ligand_copies": [{"copy_id": "R:602", "site_ref": "intracellular", "role": "agonist"}]
+        }
+        majority = {
+            "ligand_copies": [{"copy_id": "R:602", "site_ref": "orthosteric", "role": "agonist"}]
+        }
+        votes = {"ligand_copies": [{"site_ref": {"orthosteric": 6, "intracellular": 4}}]}
+        discs = find_discrepancies(best, majority, votes)
+        flagged = [d for d in discs if d["path"] == "ligand_copies[R:602].site_ref"]
+        assert len(flagged) == 1
+        assert "gating" not in flagged[0]
+
+    def test_compound_level_role_still_gates(self) -> None:
+        # Guard against over-matching: the compound-level ligand role
+        # (``ligands[...].role.value``) IS the shipped CSV Role, so its
+        # controversy must keep gating. Its terminal key is "value", not "role",
+        # so the per-copy carve-out must not catch it.
+        best = {"ligands": [{"chem_comp_id": "ATP", "role": {"value": "antagonist"}}]}
+        majority = {"ligands": [{"chem_comp_id": "ATP", "role": {"value": "agonist"}}]}
+        votes = {"ligands": [{"role": {"value": {"agonist": 6, "antagonist": 4}}}]}
+        discs = find_discrepancies(best, majority, votes)
+        flagged = [d for d in discs if d["path"] == "ligands[ATP].role.value"]
+        assert len(flagged) == 1
+        assert "gating" not in flagged[0]
+
+
 class TestObjectListScoring:
     def test_object_list_scored_by_structured_match(self) -> None:
         # An object list (ligands) must contribute to the score via per-item
