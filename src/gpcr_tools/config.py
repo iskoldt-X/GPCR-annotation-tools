@@ -1687,6 +1687,10 @@ TOPLEVEL_BLOCK_KEYS: tuple[str, ...] = (
     "structure_info",
     "receptor_info",
     "ligands",
+    # The per-copy binding-site sidecar follows the compound-level ligands block
+    # so its contested per-copy site assignments become reachable during review
+    # (and so review visits it right after the ligands it annotates).
+    "ligand_copies",
     "signaling_partners",
     "auxiliary_proteins",
     "key_findings",

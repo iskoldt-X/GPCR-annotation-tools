@@ -317,3 +317,116 @@ class TestNullLeafAcceptedNotAborted:
         main_data = {"structure_info": {"method": "X-RAY DIFFRACTION"}}
         with pytest.raises(ReviewAbortedError):
             review_toplevel_blocks("XXXX", main_data, {}, {})
+
+
+class TestLigandCopiesReviewable:
+    """The per-copy binding-site sidecar (``ligand_copies``) is reviewed as a
+    top-level block, so the review walker now descends into it: a contested
+    per-copy ``site_ref`` is reachable and the curator's choice is captured in the
+    returned data; a null soft field survives an accept; and a clean block ships
+    verbatim (or auto-accepts in fix mode) without a spurious prompt.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _silence_audit(self, monkeypatch):
+        # The accept/edit paths call log_audit_trail -> get_config() (default
+        # workspace), so no-op it to keep the tests hermetic and off any real
+        # workspace's audit trail. (Same pattern as TestNullLeafAcceptedNotAborted.)
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.log_audit_trail",
+            lambda *a, **k: None,
+        )
+
+    def test_contested_site_ref_reachable_and_edit_captured(self, monkeypatch):
+        # A per-copy site_ref where the best run disagrees with the majority vote --
+        # the same vote-controversy shape aggregation records for a real
+        # disagreement (best_run_value != majority_vote_value). Because the values
+        # differ, the contested leaf is offered with NO pre-selected default, so a
+        # bare Enter cannot commit it and the curator must choose explicitly.
+        controversies = {
+            "ligand_copies[R:602].site_ref": {
+                "path": "ligand_copies[R:602].site_ref",
+                "best_run_value": "orthosteric",
+                "majority_vote_value": "intracellular",
+                "all_votes": {"intracellular": 3, "orthosteric": 2},
+            }
+        }
+        main_data = {
+            "ligand_copies": [
+                {"copy_id": "R:602", "site_ref": "orthosteric"},
+            ]
+        }
+        # Scripted interaction, in order:
+        #   "r" -> at the ligand_copies block, choose to review it (not accept-all).
+        #   "y" -> accept the clean copy_id leaf as-is.
+        #   "1" -> at the site_ref CONTROVERSY, pick option 1. Candidates sort by
+        #          vote count, so the 3-vote "intracellular" is option 1; selecting
+        #          it changes the copy's site_ref away from the original
+        #          "orthosteric" -- a deliberate choice, since the differing values
+        #          suppress the default.
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Prompt.ask",
+            _ScriptedResponses(["r", "y", "1"]),
+        )
+        # Completing the call (no ReviewAbortedError) is itself the "did not abort"
+        # assertion; the edited value proves the walker reached the contested leaf.
+        final_data = review_toplevel_blocks("XXXX", main_data, controversies, {})
+        assert final_data["ligand_copies"] == [{"copy_id": "R:602", "site_ref": "intracellular"}]
+        assert final_data["ligand_copies"][0]["site_ref"] == "intracellular"
+
+    def test_null_soft_field_row_accepted_returns_dict_not_abort(self, monkeypatch):
+        # A per-copy row whose soft fields are null (role/evidence == None, the
+        # "not assessed" shape) must survive a deep review: a null leaf accepted
+        # with "y" is kept as None, never mistaken for the quit signal. Guards that
+        # the null-vs-quit fix covers this now-reachable block.
+        main_data = {
+            "ligand_copies": [
+                {"copy_id": "R:602", "role": None, "evidence": None},
+            ]
+        }
+        # "no" declines the clean-block accept, entering a deep review of every
+        # leaf; then "y", "y" accept the copy_id and the null role leaf. (evidence
+        # is a soft/blacklisted field and passes through untouched, no prompt.)
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Confirm.ask",
+            _ScriptedResponses([False]),
+        )
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Prompt.ask",
+            _ScriptedResponses(["y", "y"]),
+        )
+        final_data = review_toplevel_blocks("XXXX", main_data, {}, {})
+        assert final_data["ligand_copies"] == [{"copy_id": "R:602", "role": None, "evidence": None}]
+        assert final_data["ligand_copies"][0]["role"] is None
+
+    def test_clean_block_ships_verbatim_when_accepted(self, monkeypatch):
+        # A clean block (no controversy, no validation alert) offers one "Accept?"
+        # confirm; accepting ships it verbatim, with no per-leaf prompt.
+        block = [{"copy_id": "R:602", "site_ref": "orthosteric"}]
+        main_data = {"ligand_copies": [dict(block[0])]}
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Confirm.ask",
+            _ScriptedResponses([True]),
+        )
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Prompt.ask",
+            _ScriptedResponses([]),  # asserts if any per-leaf prompt fires
+        )
+        final_data = review_toplevel_blocks("XXXX", main_data, {}, {})
+        assert final_data["ligand_copies"] == block
+
+    def test_clean_block_auto_accepts_in_fix_mode_without_prompt(self, monkeypatch):
+        # In fix mode a clean block auto-accepts silently: NEITHER a confirm NOR a
+        # per-leaf prompt should fire (both scripted empty -> assert if called).
+        block = [{"copy_id": "R:602", "site_ref": "orthosteric"}]
+        main_data = {"ligand_copies": [dict(block[0])]}
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Confirm.ask",
+            _ScriptedResponses([]),
+        )
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Prompt.ask",
+            _ScriptedResponses([]),
+        )
+        final_data = review_toplevel_blocks("XXXX", main_data, {}, {}, fix_mode=True)
+        assert final_data["ligand_copies"] == block

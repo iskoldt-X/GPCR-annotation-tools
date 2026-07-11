@@ -1072,6 +1072,96 @@ class TestPerSiteResidueFiltering:
         assert len(rows[0]["label_asym_id"].split(", ")) == len(residue.split(", "))
 
 
+class TestPerCopyEditsReachCsv:
+    """A curator's per-copy edit reaches the CSV exactly where it should: editing a
+    copy's binding site (``site_ref``) moves its residue token to the matching site
+    row, while editing a copy's ``role`` leaves the CSV Role column unchanged (the
+    Role column is sourced from the compound-level ligand, not the per-copy row)."""
+
+    def _clr(self, site_ref: str, **extra) -> dict:
+        base = {
+            "name": "Cholesterol",
+            "chem_comp_id": "CLR",
+            "chain_id": "R",
+            "validation_status": VALIDATION_MATCHED_SMALL_MOLECULE,
+            "role": {"value": "Cofactor"},
+            "site_ref": site_ref,
+        }
+        base.update(extra)
+        return base
+
+    @staticmethod
+    def _residue_by_site(rows: list[dict[str, str]]) -> dict[str, str]:
+        return {r["Site"]: r["Residue_seq_id"] for r in rows}
+
+    def _two_site_data(self, sample_pdb_data, site_602: str) -> dict:
+        # A cholesterol modelled twice, with an orthosteric row and an intracellular
+        # row. R:601 is always orthosteric; R:602's binding site is the variable.
+        data = copy.deepcopy(sample_pdb_data)
+        data["oligomer_analysis"] = {
+            "nonpolymer_instance_index": {
+                "CLR": [
+                    {"auth_asym_id": "R", "label_asym_id": "F", "auth_seq_id": "601"},
+                    {"auth_asym_id": "R", "label_asym_id": "G", "auth_seq_id": "602"},
+                ]
+            }
+        }
+        data["ligand_copies"] = [
+            {"copy_id": "R:601", "site_ref": "orthosteric", "role": {"value": "Cofactor"}},
+            {"copy_id": "R:602", "site_ref": site_602, "role": {"value": "Cofactor"}},
+        ]
+        data["ligands"] = [self._clr("orthosteric"), self._clr("intracellular")]
+        return data
+
+    def test_editing_a_copy_site_ref_moves_its_residue_token(self, sample_pdb_data):
+        # Before the edit each site row lists its own copy; re-siting R:602 from
+        # intracellular to orthosteric (a per-copy binding-site edit) moves its
+        # residue token onto the orthosteric row and empties the intracellular row.
+        before = self._residue_by_site(
+            transform_for_csv("TEST1", self._two_site_data(sample_pdb_data, "intracellular"))[
+                "ligands.csv"
+            ]
+        )
+        assert before["orthosteric"] == "R:601"
+        assert before["intracellular"] == "R:602"
+
+        after = self._residue_by_site(
+            transform_for_csv("TEST1", self._two_site_data(sample_pdb_data, "orthosteric"))[
+                "ligands.csv"
+            ]
+        )
+        # R:602's token followed the edit onto the orthosteric row; nothing lost.
+        assert after["orthosteric"] == "R:601, R:602"
+        assert after["intracellular"] == ""
+
+    def test_editing_a_copy_role_leaves_csv_role_column_identical(self, sample_pdb_data):
+        # The CSV Role column comes from the compound-level ligands[].role.value;
+        # ligand_copies is consumed only for per-copy site partitioning. So editing
+        # a per-copy role must leave the Role column byte-identical.
+        def _role_column(copy_role: str) -> list[str]:
+            data = copy.deepcopy(sample_pdb_data)
+            data["oligomer_analysis"] = {
+                "nonpolymer_instance_index": {
+                    "CLR": [
+                        {"auth_asym_id": "R", "label_asym_id": "F", "auth_seq_id": "601"},
+                        {"auth_asym_id": "R", "label_asym_id": "G", "auth_seq_id": "602"},
+                    ]
+                }
+            }
+            data["ligand_copies"] = [
+                {"copy_id": "R:601", "site_ref": "orthosteric", "role": {"value": copy_role}},
+                {"copy_id": "R:602", "site_ref": "orthosteric", "role": {"value": copy_role}},
+            ]
+            # The compound-level role stays "Cofactor" regardless of the copy role.
+            data["ligands"] = [self._clr("orthosteric")]
+            return [r["Role"] for r in transform_for_csv("TEST1", data)["ligands.csv"]]
+
+        before = _role_column("Cofactor")
+        after = _role_column("Agonist")  # a per-copy role edit
+        assert before == after
+        assert before == ["Cofactor"]
+
+
 def test_transform_skips_non_dict_ligand():
     """A non-dict ligand entry must be skipped, not crash the whole transform."""
     data = {"ligands": ["bogus-string", {"chem_comp_id": "ATP", "chain_id": "A"}]}
