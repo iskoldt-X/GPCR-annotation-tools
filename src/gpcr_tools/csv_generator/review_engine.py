@@ -815,6 +815,17 @@ def review_toplevel_blocks(
                         default=False,
                     ):
                         continue
+                    # Skipping the per-copy ligand table discards its site
+                    # partitioning: the CSV then falls back to listing every
+                    # matched residue under each ligand (an honest over-listing,
+                    # not silent loss). Confirm so an accidental skip is deliberate.
+                    if key == "ligand_copies" and not Confirm.ask(
+                        f"[bold red]Skipping '{key}' discards the per-copy site "
+                        f"assignments; the CSV will list every matched residue for "
+                        f"each ligand instead. Continue?[/]",
+                        default=False,
+                    ):
+                        continue
                     console.print(f"[yellow]Skipping/Deleting block '{key}'[/yellow]")
                     log_audit_trail(
                         pdb_id,
@@ -890,6 +901,16 @@ def review_toplevel_blocks(
                     break
             continue
         else:
+            # The per-copy ligand table is a derived sidecar built from the
+            # ligands block, not a primary annotation a curator needs to eyeball.
+            # When it carries no controversy or alert there is nothing to decide,
+            # so pass it through without an "Accept?" prompt. The primary blocks
+            # still prompt on clean pass-through (a curator may want to glance at
+            # each), so only this derived block is silenced.
+            if key == "ligand_copies":
+                final_data[key] = block_data
+                log_audit_trail(pdb_id, key, "auto_accept_clean_block", "N/A", "ACCEPTED")
+                continue
             console.print(
                 Panel(
                     Pretty(create_display_copy(block_data)),

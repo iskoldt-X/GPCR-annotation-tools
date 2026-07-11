@@ -399,20 +399,88 @@ class TestLigandCopiesReviewable:
         assert final_data["ligand_copies"] == [{"copy_id": "R:602", "role": None, "evidence": None}]
         assert final_data["ligand_copies"][0]["role"] is None
 
-    def test_clean_block_ships_verbatim_when_accepted(self, monkeypatch):
-        # A clean block (no controversy, no validation alert) offers one "Accept?"
-        # confirm; accepting ships it verbatim, with no per-leaf prompt.
+    def test_clean_block_passes_through_without_prompt(self, monkeypatch):
+        # A clean ligand_copies block (no controversy, no validation alert) is a
+        # derived sidecar with nothing for a curator to decide, so it ships
+        # verbatim with NO "Accept?" prompt. Both Prompt.ask and Confirm.ask are
+        # scripted empty, so ANY prompt would exhaust the queue and fail the test.
         block = [{"copy_id": "R:602", "site_ref": "orthosteric"}]
         main_data = {"ligand_copies": [dict(block[0])]}
         monkeypatch.setattr(
             "gpcr_tools.csv_generator.review_engine.Confirm.ask",
-            _ScriptedResponses([True]),
+            _ScriptedResponses([]),  # asserts if a clean-block accept prompt fires
         )
         monkeypatch.setattr(
             "gpcr_tools.csv_generator.review_engine.Prompt.ask",
             _ScriptedResponses([]),  # asserts if any per-leaf prompt fires
         )
         final_data = review_toplevel_blocks("XXXX", main_data, {}, {})
+        assert final_data["ligand_copies"] == block
+
+    def test_clean_primary_block_still_prompts(self, monkeypatch):
+        # Regression: silencing the derived ligand_copies sidecar must NOT silence
+        # the primary annotation blocks. A clean structure_info block still emits
+        # its "Accept?" confirm -- proven by requiring the scripted confirm to be
+        # consumed (an un-drained queue would mean the prompt never fired).
+        confirms = _ScriptedResponses([True])
+        monkeypatch.setattr("gpcr_tools.csv_generator.review_engine.Confirm.ask", confirms)
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Prompt.ask",
+            _ScriptedResponses([]),
+        )
+        block = {"method": "X-RAY DIFFRACTION"}
+        main_data = {"structure_info": dict(block)}
+        final_data = review_toplevel_blocks("XXXX", main_data, {}, {})
+        assert final_data["structure_info"] == block
+        # The Accept? confirm was actually offered (scripted response consumed).
+        assert confirms._responses == []
+
+    def test_skip_requires_confirmation_and_drops_block(self, monkeypatch):
+        # Explicitly skipping the sidecar discards its per-copy site partitioning,
+        # so the skip must be confirmed. A contested block reaches the interactive
+        # menu; choosing "s" then confirming drops it from the shipped data.
+        controversies = {
+            "ligand_copies[R:602].site_ref": {
+                "path": "ligand_copies[R:602].site_ref",
+                "best_run_value": "orthosteric",
+                "majority_vote_value": "intracellular",
+                "all_votes": {"intracellular": 3, "orthosteric": 2},
+            }
+        }
+        main_data = {"ligand_copies": [{"copy_id": "R:602", "site_ref": "orthosteric"}]}
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Prompt.ask",
+            _ScriptedResponses(["s"]),
+        )
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Confirm.ask",
+            _ScriptedResponses([True]),  # yes, really skip
+        )
+        final_data = review_toplevel_blocks("XXXX", main_data, controversies, {})
+        assert "ligand_copies" not in final_data
+
+    def test_skip_declined_keeps_block(self, monkeypatch):
+        # Declining the skip confirmation returns to the action menu; the block is
+        # not dropped. Here the curator then accepts it, so it ships intact.
+        controversies = {
+            "ligand_copies[R:602].site_ref": {
+                "path": "ligand_copies[R:602].site_ref",
+                "best_run_value": "orthosteric",
+                "majority_vote_value": "intracellular",
+                "all_votes": {"intracellular": 3, "orthosteric": 2},
+            }
+        }
+        block = [{"copy_id": "R:602", "site_ref": "orthosteric"}]
+        main_data = {"ligand_copies": [dict(block[0])]}
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Prompt.ask",
+            _ScriptedResponses(["s", "a"]),  # skip, (decline), then accept block
+        )
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Confirm.ask",
+            _ScriptedResponses([False]),  # no, do not skip
+        )
+        final_data = review_toplevel_blocks("XXXX", main_data, controversies, {})
         assert final_data["ligand_copies"] == block
 
     def test_clean_block_auto_accepts_in_fix_mode_without_prompt(self, monkeypatch):
