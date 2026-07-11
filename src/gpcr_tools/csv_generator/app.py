@@ -162,17 +162,16 @@ def main(target_pdb: str | None = None, auto_accept: bool = False) -> None:
                 log_audit_trail(pdb_id, "*", "skip_pdb", "N/A", "SKIPPED")
                 continue
 
-            final_data = None
+            # mode is one of {a, r, f} here ("s" already continued above), and
+            # every branch assigns final_data, so it is always bound below.
             if mode == "a":
                 final_data = main_data
                 log_audit_trail(pdb_id, "*", "accept_all_pdb", "N/A", "ACCEPTED")
-
-            if mode == "r":
+            elif mode == "r":
                 final_data = review_toplevel_blocks(
                     pdb_id, copy.deepcopy(main_data), controversies, validation_data
                 )
-
-            if mode == "f":
+            elif mode == "f":
                 final_data = review_toplevel_blocks(
                     pdb_id,
                     copy.deepcopy(main_data),
@@ -181,34 +180,33 @@ def main(target_pdb: str | None = None, auto_accept: bool = False) -> None:
                     fix_mode=True,
                 )
 
-            if final_data is not None:
-                console.print(
-                    Panel(
-                        Pretty(create_display_copy(final_data)),
-                        title="Final Data",
-                        border_style="green",
-                    )
+            console.print(
+                Panel(
+                    Pretty(create_display_copy(final_data)),
+                    title="Final Data",
+                    border_style="green",
                 )
-                if Confirm.ask("Write to CSV?"):
-                    try:
-                        append_to_csvs(transform_for_csv(pdb_id, final_data))
-                        update_processed_log(pdb_id, "completed")
-                        console.print("[green]Saved![/green]")
-                    except CsvSchemaMismatchError as e:
-                        console.print(
-                            Panel(
-                                f"[bold red]SCHEMA MISMATCH:[/] {e.message}",
-                                border_style="red",
-                                box=box.DOUBLE,
-                            )
-                        )
-                        update_processed_log(pdb_id, "failed")
-                else:
+            )
+            if Confirm.ask("Write to CSV?"):
+                try:
+                    append_to_csvs(transform_for_csv(pdb_id, final_data))
+                    update_processed_log(pdb_id, "completed")
+                    console.print("[green]Saved![/green]")
+                except CsvSchemaMismatchError as e:
                     console.print(
-                        f"[yellow]PDB {pdb_id} NOT saved. "
-                        f"It will reappear as pending in the next session.[/yellow]"
+                        Panel(
+                            f"[bold red]SCHEMA MISMATCH:[/] {e.message}",
+                            border_style="red",
+                            box=box.DOUBLE,
+                        )
                     )
-                    log_audit_trail(pdb_id, "*", "csv_write_declined", "N/A", "DEFERRED")
+                    update_processed_log(pdb_id, "failed")
+            else:
+                console.print(
+                    f"[yellow]PDB {pdb_id} NOT saved. "
+                    f"It will reappear as pending in the next session.[/yellow]"
+                )
+                log_audit_trail(pdb_id, "*", "csv_write_declined", "N/A", "DEFERRED")
 
     except (KeyboardInterrupt, ReviewAbortedError):
         console.print("\n[yellow]Exiting...[/yellow]")
