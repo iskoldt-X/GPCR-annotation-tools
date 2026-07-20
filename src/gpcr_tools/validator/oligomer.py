@@ -417,11 +417,15 @@ def _build_label_asym_id_map(
 # ---------------------------------------------------------------------------
 
 
+# The arrestin slug prefix, shared by the signaling-partner anchor below and the
+# transducer-chain oracle (:func:`is_transducer_chain`) so the literal lives once.
+_ARRESTIN_SLUG_PREFIX = "arr"
+
 # Slug prefixes that mark a chain as a signaling partner (G protein alpha via
 # "gna", beta "gbb", gamma "gbg", arrestin "arr"); an unannotated chain with one
 # of these is routed to the signaling_partners review block, everything else to
 # auxiliary_proteins. Used only to anchor the alert to the right block.
-_SIGNALING_SLUG_PREFIXES: tuple[str, ...] = ("gna", "gbb", "gbg", "arr")
+_SIGNALING_SLUG_PREFIXES: tuple[str, ...] = ("gna", "gbb", "gbg", _ARRESTIN_SLUG_PREFIX)
 
 
 def _split_chain_ids(value: Any) -> set[str]:
@@ -1578,7 +1582,7 @@ def _chain_g_protein_subunit_slugs(
     return columns
 
 
-def _build_chain_identity_index(
+def build_chain_identity_index(
     enriched_entry: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
     """Index every polymer chain's description, sequence, type, and ALL slugs.
@@ -1647,6 +1651,28 @@ def is_g_protein_fragment_chain(chain_info: dict[str, Any]) -> bool:
     return any((s or "").strip().lower().startswith(G_PROTEIN_SUBUNIT_SLUG_PREFIXES) for s in slugs)
 
 
+def is_transducer_chain(chain_info: dict[str, Any]) -> bool:
+    """Deterministically decide whether a polymer chain is a signal transducer.
+
+    A transducer chain is a G protein subunit fragment (see
+    :func:`is_g_protein_fragment_chain`) OR an arrestin. Identity comes from the
+    STRUCTURE, never the model-supplied name. The chain rule uses this to flag a
+    non-polymer copy that sits on the transducer -- the transducer's own
+    nucleotide / cofactor -- rather than on the receptor, so it is catalogued as
+    auxiliary instead of a receptor ligand.
+
+    Kept distinct from :func:`is_g_protein_fragment_chain` (which the G-protein
+    relocation logic reuses with a strict "G protein fragment" meaning): widening
+    that function to arrestins would mis-drive the relocation.
+    """
+    if is_g_protein_fragment_chain(chain_info):
+        return True
+    if "polypeptide" not in (chain_info.get("type") or "").lower():
+        return False
+    slugs = chain_info.get("slugs") or []
+    return any((s or "").strip().lower().startswith(_ARRESTIN_SLUG_PREFIX) for s in slugs)
+
+
 def _fill_subunit_record(subunit_block: dict[str, Any], slug: str, chain_id: str) -> None:
     """Populate a G protein subunit record with the recovered slug + chain id.
 
@@ -1694,7 +1720,7 @@ def relocate_misfiled_g_protein_fragments(
     Returns one gating warning string per detected fragment (relocated or gated).
     Mutates *best_run_data* in place for the relocation cases.
     """
-    chain_index = _build_chain_identity_index(enriched_entry)
+    chain_index = build_chain_identity_index(enriched_entry)
     if not chain_index:
         return []
 

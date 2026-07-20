@@ -845,7 +845,10 @@ class TestPerSiteResidueFiltering:
             "chem_comp_id": "CLR",
             "chain_id": "R",
             "validation_status": VALIDATION_MATCHED_SMALL_MOLECULE,
-            "role": {"value": "Cofactor"},
+            # A surviving ligand is the vehicle for the per-site partition; role
+            # 'unknown' survives without a prc verdict and (unlike a real modality)
+            # still leaves ligands on an explicit prc=False, which several tests use.
+            "role": {"value": "unknown"},
             "site_ref": site_ref,
         }
         base.update(extra)
@@ -1084,7 +1087,10 @@ class TestPerCopyEditsReachCsv:
             "chem_comp_id": "CLR",
             "chain_id": "R",
             "validation_status": VALIDATION_MATCHED_SMALL_MOLECULE,
-            "role": {"value": "Cofactor"},
+            # A surviving ligand is the vehicle for the per-site partition; role
+            # 'unknown' survives without a prc verdict and (unlike a real modality)
+            # still leaves ligands on an explicit prc=False, which several tests use.
+            "role": {"value": "unknown"},
             "site_ref": site_ref,
         }
         base.update(extra)
@@ -1152,14 +1158,229 @@ class TestPerCopyEditsReachCsv:
                 {"copy_id": "R:601", "site_ref": "orthosteric", "role": {"value": copy_role}},
                 {"copy_id": "R:602", "site_ref": "orthosteric", "role": {"value": copy_role}},
             ]
-            # The compound-level role stays "Cofactor" regardless of the copy role.
+            # The compound-level role (here 'unknown') is unchanged by copy-role edits.
             data["ligands"] = [self._clr("orthosteric")]
             return [r["Role"] for r in transform_for_csv("TEST1", data)["ligands.csv"]]
 
         before = _role_column("Cofactor")
         after = _role_column("Agonist")  # a per-copy role edit
         assert before == after
-        assert before == ["Cofactor"]
+        assert before == ["unknown"]
+
+
+class TestAuxiliarySmallMolecules:
+    """auxiliary_small_molecules.csv: mechanical-lane molecules enumerated from the
+    nonpolymer roster and model-lane candidates the model judged non-functional,
+    each located exactly like a ligands.csv row."""
+
+    @staticmethod
+    def _by_name(rows: list[dict[str, str]]) -> dict[str, dict[str, str]]:
+        return {r["Name"]: r for r in rows}
+
+    def test_mechanical_ion_enumerated_from_roster(self):
+        # A potassium ion is stripped before the model, so it is enumerated from the
+        # roster and catalogued with a fixed Type and a blank Function.
+        data = {
+            "ligands": [],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "K": [{"auth_asym_id": "A", "label_asym_id": "B", "auth_seq_id": "401"}]
+                }
+            },
+        }
+        row = self._by_name(transform_for_csv("T1", data)["auxiliary_small_molecules.csv"])["K"]
+        assert row["Type"] == "Ion"
+        assert row["Function"] == ""
+        assert row["ChainID"] == "A"
+        assert row["label_asym_id"] == "B"
+        assert row["Residue_seq_id"] == "A:401"
+
+    def test_mechanical_types_cover_each_class(self):
+        data = {
+            "ligands": [],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "NAG": [{"auth_asym_id": "A", "label_asym_id": "C", "auth_seq_id": "1"}],
+                    "BOG": [{"auth_asym_id": "A", "label_asym_id": "D", "auth_seq_id": "2"}],
+                    "OLC": [{"auth_asym_id": "A", "label_asym_id": "E", "auth_seq_id": "3"}],
+                }
+            },
+        }
+        by_name = self._by_name(transform_for_csv("T1", data)["auxiliary_small_molecules.csv"])
+        assert by_name["NAG"]["Type"] == "Other"
+        assert by_name["BOG"]["Type"] == "Detergent"
+        assert by_name["OLC"]["Type"] == "Lipid"
+        assert all(r["Function"] == "" for r in by_name.values())
+
+    def test_multi_copy_row_joins_all_copies_aligned(self):
+        # A mechanical ion with several copies is ONE row, the copies comma-joined
+        # 1:1 across label_asym_id and Residue_seq_id (token = auth_chain:auth_seq).
+        # FE is a mechanical ion; the counter-ion metals (NA/MG/ZN/MN) reach aux only
+        # once the metal change frees them to the model lane.
+        data = {
+            "ligands": [],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "FE": [
+                        {"auth_asym_id": "A", "label_asym_id": "M", "auth_seq_id": "501"},
+                        {"auth_asym_id": "B", "label_asym_id": "N", "auth_seq_id": "502"},
+                    ]
+                }
+            },
+        }
+        aux = transform_for_csv("T1", data)["auxiliary_small_molecules.csv"]
+        assert len(aux) == 1
+        assert aux[0]["label_asym_id"] == "M, N"
+        assert aux[0]["Residue_seq_id"] == "A:501, B:502"
+
+    def test_model_lane_candidate_nonfunctional_routes_to_aux(self):
+        # A cholesterol the model judged non-functional leaves ligands.csv and is
+        # catalogued as an auxiliary Cofactor, located from its roster copies.
+        data = {
+            "ligands": [
+                {
+                    "chem_comp_id": "CLR",
+                    "chain_id": "R",
+                    "role": {"value": "Cofactor"},
+                    "pharmacological_role_check": {"is_functional_ligand": False},
+                    "validation_status": VALIDATION_MATCHED_SMALL_MOLECULE,
+                }
+            ],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "CLR": [{"auth_asym_id": "R", "label_asym_id": "F", "auth_seq_id": "601"}]
+                }
+            },
+        }
+        result = transform_for_csv("T1", data)
+        assert result["ligands.csv"] == []  # not a functional ligands row
+        aux = result["auxiliary_small_molecules.csv"]
+        assert len(aux) == 1
+        assert aux[0]["Name"] == "CLR"
+        assert aux[0]["Type"] == "Lipid"
+        assert aux[0]["Function"] == "Cofactor"
+        assert aux[0]["Residue_seq_id"] == "R:601"
+
+    def test_functional_candidate_stays_in_ligands_not_aux(self):
+        # A cholesterol the model judged functional stays a ligands row and is NOT
+        # catalogued as auxiliary.
+        data = {
+            "ligands": [
+                {
+                    "chem_comp_id": "CLR",
+                    "chain_id": "R",
+                    "role": {"value": "Agonist"},
+                    "pharmacological_role_check": {"is_functional_ligand": True},
+                    "validation_status": VALIDATION_MATCHED_SMALL_MOLECULE,
+                }
+            ],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "CLR": [{"auth_asym_id": "R", "label_asym_id": "F", "auth_seq_id": "601"}]
+                }
+            },
+        }
+        result = transform_for_csv("T1", data)
+        assert [r["Name"] for r in result["ligands.csv"]] == ["CLR"]
+        assert result["auxiliary_small_molecules.csv"] == []
+
+    def test_mechanical_comp_surviving_in_ligands_not_double_cataloged(self):
+        # A mechanical comp that survives as a functional ligands row (a curator-kept
+        # entry) is not also emitted as an auxiliary row -- no double-count.
+        data = {
+            "ligands": [
+                {
+                    "chem_comp_id": "NAG",
+                    "chain_id": "A",
+                    "role": {"value": "Agonist"},
+                    "validation_status": VALIDATION_MATCHED_SMALL_MOLECULE,
+                }
+            ],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "NAG": [{"auth_asym_id": "A", "label_asym_id": "C", "auth_seq_id": "1"}]
+                }
+            },
+        }
+        result = transform_for_csv("T1", data)
+        assert [r["Name"] for r in result["ligands.csv"]] == ["NAG"]
+        assert result["auxiliary_small_molecules.csv"] == []
+
+    def test_functional_role_protected_from_stray_prc_false(self):
+        # Real-modality guard: once a co-present candidate opens the prc block on every
+        # ligand row, a stray is_functional=False mis-placed on the receptor's own drug
+        # (a real modality) must NOT delete it -- it stays a ligands row, never aux.
+        data = {
+            "ligands": [
+                {
+                    "chem_comp_id": "8NU",  # the receptor's drug, not an aux candidate
+                    "chain_id": "R",
+                    "role": {"value": "Antagonist"},
+                    "pharmacological_role_check": {"is_functional_ligand": False},
+                    "validation_status": VALIDATION_MATCHED_SMALL_MOLECULE,
+                }
+            ],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "8NU": [{"auth_asym_id": "R", "label_asym_id": "F", "auth_seq_id": "701"}]
+                }
+            },
+        }
+        result = transform_for_csv("T1", data)
+        assert [r["Name"] for r in result["ligands.csv"]] == ["8NU"]
+        assert result["auxiliary_small_molecules.csv"] == []
+
+    def test_incidental_candidate_via_prc_false_path_routes_to_aux(self):
+        # The second aux path: a detector-flagged candidate the model left role
+        # 'unknown' but judged non-functional (prc=False). It is auxiliary, and its
+        # Function is blank -- an incidental structural molecule, not a cofactor.
+        data = {
+            "ligands": [
+                {
+                    "chem_comp_id": "CLR",
+                    "chain_id": "R",
+                    "role": {"value": "unknown"},
+                    "pharmacological_role_check": {"is_functional_ligand": False},
+                    "validation_status": VALIDATION_MATCHED_SMALL_MOLECULE,
+                }
+            ],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "CLR": [{"auth_asym_id": "R", "label_asym_id": "F", "auth_seq_id": "601"}]
+                }
+            },
+        }
+        result = transform_for_csv("T1", data)
+        assert result["ligands.csv"] == []
+        aux = result["auxiliary_small_molecules.csv"]
+        assert len(aux) == 1
+        assert aux[0]["Name"] == "CLR"
+        assert aux[0]["Type"] == "Lipid"
+        assert aux[0]["Function"] == ""  # incidental structural, not a cofactor
+
+    def test_functional_metal_stays_in_ligands(self):
+        # A metal the model judged the receptor's agonist (e.g. Ca at the calcium-
+        # sensing receptor) stays a functional ligand, not auxiliary. A structural
+        # metal is routed to aux by its role=Cofactor / prc=False verdict; an
+        # unjudged metal is kept conservatively (not-assessed), like any other row.
+        data = {
+            "ligands": [
+                {
+                    "chem_comp_id": "CA",
+                    "chain_id": "R",
+                    "role": {"value": "Agonist"},
+                    "validation_status": VALIDATION_MATCHED_SMALL_MOLECULE,
+                }
+            ],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "CA": [{"auth_asym_id": "R", "label_asym_id": "F", "auth_seq_id": "301"}]
+                }
+            },
+        }
+        result = transform_for_csv("T1", data)
+        assert [r["Name"] for r in result["ligands.csv"]] == ["CA"]
+        assert result["auxiliary_small_molecules.csv"] == []
 
 
 def test_transform_skips_non_dict_ligand():

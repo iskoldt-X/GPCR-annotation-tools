@@ -885,7 +885,7 @@ class TestPruneExcludedBufferLigands:
 # ---------------------------------------------------------------------------
 
 
-def _pc(copy_id, site, role="Cofactor", confidence="Medium"):
+def _pc(copy_id, site, role="unknown", confidence="Medium"):
     """A per-copy vote row (as it appears in majority_votes['ligand_copies'])."""
     return {"copy_id": copy_id, "site_ref": site, "role": {"value": role}, "confidence": confidence}
 
@@ -903,7 +903,10 @@ def _sm_lig(comp, site, is_functional=None, **overrides):
         site_ref=site,
         validation_status=VALIDATION_MATCHED_SMALL_MOLECULE,
         pharmacological_role_check=prc,
-        role={"value": "Cofactor"},
+        # role 'unknown' is a neutral vehicle for the per-copy is_functional logic:
+        # it survives a null verdict and leaves ligands on prc=False, without the
+        # role=Cofactor short-circuit to aux that would mask the verdict under test.
+        role={"value": "unknown"},
         **overrides,
     )
 
@@ -1137,7 +1140,7 @@ class TestRebuildSmallMoleculeRowsFromPerCopy:
         ]
         unknown_row = best["ligands"][1]
         assert unknown_row["chain_id"] == "R"  # from the un-sited copy, not the template
-        assert (unknown_row.get("role") or {}).get("value") == "Cofactor"  # copies' majority
+        assert (unknown_row.get("role") or {}).get("value") == "unknown"  # copies' majority
         assert best["ligand_copies"] == mv["ligand_copies"]  # unknown copy retained
 
     def test_unknown_copies_reuse_existing_unknown_row(self):

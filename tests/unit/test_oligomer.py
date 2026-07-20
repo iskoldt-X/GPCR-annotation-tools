@@ -64,6 +64,7 @@ from gpcr_tools.validator.oligomer import (
     get_sequence_length,
     is_g_protein_fragment_chain,
     is_gpcr_slug,
+    is_transducer_chain,
     map_uniprot_to_entity,
     reconcile_gpcr_in_auxiliary,
     relocate_misfiled_g_protein_fragments,
@@ -2813,6 +2814,52 @@ class TestIsGProteinFragmentChain:
 
     def test_plain_receptor_not_detected(self) -> None:
         assert not is_g_protein_fragment_chain(
+            {
+                "type": "polypeptide(L)",
+                "sequence": "MNGTEGPNFYV",
+                "description": "Rhodopsin",
+                "slugs": ["opsd_bovin"],
+            }
+        )
+
+
+class TestIsTransducerChain:
+    """Transducer = G protein fragment OR arrestin. Arrestin is added here without
+    widening is_g_protein_fragment_chain (which the G-protein relocation reuses)."""
+
+    def test_g_protein_fragment_is_a_transducer(self) -> None:
+        # Everything is_g_protein_fragment_chain accepts is a transducer too.
+        assert is_transducer_chain(
+            {
+                "type": "polypeptide(L)",
+                "sequence": "ACDEF",
+                "description": "subunit beta-1, HiBiT",
+                "slugs": ["gbb1_human"],
+            }
+        )
+
+    def test_arrestin_slug_is_a_transducer_but_not_a_g_protein(self) -> None:
+        arrestin = {
+            "type": "polypeptide(L)",
+            "sequence": "MGEKPGTRVFKK",
+            "description": "Beta-arrestin-1",
+            "slugs": ["arrb1_human"],
+        }
+        assert is_transducer_chain(arrestin)
+        assert not is_g_protein_fragment_chain(arrestin)  # the narrow oracle is unchanged
+
+    def test_non_polypeptide_arrestin_slug_excluded(self) -> None:
+        assert not is_transducer_chain(
+            {
+                "type": "polyribonucleotide",
+                "sequence": "ACGU",
+                "description": "x",
+                "slugs": ["arrb2_human"],
+            }
+        )
+
+    def test_receptor_not_a_transducer(self) -> None:
+        assert not is_transducer_chain(
             {
                 "type": "polypeptide(L)",
                 "sequence": "MNGTEGPNFYV",

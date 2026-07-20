@@ -20,6 +20,7 @@ from typing import Any
 # Signal kinds (domain vocabulary; more are added as detectors land).
 SIGNAL_CHIMERIC_GPROTEIN: str = "chimeric_g_protein"
 SIGNAL_INCIDENTAL_CANDIDATE: str = "incidental_candidate"
+SIGNAL_TRANSDUCER_COPY: str = "transducer_copy"
 SIGNAL_DUAL_ROLE_LIGAND: str = "dual_role_ligand"
 SIGNAL_SITE_REF: str = "site_ref"
 SIGNAL_COUPLING_PROTOMER: str = "coupling_protomer"

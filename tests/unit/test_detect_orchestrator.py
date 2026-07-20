@@ -31,6 +31,7 @@ from gpcr_tools.detector.signals import (
     SIGNAL_DUAL_ROLE_LIGAND,
     SIGNAL_INCIDENTAL_CANDIDATE,
     SIGNAL_SITE_REF,
+    SIGNAL_TRANSDUCER_COPY,
     DetectSignal,
 )
 
@@ -93,6 +94,16 @@ def _incidental_candidate(comp: str = "PLM") -> DetectSignal:
     )
 
 
+def _transducer_copy(copies: list[str] | None = None) -> DetectSignal:
+    return DetectSignal(
+        kind=SIGNAL_TRANSDUCER_COPY,
+        target_ref="ligands",
+        summary="transducer copies",
+        payload={"copies": copies if copies is not None else ["GDP A:401"]},
+        severity=SEVERITY_ADVISORY,
+    )
+
+
 def _dual_role(comp: str = "A1AEI") -> DetectSignal:
     return DetectSignal(
         kind=SIGNAL_DUAL_ROLE_LIGAND,
@@ -150,6 +161,12 @@ class TestAssembleDetectBlock:
         block = assemble_detect_block([_incidental_candidate("PLM")])
         assert block is not None
         assert "PLM" in block and "pharmacological_role_check" in block
+
+    def test_transducer_copy_renders_copies_and_cofactor_guidance(self) -> None:
+        block = assemble_detect_block([_transducer_copy(["GDP A:401", "MG A:402"])])
+        assert block is not None
+        assert "GDP A:401" in block and "MG A:402" in block
+        assert "transducer" in block.lower() and "Cofactor" in block
 
     def test_deterministic_order(self) -> None:
         a = assemble_detect_block([_incidental_candidate("PLM"), _chimeric_advisory()])

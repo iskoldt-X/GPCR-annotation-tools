@@ -544,11 +544,14 @@ def _rebuild_small_molecule_rows_from_per_copy(
             elif copies:
                 # No post-prune row and no majority-functional call, but copies vote
                 # here (a structural lipid the prune removed, or a null-verdict group):
-                # emit a dropped follow-out marker -- never shipped -- so those copies
-                # leave with it rather than flooding a surviving sibling as homeless.
-                # Same rule: only chemistry is borrowed; the marker's own per-site
-                # decision + narrative come from the majority vote (empty when none),
-                # so the curator panel never shows another site's prose on it.
+                # emit a follow-out marker so those copies leave with it rather than
+                # flooding a surviving sibling as homeless. Stamped non-functional it
+                # normally drops from ligands.csv; the exception is a marker the vote
+                # also gave a real pharmacological modality, which the real-modality
+                # guard keeps (a genuine, if self-contradictory, functional call is not
+                # silently deleted). Same rule: only chemistry is borrowed; the marker's
+                # own per-site decision + narrative come from the majority vote (empty
+                # when none), so the curator panel never shows another site's prose on it.
                 row = copy.deepcopy(template_by_comp[comp_id])
                 row["chem_comp_id"] = comp_id
                 row["site_ref"] = voted_site

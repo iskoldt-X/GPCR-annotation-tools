@@ -19,7 +19,7 @@ from gpcr_tools.detector.coupling import detect_coupling_protomer
 from gpcr_tools.detector.geometry import detect_dual_role_ligands
 from gpcr_tools.detector.gprotein import detect_g_protein_identity
 from gpcr_tools.detector.heterodimer import detect_class_c_multi_protomer
-from gpcr_tools.detector.ligands import detect_incidental_candidates
+from gpcr_tools.detector.ligands import detect_incidental_candidates, detect_transducer_copies
 from gpcr_tools.detector.signals import DetectSignal
 from gpcr_tools.detector.site_ref import detect_site_refs
 from gpcr_tools.fetcher.enricher import INCOMPLETE_MARKER_KEY
@@ -119,6 +119,7 @@ def run_detect(
 
     # Metadata-only detectors (no external fetch) always run.
     signals.extend(detect_incidental_candidates(pdb_id, entry))
+    signals.extend(detect_transducer_copies(pdb_id, entry))
     signals.extend(detect_class_c_multi_protomer(pdb_id, entry))
 
     # Detectors needing a network fetch (UniProt references, coordinate files).

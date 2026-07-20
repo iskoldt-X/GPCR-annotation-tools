@@ -11,9 +11,12 @@ from typing import Any
 from gpcr_tools.config import (
     AUX_PROTEIN_DISPATCH,
     CSV_SCHEMA,
+    MECHANICAL_AUX,
     SITE_REF_UNKNOWN,
     get_config,
+    gpcrdb_aux_type_for,
     is_empty_key,
+    ligand_routed_to_aux,
     ligand_row_dropped,
     sanitize_value,
 )
@@ -187,6 +190,109 @@ def _per_site_label_and_residue_columns(
     return results
 
 
+def _auxiliary_small_molecule_rows(
+    pdb_id: str,
+    ligands: list[Any],
+    nonpolymer_instances: dict[str, Any],
+) -> list[dict[str, str]]:
+    """Rows for ``auxiliary_small_molecules.csv`` -- molecules that are NOT receptor
+    ligands, located by the same columns as a ligands.csv row (ChainID + label_asym_id
+    + Residue_seq_id copy tokens, the token being ``"<auth_asym_id>:<auth_seq_id>"``).
+    ChainID here is the comma-joined set of every copy's author chain (a component can
+    have copies on several chains); ligands.csv instead shows the single model-supplied
+    chain. A molecule lives in exactly one file, so the two never disagree on one row.
+
+    Two sources:
+      * model-lane molecules the model judged auxiliary (``ligand_routed_to_aux``):
+        a cofactor, or a detector-flagged candidate judged non-functional. Only a
+        component with NO surviving ligands row is catalogued whole here; a
+        component that still has a surviving functional row is left whole in
+        ligands.csv (comp-level split), so its copies are never double-counted
+        across the two files.
+      * mechanical-lane molecules (ions / cofactors / glycans / detergents / matrix
+        lipids) stripped before the model ever saw them, enumerated from the
+        structure's nonpolymer roster.
+
+    Each row lists every modelled copy of its component, comma-joined and 1:1 across
+    the label_asym_id and Residue_seq_id columns.
+    """
+
+    def _columns(comp_id: str) -> tuple[str, str, str]:
+        labels: list[str] = []
+        residues: list[str] = []
+        chains: list[str] = []
+        for inst in nonpolymer_instances.get(comp_id) or []:
+            if not (isinstance(inst, dict) and inst.get("label_asym_id")):
+                continue
+            auth_chain = sanitize_value(inst.get("auth_asym_id"))
+            labels.append(sanitize_value(inst.get("label_asym_id")))
+            residues.append(f"{auth_chain}:{sanitize_value(inst.get('auth_seq_id'))}")
+            if auth_chain:
+                chains.append(auth_chain)
+        return ", ".join(labels), ", ".join(residues), ", ".join(sorted(set(chains)))
+
+    surviving_comps = {
+        sanitize_value(lig.get("chem_comp_id"))
+        for lig in ligands
+        if isinstance(lig, dict) and not ligand_row_dropped(lig)
+    }
+
+    rows: list[dict[str, str]] = []
+    cataloged: set[str] = set()
+
+    # (1) Model-lane auxiliary molecules (cofactor / non-functional candidate).
+    for lig in ligands:
+        if not isinstance(lig, dict) or not ligand_routed_to_aux(lig):
+            continue
+        comp_id = sanitize_value(lig.get("chem_comp_id"))
+        if is_empty_key(comp_id) or comp_id in cataloged or comp_id in surviving_comps:
+            continue
+        cataloged.add(comp_id)
+        # Unlike the mechanical lane (which skips a comp with no roster location), a
+        # model-lane molecule is a real ligand the model annotated, so it is
+        # catalogued even when the roster carries no per-copy location for it (ChainID
+        # then falls back to the ligand's own chain); dropping it would lose an
+        # annotated molecule.
+        label_join, residue_join, chain_join = _columns(comp_id)
+        # Function records WHY the molecule is auxiliary: a cofactor the model named as
+        # such, versus an incidental structural molecule -- left blank, like the
+        # mechanical lane, rather than mislabelled a cofactor.
+        role_value = sanitize_value((lig.get("role") or {}).get("value"))
+        rows.append(
+            {
+                "PDB": pdb_id,
+                "ChainID": chain_join or sanitize_value(lig.get("chain_id")),
+                "Name": comp_id,
+                "Type": gpcrdb_aux_type_for(comp_id),
+                "Function": "Cofactor" if role_value == "Cofactor" else "",
+                "label_asym_id": label_join,
+                "Residue_seq_id": residue_join,
+            }
+        )
+
+    # (2) Mechanical-lane molecules stripped before the model, from the roster.
+    for comp_id in nonpolymer_instances:
+        if comp_id not in MECHANICAL_AUX or comp_id in cataloged or comp_id in surviving_comps:
+            continue
+        label_join, residue_join, chain_join = _columns(comp_id)
+        if not label_join:
+            continue  # no modelled copy carries a label: nothing to catalogue
+        cataloged.add(comp_id)
+        rows.append(
+            {
+                "PDB": pdb_id,
+                "ChainID": chain_join,
+                "Name": comp_id,
+                "Type": gpcrdb_aux_type_for(comp_id),
+                "Function": "",
+                "label_asym_id": label_join,
+                "Residue_seq_id": residue_join,
+            }
+        )
+
+    return rows
+
+
 def transform_for_csv(pdb_id: str, data: dict) -> dict[str, list[dict[str, str]]]:
     """Transform reviewed PDB data into CSV-ready row dictionaries.
 
@@ -335,6 +441,11 @@ def transform_for_csv(pdb_id: str, data: dict) -> dict[str, list[dict[str, str]]
                 "Residue_seq_id": lig_residue_seq,
             }
         )
+
+    # ── auxiliary_small_molecules.csv ──────────────────────────────
+    rows_map["auxiliary_small_molecules.csv"].extend(
+        _auxiliary_small_molecule_rows(pdb_id, data.get("ligands") or [], nonpolymer_instances)
+    )
 
     # ── g_proteins.csv ─────────────────────────────────────────────
     partners = data.get("signaling_partners") or {}

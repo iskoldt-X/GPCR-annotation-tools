@@ -682,58 +682,107 @@ def sanitize_value(value: Any) -> str:
     return str(value).strip()
 
 
-def ligand_row_dropped(lig: Any) -> bool:
-    """Whether a ligand row is filtered out of ``ligands.csv`` before it is written.
+# Role enum values that are NOT a functional pharmacological modality. A prc=False
+# verdict removes a row from ligands.csv only for one of these roles (or an unset
+# role); a row the model gave a real modality is protected from a stray verdict.
+_NON_FUNCTIONAL_ROLE_VALUES: frozenset[str] = frozenset({"Cofactor", "unknown", "Apo (no ligand)"})
 
-    The single source of truth for the writer loop's skip decision, shared with the
+
+def _classify_ligand_row(lig: Any) -> str:
+    """Classify a ligand row as ``"ligands"``, ``"aux"`` or ``"drop"``.
+
+    The single source of truth for where a row goes, shared by the writer loop, the
     per-site residue partition (so a physical copy is never attributed to a
-    binding-site row that never reaches output) AND with the aggregator's rebuild
-    (so "does this component still have a surviving row?" matches the CSV's own drop
-    decision, with no drift). A row is dropped when:
+    binding-site row that never reaches ligands.csv) and the aggregator's rebuild
+    ("does this component still have a surviving ligands row?").
 
-    * it is not a dict (cannot be a valid row);
-    * it is a GHOST ligand the validator could not find in the structure, unless a
-      curator explicitly kept it (writing it would record an interaction for a
-      molecule absent from the deposition);
-    * it is an apo / "no ligand" placeholder (SKIPPED_APO, or a value-level Apo
-      marker) -- not a bound ligand, so it must not become an interaction row;
-    * it is a dual-use molecule the model explicitly judged non-functional
-      (``pharmacological_role_check.is_functional_ligand`` is False). A missing or
-      null verdict means "not assessed" and does NOT drop the row.
+    * ``"drop"`` -- not a dict; a GHOST the validator could not find (unless a
+      curator kept it); or an apo / "no ligand" placeholder. Emitted nowhere.
+    * ``"aux"`` -- a non-functional auxiliary molecule catalogued into
+      auxiliary_small_molecules.csv instead of ligands.csv: a ``role = Cofactor``
+      row (a transducer nucleotide/cofactor, or a structural lipid / detergent /
+      counter-ion), or a detector-flagged candidate (a lipid / metal in
+      ``INCIDENTAL_CANDIDATES``) the model judged non-functional via prc. A prc=False
+      verdict removes a row only when its role is NOT a real modality, so a stray
+      verdict on the receptor's own drug cannot delete it; an explicit
+      is_functional=True keeps the row; a missing / null verdict is "not assessed".
+    * ``"ligands"`` -- a functional ligand row.
     """
     if not isinstance(lig, dict):
-        return True
+        return "drop"
     if lig.get("validation_status") == VALIDATION_GHOST_LIGAND and not lig.get(
         "curator_kept_ghost"
     ):
-        return True
+        return "drop"
+    role = sanitize_value((lig.get("role") or {}).get("value"))
     if (
         lig.get("validation_status") == VALIDATION_SKIPPED_APO
         or sanitize_value(lig.get("type")) == "none"
         or sanitize_value(lig.get("name")) == "Apo"
-        or sanitize_value((lig.get("role") or {}).get("value")) == "Apo (no ligand)"
+        or role == "Apo (no ligand)"
     ):
-        return True
+        return "drop"
     prc = lig.get("pharmacological_role_check")
-    return isinstance(prc, dict) and prc.get("is_functional_ligand") is False
+    prc_verdict = prc.get("is_functional_ligand") if isinstance(prc, dict) else None
+    if prc_verdict is True:
+        # An explicit functional verdict wins over any structural role label.
+        return "ligands"
+    if role == "Cofactor":
+        # A cofactor is auxiliary: a transducer nucleotide/cofactor the chain rule had
+        # the model type Cofactor, or a structural lipid / detergent / counter-ion.
+        return "aux"
+    comp_id = sanitize_value(lig.get("chem_comp_id"))
+    if prc_verdict is False:
+        if role and role not in _NON_FUNCTIONAL_ROLE_VALUES:
+            # Real-modality guard: the model gave this row a real pharmacological
+            # modality, so a prc=False verdict -- placed on EVERY ligand row once a
+            # candidate opens the block -- must not delete the receptor's own drug. An
+            # unknown / unset role stays unprotected.
+            return "ligands"
+        return "aux" if comp_id in INCIDENTAL_CANDIDATES else "drop"
+    return "ligands"
+
+
+def ligand_row_dropped(lig: Any) -> bool:
+    """Whether a ligand row is filtered OUT of ``ligands.csv`` before it is written.
+
+    True when the row is not a functional ligand -- it is either dropped entirely
+    or catalogued into auxiliary_small_molecules.csv. See :func:`_classify_ligand_row`.
+    """
+    return _classify_ligand_row(lig) != "ligands"
+
+
+def ligand_routed_to_aux(lig: Any) -> bool:
+    """Whether a non-ligands.csv row is catalogued into auxiliary_small_molecules.csv
+    (a cofactor / non-functional auxiliary candidate) rather than dropped entirely."""
+    return _classify_ligand_row(lig) == "aux"
 
 
 # ---------------------------------------------------------------------------
 # Ligand exclude list (common buffers, ions, artifacts, detergents, matrix lipids)
 # ---------------------------------------------------------------------------
 
-# Codes here are stripped from the metadata the model sees, so a code is only
-# safe to add if it is NEVER a functional GPCR ligand. The list keys on the PDB
-# three-letter chem_comp id (what the enriched data carries), so a chemical's
-# human name (e.g. "DMSO", "HEPES") never matches and must be given as its code
-# (DMS, EPE). Any molecule that can EVER be an agonist — notably free fatty
-# acids and other biological lipids — belongs in INCIDENTAL_CANDIDATES, never
-# here.
-LIGAND_EXCLUDE_LIST: frozenset[str] = frozenset(
+# Two model-invisible lanes that share the "stripped before the model sees it"
+# gate (see prompt_builder) but diverge at the OUTPUT:
+#   * HARD_DROP      -- crystallization / cryo / buffer noise and unidentified
+#                       density: nothing is emitted (a log line only).
+#   * MECHANICAL_AUX -- never a receptor ligand, but catalogued deterministically
+#                       into auxiliary_small_molecules.csv with a fixed type
+#                       (AUX_TYPE_MAP), enumerated from the structure's nonpolymer
+#                       roster rather than from model output.
+# The four counter-ion metals (NA/MG/ZN/MN) sit in a third group, still excluded
+# here but freed to the model's auxiliary lane by the metal change, so a genuine
+# functional metal (e.g. Ca-sensing-receptor calcium) is never hidden. Codes key
+# on the PDB three-letter chem_comp id, so a chemical's human name (e.g. "DMSO",
+# "HEPES") never matches and must be given as its code (DMS, EPE). Any molecule
+# that can EVER be an agonist belongs in INCIDENTAL_CANDIDATES, never here.
+HARD_DROP: frozenset[str] = frozenset(
     {
+        # Water
         "HOH",
         "WAT",
         "DOD",
+        # Buffers / cryoprotectants / precipitants
         "SO4",
         "PO4",
         "GOL",
@@ -749,34 +798,52 @@ LIGAND_EXCLUDE_LIST: frozenset[str] = frozenset(
         "FMT",
         "DMS",  # dimethyl sulfoxide cosolvent (the PDB code; the name "DMSO" never matched)
         "EPE",  # HEPES buffer (the PDB code; the name "HEPES" never matched)
-        "NA",
+        # Polyethylene-glycol oligomers (cryoprotectant / precipitant family)
+        "1PE",  # pentaethylene glycol
+        "12P",  # dodecaethylene glycol
+        "P6G",  # hexaethylene glycol
+        # Other crystallization buffers / cryo-additives
+        "HTO",  # heptane-1,2,3-triol
+        "D10",  # decane
+        "TAR",  # D-tartaric acid
+        "TLA",  # L-tartaric acid
+        "NH4",  # ammonium -- crystallization-buffer salt
+        "SCN",  # thiocyanate -- crystallization precipitant salt
+        # Unidentified density: no name / formula / SMILES, never a cataloged row
+        "UNX",  # unknown atom or ion
+        "UNL",  # unknown ligand
+    }
+)
+
+# Never a receptor ligand, so no model judgement -- but catalogued into
+# auxiliary_small_molecules.csv with the fixed type in AUX_TYPE_MAP. Rows are
+# enumerated from the structure's nonpolymer roster (these are stripped before
+# the model sees them, so they never appear in model output).
+MECHANICAL_AUX: frozenset[str] = frozenset(
+    {
+        # Ions
         "K",
         "CL",
-        "MG",
-        "ZN",
-        "MN",
         "FE",
         "HG",
         "CD",
-        "NI",  # nickel from His-tag / IMAC purification and crystallization; a metal ion like ZN/MN/FE above, never a receptor ligand
+        "NI",  # nickel from His-tag / IMAC purification; a metal ion, never a receptor ligand
+        # Redox / metabolic cofactors of fusion partners
         "NAD",
         "NADP",
         "FAD",
-        "FMN",  # flavin mononucleotide -- redox cofactor of flavoprotein fusion partners (e.g. flavodoxin); a sibling of FAD above, never a receptor ligand
+        "FMN",  # flavin mononucleotide -- redox cofactor of flavoprotein fusion partners
         "COA",
+        # Glycans
         "NAG",
         "MAN",
         "GAL",
         "FUC",
-        # Lipidic-cubic-phase host / matrix lipids (monoacylglycerols). Synthetic
-        # crystallization matrix, never a functional ligand.
+        # Lipidic-cubic-phase host / matrix lipids and solubilization additives
         "OLC",  # monoolein (glyceryl monooleate)
         "OLB",  # monoolein stereoisomer
-        # Cholesterol hemisuccinate: a solubilization additive (cholesterol
-        # surrogate). Distinct from free cholesterol (CLR), which is incidental.
-        "Y01",
-        # Non-ionic detergents (alkyl glucosides / thioglucosides, maltosides,
-        # HEGA, amine oxide). Solubilization agents, not receptor ligands.
+        "Y01",  # cholesterol hemisuccinate (solubilization additive; distinct from free CLR)
+        # Non-ionic detergents (glucosides / thioglucosides / maltosides / HEGA / amine oxide)
         "BOG",  # octyl beta-D-glucoside
         "BNG",  # nonyl beta-D-glucoside
         "SOG",  # octyl 1-thio-beta-D-glucoside
@@ -786,28 +853,93 @@ LIGAND_EXCLUDE_LIST: frozenset[str] = frozenset(
         "AV0",  # lauryl maltose neopentyl glycol (alternate code)
         "LMT",  # dodecyl beta-D-maltoside
         "LDA",  # lauryl dimethylamine-N-oxide
-        # Polyethylene-glycol oligomers (cryoprotectant / precipitant family,
-        # alongside the PEG/PGE/PG4 already listed).
-        "1PE",  # pentaethylene glycol
-        "12P",  # dodecaethylene glycol
-        "P6G",  # hexaethylene glycol
-        # Other crystallization buffers / cryo-additives.
-        "HTO",  # heptane-1,2,3-triol
-        "D10",  # decane
-        "TAR",  # D-tartaric acid
-        "TLA",  # L-tartaric acid
-        "NH4",  # ammonium -- crystallization-buffer salt
-        "SCN",  # thiocyanate -- crystallization precipitant salt
-        # "Unknown atom or ion": a density the depositor could not chemically
-        # identify. It carries no name / formula / SMILES, so it can never be a
-        # cataloged ligand row.
-        "UNX",
-        # "Unknown ligand": a modeled small molecule the depositor could not
-        # chemically identify -- a sibling of UNX with no name / formula / SMILES,
-        # so it likewise can never be a cataloged ligand row.
-        "UNL",
     }
 )
+
+# The model-invisible gate consumed by prompt_builder / geometry / site_ref. The four
+# counter-ion metals (NA/MG/ZN/MN) are deliberately NOT here: they reach the model on
+# the auxiliary lane (INCIDENTAL_CANDIDATES) so a genuine functional metal -- e.g. Ca
+# at the calcium-sensing receptor, or a required Mg co-agonist -- is never hidden. Most
+# such metals are structural and the model routes them to auxiliary_small_molecules.csv.
+LIGAND_EXCLUDE_LIST: frozenset[str] = HARD_DROP | MECHANICAL_AUX
+
+# auxiliary_small_molecules.csv ``Type`` for a catalogued auxiliary molecule.
+# Covers the mechanical lane (fixed) plus the metals and transducer nucleotides
+# that reach aux from the model lane; other molecules fall back through
+# gpcrdb_aux_type_for (known lipid -> "Lipid", else "Other").
+AUX_TYPE_MAP: MappingProxyType[str, str] = MappingProxyType(
+    {
+        # Ions (mechanical ions + counter-ion metals on the model lane)
+        "K": "Ion",
+        "CL": "Ion",
+        "FE": "Ion",
+        "HG": "Ion",
+        "CD": "Ion",
+        "NI": "Ion",
+        "CA": "Ion",
+        "NA": "Ion",
+        "MG": "Ion",
+        "ZN": "Ion",
+        "MN": "Ion",
+        # Redox / metabolic cofactors and glycans
+        "NAD": "Other",
+        "NADP": "Other",
+        "FAD": "Other",
+        "FMN": "Other",
+        "COA": "Other",
+        "NAG": "Other",
+        "MAN": "Other",
+        "GAL": "Other",
+        "FUC": "Other",
+        # Matrix / solubilization lipids
+        "OLC": "Lipid",
+        "OLB": "Lipid",
+        "Y01": "Lipid",
+        # Detergents
+        "BOG": "Detergent",
+        "BNG": "Detergent",
+        "SOG": "Detergent",
+        "HTG": "Detergent",
+        "2CV": "Detergent",
+        "LMN": "Detergent",
+        "AV0": "Detergent",
+        "LMT": "Detergent",
+        "LDA": "Detergent",
+        # Transducer nucleotides / cofactors (chain-rule auxiliaries)
+        "GTP": "Other",
+        "GDP": "Other",
+        "GNP": "Other",
+        "GSP": "Other",
+        "GCP": "Other",
+        "ALF": "Other",
+    }
+)
+
+
+def gpcrdb_aux_type_for(comp_id: str | None) -> str:
+    """auxiliary_small_molecules.csv ``Type`` for a catalogued auxiliary molecule.
+
+    Mechanical-lane codes and the model-lane metals / transducer nucleotides are
+    fixed in :data:`AUX_TYPE_MAP`; any other molecule catalogued as auxiliary is
+    typed ``Lipid`` when it is a known lipid and ``Other`` otherwise.
+    """
+    if not comp_id:
+        return "Other"
+    mapped = AUX_TYPE_MAP.get(comp_id)
+    if mapped is not None:
+        return mapped
+    return "Lipid" if comp_id in LIPID_COMP_IDS else "Other"
+
+
+# Single-atom ion / metal comp ids (AUX_TYPE_MAP Type == "Ion"). They reach the model
+# on the auxiliary lane, but the geometry dual-role detector skips them: that detector
+# discriminates a structural-vs-functional LIPID by burial / pocket geometry, which is
+# meaningless for a single-atom ion -- a metal's functional judgement comes from the
+# paper (its pharmacological_role_check), not pocket geometry.
+ION_COMP_IDS: frozenset[str] = frozenset(
+    comp for comp, aux_type in AUX_TYPE_MAP.items() if aux_type == "Ion"
+)
+
 
 # Incidental-candidate molecules: present in many structures as EITHER a functional ligand OR
 # an incidental / structural lipid. The incidental-candidate prompt fork presents
@@ -817,21 +949,31 @@ LIGAND_EXCLUDE_LIST: frozenset[str] = frozenset(
 # defensive guard that keeps any molecule ever listed on both sets visible to the model
 # rather than silently hard-excluded. ~CLR 22% / PLM 5% of corpus.
 #
-# The additions below are biological lipids / metabolites that flood structures as
+# The lipid members are biological lipids / metabolites that flood structures as
 # membrane or matrix components yet are the endogenous agonist at their cognate
 # receptors (free-fatty-acid, sphingosine-1-phosphate, lysophosphatidic-acid and
-# succinate receptors). They must reach the model for a role judgement, never be
-# hard-excluded, because copy count alone cannot tell agonist from membrane filler.
+# succinate receptors). The counter-ion metals (Ca/Na/Mg/Zn/Mn) are usually
+# structural / counter-ions but ARE the functional actor at a few receptors (Ca at
+# the calcium-sensing receptor; a required Mg co-agonist; Na as a Class A 2.50-pocket
+# NAM); copy count alone cannot tell agonist from filler, so all of these reach the
+# model for a role judgement rather than being hard-excluded.
 INCIDENTAL_CANDIDATES: frozenset[str] = frozenset(
     {
+        # Biological lipids (endogenous agonists at FFA / S1P / LPA / succinate receptors)
         "CLR",  # cholesterol
         "PLM",  # palmitic acid
-        "OLA",  # oleic acid (free fatty-acid agonist at FFA receptors)
-        "S1P",  # sphingosine-1-phosphate (S1P-receptor agonist)
-        "HXA",  # docosahexaenoic acid / DHA (FFA-receptor agonist)
-        "NKP",  # lysophosphatidic acid (LPA-receptor agonist)
-        "ACT",  # acetate (short-chain fatty-acid agonist at FFA receptors)
-        "SIN",  # succinic acid (succinate-receptor agonist)
+        "OLA",  # oleic acid
+        "S1P",  # sphingosine-1-phosphate
+        "HXA",  # docosahexaenoic acid / DHA
+        "NKP",  # lysophosphatidic acid
+        "ACT",  # acetate (short-chain fatty acid)
+        "SIN",  # succinic acid
+        # Counter-ion metals: usually structural, but the functional actor at a few receptors
+        "CA",
+        "NA",
+        "MG",
+        "ZN",
+        "MN",
     }
 )
 
@@ -1551,6 +1693,19 @@ CSV_SCHEMA: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
             # as, and 1:1 with, the label_asym_id column (same instance list). The
             # chain prefix keeps a multi-copy ligand's repeating residue numbers
             # unambiguous.
+            "Residue_seq_id",
+        ),
+        # Auxiliary small molecules (ions, cofactors, glycans, detergents, matrix
+        # lipids, and model-lane molecules judged non-functional): never receptor
+        # ligands, so catalogued here instead of ligands.csv. Located exactly like a
+        # ligands.csv row (ChainID + label_asym_id + Residue_seq_id copy tokens).
+        "auxiliary_small_molecules.csv": (
+            "PDB",
+            "ChainID",
+            "Name",
+            "Type",
+            "Function",
+            "label_asym_id",
             "Residue_seq_id",
         ),
         "g_proteins.csv": (

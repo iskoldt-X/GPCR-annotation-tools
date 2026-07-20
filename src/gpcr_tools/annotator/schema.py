@@ -206,7 +206,7 @@ ANNOTATION_TOOL = types.Tool(
                                                     "only potentiates or only inhibits the orthosteric response with no intrinsic activation → 'PAM' / 'NAM';\n"
                                                     "blocks from an allosteric site → 'Allosteric antagonist'.\n"
                                                     "Default to 'Allosteric agonist' over 'Ago-PAM' unless the paper explicitly shows both standalone activation and potentiation.\n"
-                                                    "Not a pharmacological ligand (a structural lipid, detergent, or cofactor) → 'Cofactor';\n"
+                                                    "Not a pharmacological ligand (a structural lipid, detergent, bound cofactor, or a structural / counter-ion metal) → 'Cofactor';\n"
                                                     "truly undetermined → 'unknown'.\n"
                                                     "An endogenous peptide or protein hormone binding the extracellular domain (e.g. FSH) is an 'Agonist', not 'Allosteric agonist'."
                                                 ),
@@ -498,9 +498,15 @@ ANNOTATION_TOOL = types.Tool(
 PHARMACOLOGICAL_ROLE_CHECK_SCHEMA = types.Schema(
     type=types.Type.OBJECT,
     description=(
-        "Only for a detector-flagged incidental-candidate molecule (e.g. cholesterol, "
-        "palmitate): your judgment of whether it is a functional ligand or an "
-        "incidental / structural component, with the evidence."
+        "Only for a detector-flagged molecule (a lipid, a metal ion, or a molecule "
+        "flagged as sitting on a G-protein / transducer chain): your judgment of "
+        "whether THAT molecule is a FUNCTIONAL ligand of THIS receptor or an "
+        "AUXILIARY / structural / counter-ion / transducer-cofactor component, with "
+        "the evidence. Fill it ONLY for the flagged molecule and leave it absent on "
+        "every other ligand -- including the receptor's primary drug. Base it on an "
+        "explicit site / mechanism claim in the paper; when the paper shows no "
+        "functional role for it at this receptor, set is_functional_ligand = false "
+        "and role = Cofactor."
     ),
     properties={
         "is_functional_ligand": types.Schema(

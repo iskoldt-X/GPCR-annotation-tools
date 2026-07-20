@@ -5,12 +5,16 @@ from pathlib import Path
 import pytest
 
 from gpcr_tools.config import (
+    AUX_TYPE_MAP,
+    HARD_DROP,
     INCIDENTAL_CANDIDATES,
     LIGAND_EXCLUDE_LIST,
+    MECHANICAL_AUX,
     SOFT_FIELD_KEYS,
     WorkspaceConfig,
     ensure_alert_prefix,
     get_config,
+    gpcrdb_aux_type_for,
     list_item_identity,
     reset_config,
     safe_name_normalize,
@@ -236,6 +240,44 @@ class TestLigandLists:
         # ``- INCIDENTAL_CANDIDATES`` subtractions are defensive guards should the
         # sets ever overlap again; this invariant asserts they do not today.)
         assert not (INCIDENTAL_CANDIDATES & LIGAND_EXCLUDE_LIST)
+
+
+class TestAuxiliaryLaneConfig:
+    """The exclude-list split (HARD_DROP + MECHANICAL_AUX) and the aux type map."""
+
+    def test_hard_drop_and_mechanical_aux_are_disjoint(self) -> None:
+        assert HARD_DROP.isdisjoint(MECHANICAL_AUX)
+
+    def test_both_lanes_share_the_model_invisible_gate(self) -> None:
+        # HARD_DROP and MECHANICAL_AUX both sit behind the strip gate; they only
+        # diverge at the OUTPUT (nothing vs a catalogued auxiliary row).
+        assert HARD_DROP <= LIGAND_EXCLUDE_LIST
+        assert MECHANICAL_AUX <= LIGAND_EXCLUDE_LIST
+
+    def test_every_mechanical_code_has_an_aux_type(self) -> None:
+        # A mechanical molecule is catalogued deterministically, so it must carry
+        # a fixed auxiliary type.
+        missing = sorted(code for code in MECHANICAL_AUX if code not in AUX_TYPE_MAP)
+        assert not missing, f"mechanical codes with no aux type: {missing}"
+
+    def test_aux_type_map_values_are_valid(self) -> None:
+        assert set(AUX_TYPE_MAP.values()) <= {"Ion", "Lipid", "Detergent", "Other"}
+
+    def test_aux_type_for_fixed_codes(self) -> None:
+        assert gpcrdb_aux_type_for("NA") == "Ion"
+        assert gpcrdb_aux_type_for("LMT") == "Detergent"
+        assert gpcrdb_aux_type_for("OLC") == "Lipid"
+        assert gpcrdb_aux_type_for("NAG") == "Other"
+        assert gpcrdb_aux_type_for("GTP") == "Other"
+
+    def test_aux_type_for_known_lipid_falls_back_to_lipid(self) -> None:
+        # A known lipid not fixed in AUX_TYPE_MAP is still typed Lipid.
+        assert gpcrdb_aux_type_for("CLR") == "Lipid"
+
+    def test_aux_type_for_unknown_defaults_to_other(self) -> None:
+        assert gpcrdb_aux_type_for("ZZZ") == "Other"
+        assert gpcrdb_aux_type_for(None) == "Other"
+        assert gpcrdb_aux_type_for("") == "Other"
 
 
 @pytest.fixture(autouse=True)

@@ -37,6 +37,7 @@ from gpcr_tools.detector.signals import (
     SIGNAL_DUAL_ROLE_LIGAND,
     SIGNAL_INCIDENTAL_CANDIDATE,
     SIGNAL_SITE_REF,
+    SIGNAL_TRANSDUCER_COPY,
     DetectSignal,
 )
 from gpcr_tools.detector.site_ref import _annotated_ligands
@@ -58,6 +59,7 @@ _MODEL_FACING_KINDS = frozenset(
         SIGNAL_CLASS_C_MULTI_PROTOMER,
         SIGNAL_COUPLING_PROTOMER,
         SIGNAL_INCIDENTAL_CANDIDATE,
+        SIGNAL_TRANSDUCER_COPY,
         SIGNAL_DUAL_ROLE_LIGAND,
         SIGNAL_SITE_REF,
     }
@@ -115,6 +117,14 @@ def _format_signal(signal: DetectSignal) -> str | None:
             f"{comp} is present; it can be a functional ligand in some structures and an "
             f"incidental structural component in others. Judge its role from the paper "
             f"and record a pharmacological_role_check."
+        )
+    if signal.kind == SIGNAL_TRANSDUCER_COPY:
+        listed = ", ".join(str(c) for c in (payload.get("copies") or [])) or "?"
+        return (
+            f"The following copies sit on a G-protein / transducer chain, not the "
+            f"receptor -- the transducer's own nucleotide / cofactor, not receptor "
+            f"ligands: {listed}. Set that copy's role = Cofactor, unless the paper "
+            f"specifically shows a functional role at THIS receptor."
         )
     if signal.kind == SIGNAL_DUAL_ROLE_LIGAND:
         return _format_dual_role(payload)
