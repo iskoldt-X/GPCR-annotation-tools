@@ -152,8 +152,7 @@ def display_decision_brief(
     oligo_line.append(f"{classification} ({chain_count} GPCR chain(s))", style="white")
 
     gprot_line = Text()
-    gprot_line.append("G-protein: ", style="bold")
-    if g_protein:
+    gprot_line.append("G protein: ", style="bold")
         chimeric = g_protein.get("is_chimeric")
         chimerism = (
             "chimeric"
