@@ -74,7 +74,7 @@ A coordinate-driven detect stage (built on [gemmi](https://gemmi.readthedocs.io/
 - **Context-rich prompts** — The AI receives not just the paper PDF but also pre-enriched PDB metadata, the detect stage's structural evidence, a per-chain polymer table carrying each chain's 7TM status and residue length (to tell a true 7TM receptor from a non-receptor partner), a chain inventory reminder, and sibling structure warnings — reducing hallucination by grounding the model in API-verified and coordinate-derived facts.
 - **Model-judged oligomeric state** — The model annotates the receptor's `oligomeric_state` (monomer / homo-/hetero-dimer / etc.) from neutral facts, counting only GPCR protomers (not transducer or ligand partners).
 - **Flexible model selection** — Switch models at runtime via `--model` flag or `GPCR_GEMINI_MODEL` environment variable without code changes; sampling depth is tunable via `--temperature` and `--thinking-level` (threaded through both single and batch paths).
-- **Batch API support** — Large-scale annotation via Gemini Batch API with JSONL submission, polling, and automatic result recovery; submissions are sharded into jobs (never splitting a structure's runs) and tracked in a registry for idempotent recovery.
+- **Batch API support** — Large-scale annotation via Gemini Batch API with JSONL submission, polling, and automatic result recovery; submissions are sharded into jobs (never splitting a structure's runs) and tracked in a registry for idempotent recovery. A `--sequential` mode submits one shard per invocation and refuses to overlap an in-flight job, so scheduled or repeated runs advance the corpus without overrunning the provider's enqueued-token limit.
 - **Rate-limited client** — Sliding-window rate limiting (1000 RPM) with exponential backoff on 429 responses.
 
 ### Post-Annotation Validation
@@ -96,6 +96,7 @@ A family of checks routes likely mistakes to the review channel that disables on
 
 - **Rich terminal dashboard** — An ergonomic review interface built with [Rich](https://github.com/Textualize/rich) for rapid, informed decision-making.
 - **Context-aware validation alerts** — Real-time display of ghost chains, hallucinated ligands, UniProt identity clashes, and chimera warnings alongside the data being reviewed.
+- **Read-only decision brief** — Each gated structure opens with a ranked list of every signal that needs a decision (validation findings, oligomer findings, and each AI-run voting fork), so the reviewer sees the full picture before drilling in.
 - **Recursive review engine** — Navigate field-by-field through the annotation tree, with controversy highlights guiding attention to disputed values.
 - **Append-only audit trail** — Every human decision (accept / edit / reject) is logged to `audit_trail.jsonl` with timestamps, providing full reproducibility.
 - **Resumable sessions** — Curation progress is persisted; interrupted sessions resume exactly where they left off.
@@ -251,6 +252,7 @@ gpcr-tools annotate --prompt prompts/custom.md          # Custom prompt template
 gpcr-tools annotate --temperature 0.7                   # Sampling temperature (default: model's own)
 gpcr-tools annotate --thinking-level low                # Reasoning depth: minimal|low|medium|high
 gpcr-tools annotate --batch                             # Submit via Batch API
+gpcr-tools annotate --batch --sequential                # One shard/run; won't overlap an in-flight batch (cron-safe)
 gpcr-tools annotate --check-batch                       # Poll batch status
 gpcr-tools annotate --recover                           # Re-process raw batch output
 ```
@@ -381,7 +383,7 @@ Tab-separated, normalized files ready for database ingestion:
 | `structures.csv` | PDB ID, receptor UniProt, method, resolution, state, chain, date, and (for a heterodimer) the partner protomer's UniProt + chain |
 | `ligands.csv` | Ligand identity (`Name`, the PDBe chemical-component code such as `RET` or `U0G`, falling back to the descriptive name when no component code exists), the full descriptive name (`Title`), PubChem IDs, roles, binding-site type (`Site`, from the geometry-informed `site_ref`), entity types, SMILES, InChIKey, sequences, the residue numbers of each modelled copy (`Residue_seq_id`, comma-joined and aligned copy-for-copy with `label_asym_id`), and whether the bound compound is an endogenous ligand (`is_endogenous`, GtoPdb). Molecules that are not functional ligands (ions, cofactors, glycans, detergents, matrix lipids, and molecules the model judged non-functional or structural) are catalogued in `auxiliary_small_molecules.csv` instead. |
 | `auxiliary_small_molecules.csv` | Small molecules present but not functional receptor ligands: `Name` (component code), `Type` (`Ion` / `Lipid` / `Detergent` / `Other`), `Function` (`Cofactor` or blank), located like `ligands.csv` (`ChainID` + `label_asym_id` + `Residue_seq_id`) |
-| `g_proteins.csv` | G protein subunit UniProt IDs and chain assignments |
+| `g_proteins.csv` | G protein subunit identities and chain assignments: `Alpha_identity` (alpha subunit UniProt entry name), `Alpha_alpha5_identity` (alpha5-helix functional coupling), `Alpha_backbone` (modelled scaffold), plus beta/gamma UniProt IDs and chains |
 | `arrestins.csv` | Arrestin UniProt IDs and chains |
 | `fusion_proteins.csv` | Fusion protein names |
 | `nanobodies.csv`, `antibodies.csv`, `scfv.csv` | Binding partner names |
@@ -504,7 +506,7 @@ pytest tests/ -v
 
 ### Test Suite
 
-The test suite includes 1,100+ tests:
+The test suite includes 1,700+ tests:
 
 - **Unit tests** for every module across all five pipeline stages
 - **Integration tests** for the full aggregation pipeline, error isolation, and atomic write safety
