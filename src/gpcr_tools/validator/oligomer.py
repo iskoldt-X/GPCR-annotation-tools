@@ -1661,7 +1661,7 @@ def is_transducer_chain(chain_info: dict[str, Any]) -> bool:
     nucleotide / cofactor -- rather than on the receptor, so it is catalogued as
     auxiliary instead of a receptor ligand.
 
-    Kept distinct from :func:`is_g_protein_fragment_chain` (which the G-protein
+    Kept distinct from :func:`is_g_protein_fragment_chain` (which the G protein
     relocation logic reuses with a strict "G protein fragment" meaning): widening
     that function to arrestins would mis-drive the relocation.
     """

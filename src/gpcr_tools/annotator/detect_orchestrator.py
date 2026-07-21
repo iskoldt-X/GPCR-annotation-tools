@@ -121,7 +121,7 @@ def _format_signal(signal: DetectSignal) -> str | None:
     if signal.kind == SIGNAL_TRANSDUCER_COPY:
         listed = ", ".join(str(c) for c in (payload.get("copies") or [])) or "?"
         return (
-            f"The following copies sit on a G-protein / transducer chain, not the "
+            f"The following copies sit on a G protein / transducer chain, not the "
             f"receptor -- the transducer's own nucleotide / cofactor, not receptor "
             f"ligands: {listed}. Set that copy's role = Cofactor, unless the paper "
             f"specifically shows a functional role at THIS receptor."

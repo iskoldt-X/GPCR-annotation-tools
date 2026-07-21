@@ -119,7 +119,7 @@ def display_decision_brief(
     """Read-only decision brief shown at the top of a gated structure.
 
     Summarises WHY a structure needs a human before the raw review begins:
-    identity, the oligomer call, a one-line G-protein summary, and the
+    identity, the oligomer call, a one-line G protein summary, and the
     severity-ordered per-signal decision list from
     :func:`gpcr_tools.validator.decisions.enumerate_decisions`. It is purely
     informational -- it never writes, prompts, or edits (by-path editing is a
@@ -153,6 +153,7 @@ def display_decision_brief(
 
     gprot_line = Text()
     gprot_line.append("G protein: ", style="bold")
+    if g_protein:
         chimeric = g_protein.get("is_chimeric")
         chimerism = (
             "chimeric"

@@ -105,7 +105,7 @@ def main(target_pdb: str | None = None, auto_accept: bool = False) -> None:
                 continue
 
             # Read-only decision brief for gated structures: identity, the
-            # oligomer and G-protein calls, and the severity-ordered per-signal
+            # oligomer and G protein calls, and the severity-ordered per-signal
             # decision list, shown before the raw summary so the curator sees why
             # this structure needs a human. Informational only; it does not write
             # or edit (by-path editing is a later increment).

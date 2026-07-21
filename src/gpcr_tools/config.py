@@ -1799,11 +1799,11 @@ AUTO_RESOLVE_KEYS: frozenset[str] = frozenset(
 #                        peptide / protein / na / none) -- a flat leaf, so its
 #                        disagreements bypass the per-copy `role.value` guard
 #                        above and must be pinned here on their own
-#   uniprot_entry_name   receptor and G-protein-subunit identity
+#   uniprot_entry_name   receptor and G protein subunit identity
 #   state                functional-state block
 #   oligomeric_state     receptor oligomeric-state block
 #   is_functional_ligand incidental-candidate functional-vs-structural call
-#   is_chimeric          engineered chimeric G-protein flag
+#   is_chimeric          engineered chimeric G protein flag
 #   family / subtype / functional_coupling
 #                        G-alpha coupling-family and subtype identity
 SEMANTIC_CONTROVERSY_KEYS: frozenset[str] = frozenset(

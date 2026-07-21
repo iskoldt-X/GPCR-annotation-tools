@@ -45,7 +45,7 @@ def state_ligand_consistency_warnings(best_run_data: dict[str, Any]) -> list[str
       absent, or present without an ``alpha_subunit``).
 
     A modelled G protein is deliberately treated as settling the state: a
-    G-protein-coupled complex carrying an inverse agonist is real published
+    G protein-coupled complex carrying an inverse agonist is real published
     biology, not something to flag. Antagonist / NAM ligands are excluded so a
     blocked-but-active structure does not raise a false advisory.
 

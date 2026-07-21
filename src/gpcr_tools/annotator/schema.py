@@ -499,7 +499,7 @@ PHARMACOLOGICAL_ROLE_CHECK_SCHEMA = types.Schema(
     type=types.Type.OBJECT,
     description=(
         "Only for a detector-flagged molecule (a lipid, a metal ion, or a molecule "
-        "flagged as sitting on a G-protein / transducer chain): your judgment of "
+        "flagged as sitting on a G protein / transducer chain): your judgment of "
         "whether THAT molecule is a FUNCTIONAL ligand of THIS receptor or an "
         "AUXILIARY / structural / counter-ion / transducer-cofactor component, with "
         "the evidence. Fill it ONLY for the flagged molecule and leave it absent on "

@@ -79,7 +79,7 @@ def detect_transducer_copies(
     pdb_id: str,
     enriched_entry: dict[str, Any],
 ) -> list[DetectSignal]:
-    """One advisory signal naming the non-polymer copies that sit on a G-protein /
+    """One advisory signal naming the non-polymer copies that sit on a G protein /
     transducer chain rather than on the receptor.
 
     Such a copy -- the transducer's own nucleotide / cofactor (a GTP / GDP or a
@@ -116,7 +116,7 @@ def detect_transducer_copies(
             kind=SIGNAL_TRANSDUCER_COPY,
             target_ref=LOCUS_LIGANDS,
             summary=(
-                f"Copies on a G-protein / transducer chain (not the receptor): "
+                f"Copies on a G protein / transducer chain (not the receptor): "
                 f"{', '.join(copies)}. Judge each as the transducer's cofactor (role Cofactor)."
             ),
             payload={"copies": copies},
