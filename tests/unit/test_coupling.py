@@ -1,4 +1,4 @@
-"""Tests for the G-protein coupling-protomer detector (the rule + enriched parsing).
+"""Tests for the G protein coupling-protomer detector (the rule + enriched parsing).
 
 The gemmi compute (receptor<->G-alpha contacts) and the coordinate fetch are stubbed,
 so these exercise the decision logic only: when a structure with a G-alpha and >=2

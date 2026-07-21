@@ -43,3 +43,32 @@ class TestLogAuditTrail:
             entry = json.loads(line)
             assert "pdb_id" in entry
             assert "timestamp" in entry
+
+    def test_soft_fails_when_audit_dir_cannot_be_created(self, tmp_path, monkeypatch):
+        """A filesystem failure creating the audit directory must never crash
+        curate: log_audit_trail should soft-fail (not raise) even when the
+        audit directory cannot be created.
+
+        Here a plain file is placed where the output directory is expected, so
+        the audit directory resolves under a non-directory and mkdir raises.
+        """
+        from gpcr_tools.config import reset_config
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        monkeypatch.setenv("GPCR_WORKSPACE", str(workspace))
+
+        # A regular file where the output directory should be: the audit dir
+        # then resolves to <file>/audit, whose mkdir cannot succeed.
+        output_as_file = tmp_path / "output_is_a_file"
+        output_as_file.write_text("not a directory")
+        monkeypatch.setenv("GPCR_OUTPUT_PATH", str(output_as_file))
+
+        reset_config()
+        try:
+            from gpcr_tools.csv_generator.audit import log_audit_trail
+
+            # Must not raise despite the un-creatable audit directory.
+            log_audit_trail("TEST1", "field_a", "accept", "x", "x")
+        finally:
+            reset_config()

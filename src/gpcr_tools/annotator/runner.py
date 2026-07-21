@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import contextlib
+import fcntl
 import json
 import logging
 import os
@@ -13,9 +14,15 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from google.genai.errors import APIError
+from google.genai.errors import APIError, ClientError, ServerError
 
-from gpcr_tools.annotator.detect_orchestrator import build_tool_config, build_tool_for_signals
+from gpcr_tools.annotator.detect_orchestrator import (
+    build_tool_config,
+    build_tool_for_signals,
+    check_ligand_copy_coverage,
+    ligand_copy_id_enum,
+    ligand_copy_identifiers,
+)
 from gpcr_tools.annotator.gemini_client import get_client
 from gpcr_tools.annotator.pdf_compressor import compress_pdf_if_needed
 from gpcr_tools.annotator.post_processor import post_process_annotation
@@ -33,10 +40,14 @@ from gpcr_tools.config import (
     GEMINI_BASE_BACKOFF,
     GEMINI_BATCH_MAX_REQUESTS,
     GEMINI_BATCH_PACK_REQUESTS,
+    GEMINI_BATCH_SEQUENTIAL_MAX_REQUESTS,
+    GEMINI_BATCH_SHARD_PDBS,
     GEMINI_DEFAULT_RUNS,
     GEMINI_FILE_TTL_HOURS,
     GEMINI_MAX_RETRIES,
     GEMINI_MAX_WORKERS,
+    GEMINI_UPLOAD_BASE_BACKOFF,
+    GEMINI_UPLOAD_MAX_RETRIES,
     SLEEP_GEMINI_429,
     UPLOAD_DEDUP,
     get_config,
@@ -125,16 +136,44 @@ def _resolve_upload(
         else:
             return cached_uri, cached.get("name")
 
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        tmp_pdf = Path(tmp_dir) / f"{pdb_id}_compressed.pdf"
-        try:
-            actual_pdf = compress_pdf_if_needed(pdf_file, tmp_pdf)
-            uploaded_file = client.files.upload(
-                file=str(actual_pdf), config={"mime_type": "application/pdf"}
-            )
-        except Exception as e:
-            logger.error("[%s] Failed to upload PDF: %s", pdb_id, e)
-            return None, None
+    # Bounded retry around the compress + Files-API upload: a transient upload
+    # failure (5xx, a 429 rate-limit, or a network / compression hiccup) would
+    # otherwise drop this structure from the batch entirely. Exponential backoff
+    # mirrors the generation-retry idiom in ``do_run`` below. A fatal 4xx
+    # (ClientError, code != 429) won't change on retry, so abstain immediately —
+    # the same HTTP-400-abstains convention the validator API clients follow.
+    uploaded_file = None
+    # Seeded so the post-loop error log can never raise NameError if the retry
+    # budget were ever configured to 0 (the loop body would then never run).
+    last_exc: Exception = RuntimeError("no upload attempted")
+    for attempt in range(GEMINI_UPLOAD_MAX_RETRIES):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_pdf = Path(tmp_dir) / f"{pdb_id}_compressed.pdf"
+            try:
+                actual_pdf = compress_pdf_if_needed(pdf_file, tmp_pdf)
+                uploaded_file = client.files.upload(
+                    file=str(actual_pdf), config={"mime_type": "application/pdf"}
+                )
+                break
+            except ClientError as e:
+                if e.code != 429:
+                    # A fatal client error (e.g. HTTP 400) will not change on
+                    # retry — abstain now rather than burning the backoff budget.
+                    logger.error("[%s] Failed to upload PDF: %s", pdb_id, e)
+                    return None, None
+                last_exc = e
+            except ServerError as e:
+                # Provider 5xx — service unavailable, not a verdict. Retry.
+                last_exc = e
+            except Exception as e:
+                # Generic transient failure: a 429 surfaced as a bare APIError, or
+                # a network / OSError / compression hiccup. Fall through to retry.
+                last_exc = e
+        if attempt < GEMINI_UPLOAD_MAX_RETRIES - 1:
+            time.sleep(GEMINI_UPLOAD_BASE_BACKOFF * (2**attempt))
+    if uploaded_file is None:
+        logger.error("[%s] Failed to upload PDF: %s", pdb_id, last_exc)
+        return None, None
 
     # Stamp the REAL upload time (not the submit-time ``now``) so the TTL check
     # measures the file's actual age; record the deletable file ``name``, the DOI,
@@ -233,6 +272,43 @@ def _delete_remote_file(client: Any, name: str) -> None:
         logger.info("Deleted uploaded file %s", name)
 
 
+def _purge_upload_cache_entries(config: Any, deleted_names: list[str]) -> None:
+    """Drop upload-cache entries whose backing Files-API file was just deleted.
+
+    The paper-upload cache (``uploaded_files_registry_file``) reuses a cached
+    fileUri by TTL alone -- :func:`_registry_fresh_uri` does not check remote
+    existence. Once terminal cleanup has deleted a file, any cache entry still
+    pointing at it (matched on the stored ``name``) would make a later shard
+    embed a dead fileUri; removing those entries forces a fresh re-upload
+    instead. Atomic save (tmp + os.replace) mirrors the cache-save in
+    :func:`build_and_submit_batch`. Best-effort: a missing/corrupt cache is a
+    no-op, never raised.
+    """
+    if not deleted_names:
+        return
+    reg_file = config.uploaded_files_registry_file
+    if not reg_file.exists():
+        return
+    try:
+        cache = json.loads(reg_file.read_text())
+    except (json.JSONDecodeError, OSError):
+        return
+    if not isinstance(cache, dict):
+        return
+    targets = set(deleted_names)
+    pruned = {
+        key: val
+        for key, val in cache.items()
+        if not (isinstance(val, dict) and val.get("name") in targets)
+    }
+    if pruned == cache:
+        return
+    tmp_reg = reg_file.with_suffix(".tmp")
+    with open(tmp_reg, "w") as f:
+        json.dump(pruned, f, indent=2)
+    os.replace(tmp_reg, reg_file)
+
+
 def _cleanup_terminal_job_uploads(config: Any, client: Any, job_name: str) -> None:
     """Delete a terminal job's uploaded inputs, ref-counted across jobs.
 
@@ -251,13 +327,34 @@ def _cleanup_terminal_job_uploads(config: Any, client: Any, job_name: str) -> No
     if entry.get("uploads_cleaned"):
         return
     still_referenced = _files_referenced_by_live_jobs(registry, exclude_job=job_name)
+    deleted_names: list[str] = []
     for fname in entry.get("uploaded_file_names") or []:
         if fname and str(fname) not in still_referenced:
             _delete_remote_file(client, str(fname))
+            deleted_names.append(str(fname))
     src = entry.get("batch_src_file_name")
     if src:
         _delete_remote_file(client, str(src))
+        deleted_names.append(str(src))
+    # A file we just deleted may still be cached in the paper-upload registry,
+    # which is reused by TTL alone; purge those entries so the next shard
+    # re-uploads instead of embedding a now-dead fileUri.
+    _purge_upload_cache_entries(config, deleted_names)
     _update_job_status(config, job_name, uploads_cleaned=True)
+
+
+def _cleanup_recovered_jobs(config: Any, client: Any) -> None:
+    """Release the uploaded inputs of every recovered job whose results are on disk.
+
+    Ref-counted (a PDF shared with a still-live job is kept until that job is
+    terminal too) and idempotent. No-op when cleanup is disabled.
+    """
+    if not CLOUD_CLEANUP:
+        return
+    registry = _load_job_registry(config)
+    for entry in registry["jobs"].values():
+        if entry.get("status") == BATCH_STATUS_RECOVERED:
+            _cleanup_terminal_job_uploads(config, client, entry["job_name"])
 
 
 def _sweep_orphan_uploads(config: Any, client: Any) -> None:
@@ -409,7 +506,36 @@ def _submit_batch_chunk(
         if not batch_src_file.name:
             raise ValueError("Uploaded file has no name")
 
-        batch_job = client.batches.create(model=model_name, src=batch_src_file.name)
+        # Bounded retry around batch-job creation, mirroring the Files-API upload
+        # idiom in _resolve_upload: a transient 429 (the enqueued-token rate
+        # limit), a provider 5xx, or a bare network/TimeoutError/OSError would
+        # otherwise fail this whole chunk with zero retries. A fatal 4xx
+        # (ClientError, code != 429) will not change on retry, so it is re-raised
+        # immediately for the caller to isolate. Backoff is exponential and sleeps
+        # only BETWEEN attempts. A rare 5xx returned AFTER the server already
+        # created the job could, on retry, create a DUPLICATE job; recover_batch
+        # dedups by run_N.json existence (it never clobbers an existing run), so a
+        # duplicate wastes quota but never corrupts data.
+        batch_job = None
+        last_exc: Exception = RuntimeError("no batch create attempted")
+        for attempt in range(GEMINI_UPLOAD_MAX_RETRIES):
+            try:
+                batch_job = client.batches.create(model=model_name, src=batch_src_file.name)
+                break
+            except ClientError as e:
+                if e.code != 429:
+                    raise
+                last_exc = e
+            except ServerError as e:
+                last_exc = e
+            except Exception as e:
+                # Generic transient failure: a 429 surfaced as a bare APIError, or
+                # a network / TimeoutError / OSError. Fall through to retry.
+                last_exc = e
+            if attempt < GEMINI_UPLOAD_MAX_RETRIES - 1:
+                time.sleep(GEMINI_UPLOAD_BASE_BACKOFF * (2**attempt))
+        if batch_job is None:
+            raise last_exc
         if not batch_job.name:
             raise ValueError("Created batch job has no name")
         logger.info(
@@ -521,8 +647,15 @@ def run_single_pdb(
             parts = build_prompt_parts(
                 pdb_id, enriched_data, prompt_text, detect_signals=detect_signals
             )
+            # Pin the per-PDB ligand_copies schema to this structure's ligand copy
+            # identifiers (empty -> schema unchanged); the matching prompt roster is
+            # built inside build_prompt_parts.
+            copy_ids = ligand_copy_id_enum(ligand_copy_identifiers(enriched_data))
             run_config = build_tool_config(
-                detect_signals, temperature=temperature, thinking_level=thinking_level
+                detect_signals,
+                temperature=temperature,
+                thinking_level=thinking_level,
+                ligand_copy_ids=copy_ids,
             )
             contents: list[Any] = [*parts, uploaded_file]
 
@@ -556,6 +689,31 @@ def run_single_pdb(
 
                         # Process and save
                         final_data = post_process_annotation(args)
+
+                        # Deterministic coverage guard: the returned per-copy
+                        # roster must cover this structure's ligand copy
+                        # identifiers exactly. A mismatch is a retry trigger like
+                        # a missing / mismatched function call. On the final
+                        # attempt the best-effort result is kept rather than
+                        # losing the whole PDB -- missing per-copy rows are
+                        # tolerated downstream (surface, don't silently corrupt).
+                        coverage = check_ligand_copy_coverage(
+                            final_data.get("ligand_copies"), copy_ids
+                        )
+                        if not coverage.ok:
+                            if retries < GEMINI_MAX_RETRIES - 1:
+                                raise ValueError(
+                                    f"ligand copy coverage mismatch ({coverage.describe()})"
+                                )
+                            logger.warning(
+                                "[%s] Run %d: ligand copy coverage mismatch after %d "
+                                "attempts (%s); keeping the returned annotation.",
+                                pdb_id,
+                                run_num,
+                                GEMINI_MAX_RETRIES,
+                                coverage.describe(),
+                            )
+
                         final_data["_provenance"] = {
                             "model_requested": model_name,
                             "model_served": getattr(response, "model_version", None),
@@ -618,8 +776,14 @@ def build_and_submit_batch(
     prompt_id: str | None = None,
     temperature: float | None = None,
     thinking_level: str | None = None,
+    pack_cap_override: int | None = None,
 ) -> None:
-    """Build a JSONL payload for all *targets* and submit it to the Gemini Batch API."""
+    """Build a JSONL payload for all *targets* and submit it to the Gemini Batch API.
+
+    *pack_cap_override*, when given, replaces the per-job packing cap (used by the
+    sequential path to land one whole shard in a single job); left as ``None`` the
+    default cap selection is unchanged.
+    """
     model_name = model_name or get_gemini_model_name()
     config = get_config()
     client = get_client()
@@ -687,6 +851,16 @@ def build_and_submit_batch(
             client, config, registry, upload_key, pdb_id, pdf_file, doi, now
         )
         if not pdf_uri:
+            # The upload exhausted its retries (or hit a fatal error): this
+            # structure produced no requests, so it would silently vanish from
+            # the batch. Name the consequence so the loss is visible — it will be
+            # re-attempted on the next annotate pass (completed runs are skipped).
+            logger.warning(
+                "[%s] PDF upload failed after retries; this structure produced no AI "
+                "results and was dropped from this batch; it will be re-attempted on "
+                "the next annotate pass.",
+                pdb_id,
+            )
             continue
 
         detect_signals = load_detect_signals(pdb_id)
@@ -696,7 +870,13 @@ def build_and_submit_batch(
         parts = build_prompt_parts(
             pdb_id, enriched_data, prompt_text, detect_signals=detect_signals
         )
-        tool_for_pdb = build_tool_for_signals(ANNOTATION_TOOL, detect_signals)
+        # Pin the per-PDB ligand_copies schema to this structure's ligand copy
+        # identifiers (empty -> schema unchanged); the matching prompt roster is
+        # built inside build_prompt_parts.
+        copy_ids = ligand_copy_id_enum(ligand_copy_identifiers(enriched_data))
+        tool_for_pdb = build_tool_for_signals(
+            ANNOTATION_TOOL, detect_signals, ligand_copy_ids=copy_ids
+        )
 
         # We need to construct the request dict for the batch API.
         # The schema for the batch API contents is identical to generate_content.
@@ -776,6 +956,10 @@ def build_and_submit_batch(
         pack_cap = GEMINI_BATCH_PACK_REQUESTS
     else:
         pack_cap = GEMINI_BATCH_MAX_REQUESTS
+    # A caller-supplied cap (the sequential path) takes precedence over the
+    # default selection, so one shard's requests land in a single job.
+    if pack_cap_override is not None:
+        pack_cap = pack_cap_override
 
     # Shard into jobs so one oversized submission can't be rejected wholesale or
     # sit in the queue past the provider's 48-hour expiry. Each PDB's runs stay
@@ -820,6 +1004,127 @@ def build_and_submit_batch(
     logger.info("Submitted %d/%d batch chunk(s).", submitted, len(chunks))
 
 
+def submit_next_sequential_shard(
+    prompt_text: str,
+    num_runs: int = GEMINI_DEFAULT_RUNS,
+    model_name: str | None = None,
+    prompt_id: str | None = None,
+    temperature: float | None = None,
+    thinking_level: str | None = None,
+    targets: list[str] | None = None,
+) -> None:
+    """Submit the next corpus shard, keeping at most one batch job in flight.
+
+    Sequential submission for a large corpus: rather than firing every shard's
+    job into flight at once (which overruns the provider's enqueued-token
+    ceiling), this submits a single shard of at most ``GEMINI_BATCH_SHARD_PDBS``
+    PDBs and returns. It refuses to submit while any prior job is still in flight
+    (not yet recovered or failed), which is what makes repeated invocation safe:
+    an external cron or a manual re-run either advances the corpus by one shard
+    or no-ops until the outstanding job is recovered. Completed PDBs are already
+    excluded by :func:`discover_annotation_targets`, so successive shards never
+    resubmit finished work.
+
+    When *targets* is given (an operator's explicit ``--targets`` / ``pdb_id``),
+    the shard is restricted to that set intersected with the still-remaining PDBs,
+    so a smoke test never accidentally submits the whole corpus; ``None`` keeps the
+    full-corpus discovery.
+    """
+    model_name = model_name or get_gemini_model_name()
+    config = get_config()
+
+    # Cheap misconfiguration guard: one full shard's requests must fit in one job,
+    # or the packing would split it into concurrent jobs and defeat concurrency=1.
+    required = GEMINI_BATCH_SHARD_PDBS * num_runs
+    if required > GEMINI_BATCH_SEQUENTIAL_MAX_REQUESTS:
+        raise ValueError(
+            "Sequential per-job request cap (GEMINI_BATCH_SEQUENTIAL_MAX_REQUESTS="
+            f"{GEMINI_BATCH_SEQUENTIAL_MAX_REQUESTS}) is smaller than one shard's "
+            f"requests (GEMINI_BATCH_SHARD_PDBS={GEMINI_BATCH_SHARD_PDBS} x "
+            f"--runs={num_runs} = {required}): one shard would split into multiple "
+            "concurrent jobs, defeating concurrency=1. Lower --runs / "
+            "GEMINI_BATCH_SHARD_PDBS or raise GEMINI_BATCH_SEQUENTIAL_MAX_REQUESTS."
+        )
+
+    # Cross-process guard against a double-submit: the concurrency=1 check below is
+    # check-then-act, so two overlapping invocations (a cron tick landing during a
+    # slow multi-minute upload+submit) could both pass it and submit two shards. A
+    # non-blocking exclusive file lock, held through job registration, serialises
+    # them; a second concurrent invocation simply no-ops.
+    config.state_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = config.state_dir / "sequential_submit.lock"
+    # Closing the file (at the end of the with-block) releases the flock, so the
+    # lock is held for exactly the guard-check-through-registration below.
+    with open(lock_path, "w") as lock_file:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            logger.info(
+                "Sequential submission skipped: another submission already holds the "
+                "lock (%s); it is advancing the corpus.",
+                lock_path,
+            )
+            return
+
+        # Concurrency=1: a job that has not reached a terminal state (recovered or
+        # failed) is still in flight -- including a downloaded-but-not-yet-recovered
+        # one. While any such job exists, do not submit another; the next invocation
+        # proceeds once it has been recovered (or has failed). Treating only
+        # recovered/failed as terminal means an unexpected status is conservatively
+        # counted as in flight, so a bad state never fans out extra jobs.
+        registry = _load_job_registry(config)
+        terminal = {BATCH_STATUS_RECOVERED, BATCH_STATUS_FAILED}
+        in_flight = [e for e in registry["jobs"].values() if e.get("status") not in terminal]
+        if in_flight:
+            logger.info(
+                "Sequential submission skipped: %d batch job(s) still in flight; recover them "
+                "(annotate --check-batch) before the next shard is submitted.",
+                len(in_flight),
+            )
+            return
+
+        remaining = discover_annotation_targets(num_runs, model_name)
+        if targets is not None:
+            # Restrict to the operator's explicit target set (case-insensitive),
+            # preserving discovery order and dropping already-complete PDBs.
+            wanted = {t.upper() for t in targets}
+            remaining = [p for p in remaining if p.upper() in wanted]
+        if not remaining:
+            logger.info("Sequential submission: all shards complete -- no PDBs remain to annotate.")
+            return
+
+        shard = remaining[:GEMINI_BATCH_SHARD_PDBS]
+        logger.info(
+            "Sequential submission: submitting a shard of %d PDB(s) (%d remaining).",
+            len(shard),
+            len(remaining),
+        )
+        jobs_before = len(registry["jobs"])
+        build_and_submit_batch(
+            shard,
+            prompt_text,
+            num_runs=num_runs,
+            model_name=model_name,
+            prompt_id=prompt_id,
+            temperature=temperature,
+            thinking_level=thinking_level,
+            pack_cap_override=GEMINI_BATCH_SEQUENTIAL_MAX_REQUESTS,
+        )
+        # No-progress stall: PDBs remain but the shard registered zero new jobs
+        # (nothing submittable -- e.g. every shard PDB was un-uploadable, or the
+        # shard produced no requests). Surface it at ERROR, distinct from the
+        # "all shards complete" and "still in flight" info messages, so an
+        # unattended loop does not spin silently.
+        jobs_after = len(_load_job_registry(config)["jobs"])
+        if jobs_after == jobs_before:
+            logger.error(
+                "Sequential submission made no progress: %d PDB(s) remain but the shard "
+                "registered no new batch job (nothing submittable). The corpus is not "
+                "advancing; investigate before the next invocation.",
+                len(remaining),
+            )
+
+
 def check_batch_status() -> None:
     """Poll the Gemini Batch API for all tracked jobs and download finished ones."""
     config = get_config()
@@ -854,7 +1159,17 @@ def check_batch_status() -> None:
 
     pending = [e for e in registry["jobs"].values() if e.get("status") == BATCH_STATUS_SUBMITTED]
     if not pending:
-        logger.info("No active batch job found in state.")
+        # No job is waiting on the provider, but a downloaded-but-not-recovered
+        # job can still be stranded (e.g. a crash between the download
+        # status-write and the recover flip). Heal it here so --check-batch
+        # self-heals without a manual --recover -- otherwise the sequential
+        # guard, which treats a downloaded job as in flight, would block forever.
+        if any(e.get("status") == BATCH_STATUS_DOWNLOADED for e in registry["jobs"].values()):
+            logger.info("Found downloaded-but-unrecovered batch result(s); running recovery.")
+            recover_batch()
+            _cleanup_recovered_jobs(config, client)
+        else:
+            logger.info("No active batch job found in state.")
         return
 
     # The SDK exposes terminal states as JOB_STATE_* on ``job.state.name``.
@@ -929,13 +1244,26 @@ def check_batch_status() -> None:
         recover_batch()
 
     # After recovery, release the uploaded inputs of every now-recovered job whose
-    # results are safely on disk. Ref-counted, so a PDF shared with a still-live
-    # job is kept until that job is terminal too.
-    if CLOUD_CLEANUP:
-        registry = _load_job_registry(config)
-        for entry in registry["jobs"].values():
-            if entry.get("status") == BATCH_STATUS_RECOVERED:
-                _cleanup_terminal_job_uploads(config, client, entry["job_name"])
+    # results are safely on disk (ref-counted; see the helper).
+    _cleanup_recovered_jobs(config, client)
+
+
+def _expected_copy_ids_for_pdb(config: Any, pdb_id: str) -> list[str]:
+    """Expected ligand copy identifiers for *pdb_id*, from its enriched data.
+
+    The same roster source the per-PDB schema was built from
+    (``ligand_copy_id_enum(ligand_copy_identifiers(entry))``). Returns an empty
+    list -- meaning "nothing to validate" -- when the enriched file is missing or
+    unreadable, so batch recovery never fails on a coverage check it cannot make.
+    """
+    enriched_path = config.enriched_dir / f"{pdb_id}.json"
+    if not enriched_path.exists():
+        return []
+    try:
+        enriched_data = json.loads(enriched_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    return ligand_copy_id_enum(ligand_copy_identifiers(enriched_data))
 
 
 def recover_batch() -> None:
@@ -946,6 +1274,9 @@ def recover_batch() -> None:
     if not runs_dir.exists():
         logger.info("No pipeline runs directory found.")
         return
+
+    # Per-PDB expected copy roster, computed once per PDB across all raw files.
+    expected_ids_cache: dict[str, list[str]] = {}
 
     registry = _load_job_registry(config)
     # Map a downloaded raw-output filename to its authoritative job entry, so
@@ -1045,6 +1376,34 @@ def recover_batch() -> None:
                                 )
                                 break
                             final_data = post_process_annotation(args)
+
+                            # Deterministic coverage guard. Batch has no per-run
+                            # retry, so on a mismatch drop this run's per-copy
+                            # roster (imperfect per-copy data never reaches
+                            # voting); the rest of the annotation is kept intact.
+                            # Checked unconditionally -- NOT gated on the field
+                            # being present -- so a fully-omitted array against a
+                            # non-empty expected roster is warned just like the
+                            # single-run path (an empty roster is a no-op). The pop
+                            # is a harmless no-op when the field was already absent.
+                            if pdb_id not in expected_ids_cache:
+                                expected_ids_cache[pdb_id] = _expected_copy_ids_for_pdb(
+                                    config, pdb_id
+                                )
+                            coverage = check_ligand_copy_coverage(
+                                final_data.get("ligand_copies"), expected_ids_cache[pdb_id]
+                            )
+                            if not coverage.ok:
+                                logger.warning(
+                                    "[%s] Run %d: ligand copy coverage mismatch (%s); "
+                                    "dropping ligand_copies from this run (line %d).",
+                                    pdb_id,
+                                    run_num,
+                                    coverage.describe(),
+                                    line_no,
+                                )
+                                final_data.pop("ligand_copies", None)
+
                             final_data["_provenance"] = {
                                 "model_requested": batch_meta.get("model_requested"),
                                 "model_served": response_obj.get("modelVersion"),
@@ -1123,6 +1482,7 @@ def run_annotation_stage(
     model: str | None = None,
     num_runs: int = GEMINI_DEFAULT_RUNS,
     batch: bool = False,
+    sequential: bool = False,
     temperature: float | None = None,
     thinking_level: str | None = None,
 ) -> None:
@@ -1165,6 +1525,23 @@ def run_annotation_stage(
         )
 
     if batch:
+        # Sequential mode drives itself off the on-disk completion state one shard
+        # at a time (see the function), so repeated invocation is safe and never
+        # fires many jobs at once. An explicit --targets / pdb_id is threaded
+        # through so it restricts the shard (a smoke test does not submit the whole
+        # corpus); with neither, the shard is discovered from the full corpus.
+        if sequential:
+            explicit_targets = pdb_ids if (pdb_id or targets_file) else None
+            submit_next_sequential_shard(
+                prompt_text,
+                num_runs=num_runs,
+                model_name=model_name,
+                prompt_id=prompt_id,
+                temperature=temperature,
+                thinking_level=thinking_level,
+                targets=explicit_targets,
+            )
+            return
         build_and_submit_batch(
             pdb_ids,
             prompt_text,

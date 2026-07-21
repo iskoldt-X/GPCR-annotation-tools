@@ -1,0 +1,78 @@
+{
+    "main_data": {
+        "receptor_info": {
+            "uniprot_entry_name": "aa2ar_human",
+            "chain_id": "A",
+            "validation_status": "OK"
+        },
+        "signaling_partners": {
+            "g_protein": {
+                "alpha_subunit": {"uniprot_entry_name": "gnas2_human", "chain_id": "D"},
+                "is_chimeric": true
+            }
+        },
+        "oligomer_analysis": {
+            "classification": "MONOMER",
+            "all_gpcr_chains": [{"chain_id": "A", "7tm_status": "COMPLETE"}],
+            "alerts": [],
+            "chain_id_override": {"applied": false}
+        }
+    },
+    "validation_data": {
+        "critical_warnings": [],
+        "algo_conflicts": [
+            "at 'signaling_partners.g_protein.alpha_subunit': the declared mini-G construct label disagrees with the sequence-detected G-alpha family. Human confirmation required."
+        ]
+    },
+    "voting_log": [
+        {
+            "path": "signaling_partners.g_protein.is_chimeric",
+            "best_run_value": false,
+            "majority_vote_value": true,
+            "all_votes": {"false": 4, "true": 6}
+        },
+        {
+            "path": "ligand_copies[Q:1006].role",
+            "best_run_value": "Agonist",
+            "majority_vote_value": "Agonist",
+            "all_votes": {"Agonist": 5, "Co-agonist": 5},
+            "vote_margin": 0
+        },
+        {
+            "path": "ligands[U0G:orthosteric].name",
+            "best_run_value": "25CN-NBOH",
+            "majority_vote_value": "25CN-NBOH",
+            "all_votes": {"25CN-NBOH": 5, "25-CN-NBOH": 5},
+            "gating": false
+        },
+        {
+            "path": "structure_info.state.value",
+            "best_run_value": "Active",
+            "majority_vote_value": "Active",
+            "all_votes": {},
+            "gating": null
+        },
+        {
+            "path": "ligands[CLR:allosteric_7tm]",
+            "best_run_value": null,
+            "majority_vote_value": {
+                "chain_id": "A, B",
+                "chem_comp_id": "CLR",
+                "name": "Cholesterol",
+                "role": {"confidence": null, "evidence": null, "value": "Cofactor"},
+                "site_ref": "allosteric_7tm",
+                "type": "lipid"
+            },
+            "all_votes": {
+                "chain_id": {"A, B": 4},
+                "chem_comp_id": {"CLR": 4},
+                "name": {"Cholesterol": 4},
+                "role": {"confidence": {}, "evidence": {}, "value": {"Cofactor": 4}},
+                "site_ref": {"allosteric_7tm": 4},
+                "type": {"lipid": 4}
+            },
+            "needs_review": true,
+            "gating": false
+        }
+    ]
+}

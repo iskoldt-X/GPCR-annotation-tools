@@ -1,6 +1,6 @@
 """Tests for the missed non-GPCR polymer reconciliation.
 
-A real polymer chain (nanobody, scFv, RAMP, peptide ligand, G-protein subunit,
+A real polymer chain (nanobody, scFv, RAMP, peptide ligand, G protein subunit,
 second receptor) that the model never annotates should be surfaced for review.
 GPCR chains are the oligomer missed-protomer check's responsibility and are not
 re-reported here.
@@ -172,7 +172,7 @@ class TestReconcileRealData:
         return (raw.get("data") or {}).get("entry") or raw
 
     def test_9blw_only_receptor_claimed_flags_all_partners(self) -> None:
-        # 9BLW: R=GPCR, N=nanobody, E=RAMP, P=peptide, A/B/G=G-protein.
+        # 9BLW: R=GPCR, N=nanobody, E=RAMP, P=peptide, A/B/G=G protein.
         enriched = self._enriched_9blw()
         warnings = reconcile_missed_polymers(enriched, {"receptor_info": {"chain_id": "R"}})
         assert _flagged_chains(warnings) == {"N", "E", "P", "A", "B", "G"}

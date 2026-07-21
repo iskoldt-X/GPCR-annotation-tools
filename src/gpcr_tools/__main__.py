@@ -164,6 +164,17 @@ def cli() -> None:
         help="Use Gemini Batch API instead of single calls.",
     )
     ann_parser.add_argument(
+        "--sequential",
+        action="store_true",
+        default=False,
+        help=(
+            "With --batch: submit one shard per invocation and refuse to submit "
+            "while a prior batch job is still in flight, so repeated (cron or "
+            "manual) runs advance the corpus one shard at a time without "
+            "overrunning the provider's enqueued-token limit."
+        ),
+    )
+    ann_parser.add_argument(
         "--temperature",
         type=float,
         default=None,
@@ -332,7 +343,7 @@ def cli() -> None:
         help=(
             "pdf-coverage: paper-PDF outcomes; "
             "full-audit: validation warnings + chimera conflicts across PDBs; "
-            "tail-analysis: G-protein chimera score distribution; "
+            "tail-analysis: G protein chimera score distribution; "
             "run-manifest: write a full run record (output/run_manifest.{json,md})."
         ),
     )
@@ -371,6 +382,13 @@ def cli() -> None:
         )
 
     elif args.command == "annotate":
+        if args.sequential and not args.batch:
+            print(
+                "Error: --sequential requires --batch (one-shard-at-a-time submission "
+                "applies only to the Batch API).",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         if args.check_batch:
             from gpcr_tools.annotator.runner import check_batch_status
 
@@ -390,6 +408,7 @@ def cli() -> None:
                     model=args.model,
                     num_runs=args.runs,
                     batch=args.batch,
+                    sequential=args.sequential,
                     temperature=args.temperature,
                     thinking_level=args.thinking_level,
                 )

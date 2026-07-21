@@ -29,7 +29,14 @@ def _load_and_inject(pdb_id: str) -> tuple[dict, dict, dict]:
 
 # Expected non-empty CSV files per fixture, from PoC verification.
 EXPECTED_CSV_FILES: dict[str, set[str]] = {
-    "5G53": {"structures.csv", "ligands.csv", "g_proteins.csv"},
+    # SOG (a detergent) and GDP (the G-protein's nucleotide) are catalogued as
+    # auxiliary small molecules rather than functional ligands.
+    "5G53": {
+        "structures.csv",
+        "ligands.csv",
+        "g_proteins.csv",
+        "auxiliary_small_molecules.csv",
+    },
     # No ligands.csv: this entry's only ligand annotation is an apo (no-ligand)
     # placeholder, which is not exported as a ligand interaction.
     "8TII": {"structures.csv", "arrestins.csv", "nanobodies.csv", "antibodies.csv"},
@@ -48,6 +55,7 @@ EXPECTED_CSV_FILES: dict[str, set[str]] = {
         "g_proteins.csv",
         "arrestins.csv",
         "fusion_proteins.csv",
+        "auxiliary_small_molecules.csv",
     },
     # No ligands.csv: this entry's only annotated ligands are not modelled in
     # the structure (the paper's sweeteners), so they are excluded from export.
@@ -230,7 +238,10 @@ class TestTransformPrecision:
 
         main_data, _, _ = _load_and_inject("5G53")
         csv_data = transform_for_csv("5G53", main_data)
-        assert len(csv_data["ligands.csv"]) == 3
+        # NEC (the agonist) is the only functional ligand; SOG (detergent) and GDP
+        # (the G-protein nucleotide) are catalogued as auxiliary small molecules.
+        assert len(csv_data["ligands.csv"]) == 1
+        assert len(csv_data["auxiliary_small_molecules.csv"]) == 2
 
     def test_9m88_chain_correction_note(self, real_pdb_workspace: Path) -> None:
         from gpcr_tools.csv_generator.csv_writer import transform_for_csv
@@ -249,7 +260,10 @@ class TestTransformPrecision:
 
         main_data, _, _ = _load_and_inject("9M88")
         csv_data = transform_for_csv("9M88", main_data)
-        assert len(csv_data["ligands.csv"]) == 6
+        # Two functional ligands (5YM agonist, A1EM2 NAM); the four molecules the
+        # model typed Cofactor are catalogued as auxiliary small molecules.
+        assert len(csv_data["ligands.csv"]) == 2
+        assert len(csv_data["auxiliary_small_molecules.csv"]) == 4
 
     def test_9m88_fusion_protein(self, real_pdb_workspace: Path) -> None:
         from gpcr_tools.csv_generator.csv_writer import transform_for_csv

@@ -5,6 +5,15 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 
+class ReviewAbortedError(Exception):
+    """Raised when the curator quits an interactive review (the 'q' action).
+
+    A control-flow signal, not a data value, so a legitimate JSON null leaf
+    (Python None) accepted during review can never be mistaken for the quit
+    signal -- the two used to collide on a bare ``return None``.
+    """
+
+
 class CsvSchemaMismatchError(Exception):
     """Raised when an existing CSV file has headers that don't match the current schema."""
 

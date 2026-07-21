@@ -6,7 +6,11 @@ from collections import defaultdict
 from types import MappingProxyType
 from typing import Any
 
-from gpcr_tools.annotator.detect_orchestrator import assemble_detect_block
+from gpcr_tools.annotator.detect_orchestrator import (
+    assemble_detect_block,
+    assemble_ligand_copy_block,
+    ligand_copy_identifiers,
+)
 from gpcr_tools.config import (
     INCIDENTAL_CANDIDATES,
     LIGAND_EXCLUDE_LIST,
@@ -114,7 +118,7 @@ def generate_author_assembly_reference(pdb_id: str, enriched_data: dict) -> str:
     being handed a single pre-chosen answer.
 
     Framed explicitly as reference-only and NOT authoritative: the assembly
-    counts every chain (so a receptor + G-protein complex reads as a higher-order
+    counts every chain (so a receptor + G protein complex reads as a higher-order
     "Hetero N-mer" even though the receptor itself is a monomer). All data comes
     from the enriched JSON -- no network call. Returns ``""`` when no assembly
     with a symmetry block is present, so an ordinary structure's prompt only
@@ -156,7 +160,7 @@ def generate_author_assembly_reference(pdb_id: str, enriched_data: dict) -> str:
         "### AUTHOR-DEPOSITED BIOLOGICAL ASSEMBLY (reference only, NOT authoritative)\n"
         f"From the structure authors' biological assembly deposited in the PDB for {pdb_id}. "
         "This is reference information to inform your own judgment, not the answer. It counts "
-        "ALL chains (so a receptor + G-protein complex is reported as a higher-order complex "
+        "ALL chains (so a receptor + G protein complex is reported as a higher-order complex "
         "even though the receptor itself is a monomer), and it can be wrong in either "
         "direction. A 'Homo N-mer' or software-predicted (e.g. PISA) assembly often "
         "reflects crystallographic packing rather than a true biological oligomer, so do "
@@ -410,6 +414,17 @@ def build_prompt_parts(
     detect_block = assemble_detect_block(detect_signals or [])
     if detect_block:
         parts.append(detect_block)
+        parts.append("\n\n")
+
+    # 5c. Per-copy ligand roster: one line per functional-candidate ligand copy
+    # (from RCSB metadata, so it includes sparse copies), paired with the per-PDB
+    # ligand_copies schema the model fills. Nothing is appended when the structure
+    # has no candidate copies, so an ordinary structure's prompt is unchanged.
+    copy_block = assemble_ligand_copy_block(
+        ligand_copy_identifiers(enriched_data), detect_signals or []
+    )
+    if copy_block:
+        parts.append(copy_block)
         parts.append("\n\n")
 
     # 6. Full paper header

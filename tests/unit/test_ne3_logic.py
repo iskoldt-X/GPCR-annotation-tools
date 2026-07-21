@@ -4,6 +4,7 @@ Covers all 4 pure functions: map_label_asym_id, collect_ligand_chains,
 apply_db_truncation, build_structure_note.
 """
 
+from gpcr_tools.config import ALERT_NON_RECEPTOR_PARTNER
 from gpcr_tools.csv_generator.logic import (
     apply_db_truncation,
     build_structure_note,
@@ -16,6 +17,22 @@ from gpcr_tools.csv_generator.logic import (
 def _oligo(*chains: tuple[str, str]) -> dict:
     """all_gpcr_chains from (chain_id, slug) pairs."""
     return {"all_gpcr_chains": [{"chain_id": c, "slug": s} for c, s in chains]}
+
+
+def _oligo_tm(
+    *chains: tuple[str, str, int],
+    tm_data_available: bool = True,
+) -> dict:
+    """all_gpcr_chains from (chain_id, slug, total_tms) triples, with the TM flag.
+
+    Mirrors the analysis dict resolve_partner_protomer reads: each chain carries a
+    ``total_tms`` annotation (the count the partner-column gate checks), and the
+    top-level ``tm_data_available`` flag governs whether the gate runs at all.
+    """
+    return {
+        "all_gpcr_chains": [{"chain_id": c, "slug": s, "total_tms": tm} for c, s, tm in chains],
+        "tm_data_available": tm_data_available,
+    }
 
 
 class TestResolvePartnerProtomer:
@@ -54,6 +71,72 @@ class TestResolvePartnerProtomer:
         # rather than treating every chain as a partner.
         oligo = _oligo(("A", "gabr1_human"), ("B", "gabr2_human"))
         assert resolve_partner_protomer(oligo, "") == ("", "")
+
+    def test_genuine_second_receptor_kept(self) -> None:
+        # A real GABA-B heterodimer (GBR2 primary B, GBR1 partner A): both chains
+        # are full 7TM receptors, so the partner is retained and no alert fires.
+        oligo = _oligo_tm(("A", "gabr1_human", 7), ("B", "gabr2_human", 7))
+        assert resolve_partner_protomer(oligo, "B") == ("gabr1_human", "A")
+        assert not oligo.get("alerts")
+
+    def test_non_receptor_partner_evicted_with_alert(self) -> None:
+        # 8XGR-style: endothelin receptor (7TM, chain A primary) + endothelin-1, a
+        # short peptide ligand that carries a receptor-ish slug but 0 TMs. The
+        # peptide must NOT land in the additional-receptor column, and the eviction
+        # is surfaced as a curator alert.
+        oligo = _oligo_tm(("A", "ednrb_human", 7), ("B", "edn1_human", 0))
+        partner_uniprot, partner_chains = resolve_partner_protomer(oligo, "A")
+        assert partner_uniprot == ""
+        assert partner_chains == ""
+        alerts = oligo.get("alerts") or []
+        assert len(alerts) == 1
+        assert alerts[0]["type"] == ALERT_NON_RECEPTOR_PARTNER
+        assert "chain B" in alerts[0]["message"]
+
+    def test_single_pass_coreceptor_evicted(self) -> None:
+        # 8XFS-style: a 7TM receptor (chain A) plus a single-pass (1 TM) co-receptor
+        # (ZNRF3) and a 0-TM soluble agonist (R-spondin-2), both mis-mapped to a
+        # GPCR slug. Neither is a 7TM protomer, so the partner column stays empty
+        # and one alert covers both evicted chains.
+        oligo = _oligo_tm(
+            ("A", "lgr4_human", 7),
+            ("C", "znrf3_human", 1),
+            ("D", "rspo2_human", 0),
+        )
+        partner_uniprot, partner_chains = resolve_partner_protomer(oligo, "A")
+        assert partner_uniprot == ""
+        assert partner_chains == ""
+        alerts = oligo.get("alerts") or []
+        assert len(alerts) == 1
+        assert alerts[0]["type"] == ALERT_NON_RECEPTOR_PARTNER
+        assert "chain C, D" in alerts[0]["message"]
+
+    def test_fetch_failure_skips_gate_keeps_real_partner(self) -> None:
+        # When the TM-feature fetch failed for the whole structure the counts are
+        # unverified (all total_tms fall back to 0) but tm_data_available is False:
+        # the gate is skipped entirely, so a real GABA-B-style heterodimer keeps its
+        # partner rather than being wrongly evicted on zeroed-out counts.
+        oligo = _oligo_tm(
+            ("A", "gabr1_human", 0),
+            ("B", "gabr2_human", 0),
+            tm_data_available=False,
+        )
+        assert resolve_partner_protomer(oligo, "B") == ("gabr1_human", "A")
+        assert not oligo.get("alerts")
+
+    def test_chain_missing_total_tms_passes(self) -> None:
+        # Legacy / pre-TM analysis dicts have all_gpcr_chains without a total_tms
+        # key. Even with the gate active, a chain MISSING the key must pass
+        # (backward-compat) so older recorded data is unaffected.
+        oligo = {
+            "all_gpcr_chains": [
+                {"chain_id": "A", "slug": "gabr2_human"},
+                {"chain_id": "B", "slug": "gabr1_human"},
+            ],
+            "tm_data_available": True,
+        }
+        assert resolve_partner_protomer(oligo, "A") == ("gabr1_human", "B")
+        assert not oligo.get("alerts")
 
 
 # ── map_label_asym_id ────────────────────────────────────────────────
@@ -135,7 +218,7 @@ class TestApplyDbTruncation:
         oligo = {
             "primary_protomer_suggestion": {
                 "chain_id": "A",
-                "reason": "G-protein bound",
+                "reason": "G protein bound",
             },
             "all_gpcr_chains": [
                 {"chain_id": "A", "slug": "aa2ar_human"},

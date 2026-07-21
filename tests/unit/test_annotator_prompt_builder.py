@@ -102,7 +102,7 @@ def test_build_prompt_parts():
 
 
 def test_incidental_candidate_molecule_not_stripped():
-    # Accommodate, not conceal: PLM (exclude-list AND incidental_candidate) stays visible to
+    # Accommodate, not conceal: an incidental_candidate (PLM) stays visible to
     # the model; an ordinary buffer (HOH) is still stripped.
     enriched_data = {
         "data": {
@@ -142,6 +142,80 @@ def test_build_prompt_parts_injects_advisory_block_between_metadata_and_paper():
     assert "DETECTOR EVIDENCE" in joined
     assert joined.index("PDB METADATA") < joined.index("DETECTOR EVIDENCE")
     assert joined.index("DETECTOR EVIDENCE") < joined.index("--- FULL PAPER ---")
+
+
+def _entry_with_candidate_ligand_copy() -> dict:
+    # A single drug-like ligand copy (J40 at author chain R, residue 601), enough
+    # for the roster / LIGAND COPIES block to be non-empty.
+    return {
+        "data": {
+            "entry": {
+                "nonpolymer_entities": [
+                    {
+                        "rcsb_nonpolymer_entity_container_identifiers": {
+                            "nonpolymer_comp_id": "J40"
+                        },
+                        "nonpolymer_entity_instances": [
+                            {
+                                "rcsb_nonpolymer_entity_instance_container_identifiers": {
+                                    "auth_asym_id": "R",
+                                    "asym_id": "A",
+                                    "auth_seq_id": "601",
+                                }
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+    }
+
+
+def test_build_prompt_parts_injects_ligand_copies_block_after_evidence_before_paper():
+    # With candidate ligand copies present, the LIGAND COPIES block appears after
+    # the detector-evidence block and before the full paper.
+    enriched = _entry_with_candidate_ligand_copy()
+    sig = DetectSignal(
+        kind=SIGNAL_INCIDENTAL_CANDIDATE,
+        target_ref="ligands",
+        summary="PLM incidental_candidate",
+        payload={"comp_id": "PLM"},
+        severity=SEVERITY_ADVISORY,
+    )
+    joined = "".join(prompt_builder.build_prompt_parts("7W55", enriched, "P", detect_signals=[sig]))
+    assert "LIGAND COPIES" in joined
+    assert "R:601" in joined
+    assert joined.index("DETECTOR EVIDENCE") < joined.index("LIGAND COPIES")
+    assert joined.index("LIGAND COPIES") < joined.index("--- FULL PAPER ---")
+
+
+def test_build_prompt_parts_omits_ligand_copies_block_when_no_candidate_copies():
+    # Only a stripped buffer (SO4) -> no candidate copies -> no LIGAND COPIES block,
+    # so an ordinary structure's prompt does not grow.
+    enriched = {
+        "data": {
+            "entry": {
+                "nonpolymer_entities": [
+                    {
+                        "rcsb_nonpolymer_entity_container_identifiers": {
+                            "nonpolymer_comp_id": "SO4"
+                        },
+                        "nonpolymer_entity_instances": [
+                            {
+                                "rcsb_nonpolymer_entity_instance_container_identifiers": {
+                                    "auth_asym_id": "R",
+                                    "asym_id": "A",
+                                    "auth_seq_id": "801",
+                                }
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+    }
+    joined = "".join(prompt_builder.build_prompt_parts("7W55", enriched, "P"))
+    assert "LIGAND COPIES" not in joined
 
 
 def test_enhanced_simplify_adds_7tm_status_and_residue_length():

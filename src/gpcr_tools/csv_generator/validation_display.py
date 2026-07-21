@@ -13,17 +13,10 @@ from rich.text import Text
 
 from gpcr_tools.config import (
     ALERT_HALLUCINATION,
-    ALERT_MISSED_PROTOMER,
-    ALERT_MULTI_COPY_LIGAND,
-    ALERT_NO_GPCR,
-    ALERT_OLIGOMER_DISAGREEMENT,
-    ALERT_SUSPICIOUS_7TM,
-    ALERT_TM_DATA_UNAVAILABLE,
-    TM_STATUS_INCOMPLETE,
     VALIDATION_FATAL_KEYWORDS,
-    ensure_alert_prefix,
 )
 from gpcr_tools.csv_generator.ui import console
+from gpcr_tools.validator.gating import oligomer_gating_warnings
 
 # ── Oligomer Alert Injection ───────────────────────────────────────────
 
@@ -35,48 +28,19 @@ def inject_oligomer_alerts(oligo: dict, validation_data: dict) -> None:
     the existing fix-mode / accept-all gating logic in ``review_toplevel_blocks``
     stops at ``receptor_info`` when chain corrections or structural issues
     are detected.
+
+    Thin wrapper over :func:`gpcr_tools.validator.gating.oligomer_gating_warnings`
+    so the curator UI and the headless gate share one source of truth; behavior
+    here is unchanged (the same strings appended in the same order).
     """
     if not oligo:
         return
 
+    new_warnings = oligomer_gating_warnings(oligo)
+
     warnings: list[str] = validation_data.get("critical_warnings") or []
     validation_data["critical_warnings"] = warnings
-
-    override = oligo.get("chain_id_override") or {}
-    if override.get("applied"):
-        warnings.append(
-            f"CHAIN_ID CORRECTED at 'receptor_info': "
-            f"{override.get('original_chain_id')} -> {override.get('corrected_chain_id')} "
-            f"({override.get('trigger')}). Human confirmation required."
-        )
-
-    for alert in oligo.get("alerts") or []:
-        atype = alert.get("type") or ""
-        if atype in (
-            ALERT_HALLUCINATION,
-            ALERT_MISSED_PROTOMER,
-            ALERT_SUSPICIOUS_7TM,
-            ALERT_NO_GPCR,
-            ALERT_TM_DATA_UNAVAILABLE,
-            ALERT_OLIGOMER_DISAGREEMENT,
-        ):
-            # The "at 'receptor_info'" prefix is a routing anchor so this alert
-            # buckets under the receptor block during review. ensure_alert_prefix
-            # keeps the message's own "[TYPE]" label present exactly once --
-            # current validator messages already carry it (re-prepending would
-            # duplicate it), while older recorded data needs it added.
-            message = ensure_alert_prefix(atype, alert.get("message"))
-            warnings.append(f"OLIGOMER ALERT at 'receptor_info': {message}")
-        elif atype == ALERT_MULTI_COPY_LIGAND:
-            # Already carries its own 'ligands[...]' path, so it buckets with the
-            # ligand block during review rather than under receptor_info.
-            warnings.append(alert.get("message") or "")
-
-    if any(c.get("7tm_status") == TM_STATUS_INCOMPLETE for c in oligo.get("all_gpcr_chains") or []):
-        warnings.append(
-            "STRUCTURAL QUALITY at 'receptor_info': "
-            "One or more GPCR chains have INCOMPLETE 7TM domains."
-        )
+    warnings.extend(new_warnings)
 
 
 # ── Warning Helpers ─────────────────────────────────────────────────────
@@ -90,7 +54,8 @@ def get_relevant_validation_warnings(path: str, validation_data: dict) -> list[s
     if validation_data.get("critical_warnings"):
         for w in validation_data["critical_warnings"]:
             if path in w or (
-                path == "signaling_partners" and ("g_protein" in w or "g-protein" in w.lower())
+                path == "signaling_partners"
+                and ("g_protein" in w or "g-protein" in w.lower() or "g protein" in w.lower())
             ):
                 relevant.append(w)
     # Deduplicate while preserving insertion order for deterministic display.
@@ -190,7 +155,7 @@ def warning_matches_block(entry: dict, block_path: str) -> bool:
         if normalized_block in warn_text:
             return True
         if normalized_block == "signaling_partners" and (
-            "g-protein" in warn_text or "g_protein" in warn_text
+            "g-protein" in warn_text or "g_protein" in warn_text or "g protein" in warn_text
         ):
             return True
     return False

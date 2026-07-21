@@ -166,7 +166,7 @@ def _intracellular_landmark_centroid(
     skipped. Returns ``None`` if fewer than ``MEMBRANE_MIN_ORIENT_LANDMARKS``
     landmark Cα are located -- an honest abstain rather than a noisy orientation.
     This is universal: it needs only the receptor, so it works for apo /
-    no-G-protein structures where a G-alpha reference is unavailable.
+    no-G protein structures where a G-alpha reference is unavailable.
     """
     table = load_numbering_table()
     model = structure[0]
@@ -265,7 +265,7 @@ def _resolve_orientation(
         note = None
         if galpha_sign is not None and galpha_sign != landmark_sign:
             note = (
-                "the G-protein position disagrees with the receptor intracellular "
+                "the G protein position disagrees with the receptor intracellular "
                 "landmarks about which side is cytoplasmic"
             )
         return landmark_sign, note
@@ -320,7 +320,7 @@ def detect_site_refs(
     model = structure[0] if frame is not None else None
     # Orient the (sign-arbitrary) membrane normal so a copy's signed depth gains a
     # physical "which side" meaning -- primary reference is the receptor's own
-    # cytoplasmic-face landmarks (works for apo / no-G-protein structures), with a
+    # cytoplasmic-face landmarks (works for apo / no-G protein structures), with a
     # present G-alpha only as a confirming cross-check. None -> stay unoriented.
     ic_sign: int | None = None
     orientation_note: str | None = None
@@ -347,15 +347,25 @@ def detect_site_refs(
             else [None] * len(contact_copies)
         )
         atom_lists = (
-            [list(res) for chain in model for res in chain if res.name == comp_id]
+            [
+                list(res)
+                for chain in model
+                for res in chain
+                if res.name == comp_id and not is_protein_atom(res)
+            ]
             if model is not None
             else []
         )
         copies: list[dict[str, Any]] = []
-        for i, (burial, contacts) in enumerate(contact_copies):
+        for i, (copy_chain, copy_seq, burial, contacts) in enumerate(contact_copies):
             evidence = _copy_evidence(contacts, chain_accessions, alignment)
             if evidence is None:
                 continue
+            # The copy's own identifier (auth_asym_id:auth_seq_id) travels
+            # with it from ligand_contact_residues, so it stays bound to THIS copy
+            # even when sparse copies are dropped above -- a dropped copy can never
+            # shift another copy's copy identifier (no positional realignment).
+            evidence["copy_id"] = f"{copy_chain}:{copy_seq}"
             evidence["enclosure"] = round(burial, 2)
             evidence["facing"] = facings[i] if i < len(facings) else None
             if frame is not None and i < len(atom_lists):

@@ -152,6 +152,15 @@ GEMINI_MAX_WORKERS: int = 10
 # so a re-submission after a long-failed batch doesn't embed a dead fileUri.
 GEMINI_FILE_TTL_HOURS: int = 47
 
+# Bounded retry for the paper-PDF upload to the FREE Files API (this retries the
+# upload step, not the billed generation): a transient upload failure would
+# otherwise silently drop a structure from the batch (no requests, no results).
+# Backoff is exponential: GEMINI_UPLOAD_BASE_BACKOFF * (2 ** attempt). The loop
+# sleeps only BETWEEN attempts, so at 3 attempts it waits ~2/4s across 3 attempts
+# (two sleeps; none after the final attempt).
+GEMINI_UPLOAD_MAX_RETRIES: int = 3
+GEMINI_UPLOAD_BASE_BACKOFF: float = 2.0
+
 # Cap on the number of generation requests packed into one submitted batch job.
 # The full corpus (thousands of structures x GEMINI_DEFAULT_RUNS runs) is far
 # more than one job should carry: an oversized submission risks being rejected
@@ -160,6 +169,22 @@ GEMINI_FILE_TTL_HOURS: int = 47
 # split into jobs of at most this many requests, never splitting a single PDB's
 # runs across jobs (so 200 ~= 20 PDBs at the default 10 runs each). Tunable.
 GEMINI_BATCH_MAX_REQUESTS: int = 200
+
+# Sequential submission (``annotate --batch --sequential``): submit ONE shard of
+# at most this many PDBs per invocation, refusing to submit while a prior job is
+# still in flight. Repeated (external cron / manual) invocations then advance the
+# corpus one shard at a time instead of firing every shard's job into flight at
+# once — which would overrun the provider's enqueued-token ceiling on a full
+# corpus. Only the sequential path reads this; the back-to-back default path is
+# unchanged.
+GEMINI_BATCH_SHARD_PDBS: int = 1000
+
+# Per-job request cap for sequential submission. A single shard of
+# GEMINI_BATCH_SHARD_PDBS PDBs x GEMINI_DEFAULT_RUNS runs (~10,000 requests) packs
+# into ONE job, comfortably under the provider's 50,000-requests-per-job ceiling.
+# Distinct from GEMINI_BATCH_MAX_REQUESTS (the small per-job cap for the
+# back-to-back default path), which is intentionally left untouched.
+GEMINI_BATCH_SEQUENTIAL_MAX_REQUESTS: int = 15000
 
 # Batch jobs are tracked in a registry (state/batch_jobs.json) keyed by job
 # name, so a sharded submission's multiple jobs are all tracked and recovered
@@ -418,6 +443,12 @@ LIST_ITEM_KEY_FIELDS: MappingProxyType[str, str] = MappingProxyType(
         # built from the normalized name PLUS a chain-set suffix — see
         # ``list_item_identity``.
         "auxiliary_proteins": "name",
+        # Per-copy ligand site/role assignments: one row per physical ligand copy,
+        # grouped across runs by its author-identifier ("<auth_asym_id>:<auth_seq_id>",
+        # e.g. "R:602"). The copy_id IS the physical-copy identity, so votes on each
+        # copy's site_ref / role aggregate per copy (see ``list_item_identity`` for
+        # why the copy_id is used alone, never suffixed with its site_ref).
+        "ligand_copies": "copy_id",
     }
 )
 
@@ -594,16 +625,27 @@ def list_item_identity(item: dict[str, Any], key_field: str, idx: int) -> str:
         return f"{normalized}|ch:{chains}" if chains else normalized
 
     if not is_empty_key(group_key):
-        # A ligand modelled at two distinct sites is emitted as two entries with
-        # the same component id but different site_ref; without the site in the
-        # identity the two would collapse into one during voting. Only ligands
-        # carry site_ref, so other list types are unaffected. (A single-site
-        # ligand keys as "comp:site"; if some runs in a batch instead emit
-        # 'unknown', those key as "comp" and surface as a real cross-run
+        # A compound-level ligand modelled at two distinct sites is emitted as two
+        # entries with the same component id but different site_ref; without the
+        # site in the identity the two would collapse into one during voting. That
+        # split is confined to the ligands list (key_field == "chem_comp_id"). (A
+        # single-site ligand keys as "comp:site"; if some runs in a batch instead
+        # emit 'unknown', those key as "comp" and surface as a real cross-run
         # disagreement -- which is correct to flag, not hide.)
-        site_ref = item.get("site_ref")
-        if site_ref and not is_empty_key(site_ref) and str(site_ref).lower() != SITE_REF_UNKNOWN:
-            return f"{group_key}:{site_ref}"
+        #
+        # The per-copy ligand_copies rows (key_field == "copy_id") also carry a
+        # site_ref, but they must key on the copy_id ALONE: the copy_id is the
+        # physical-copy identity, so a copy whose site_ref churns across runs stays
+        # ONE group that votes (and surfaces a near-tie), never split by site into
+        # more groups than there are physical copies.
+        if key_field == "chem_comp_id":
+            site_ref = item.get("site_ref")
+            if (
+                site_ref
+                and not is_empty_key(site_ref)
+                and str(site_ref).lower() != SITE_REF_UNKNOWN
+            ):
+                return f"{group_key}:{site_ref}"
         return str(group_key)
     # Keyless ligand (no component id): SAFE-normalize the fallback name so
     # spelling/formatting variants of one keyless entity share a group.
@@ -632,22 +674,115 @@ VALIDATION_RECEPTOR_NO_API_DATA: str = "RECEPTOR_NO_API_DATA"
 # identity cannot be confirmed here, so this state gates one-click accept.
 VALIDATION_RECEPTOR_RCSB_UNMAPPED: str = "RECEPTOR_RCSB_UNMAPPED"
 
+
+def sanitize_value(value: Any) -> str:
+    """Convert a value to a clean string (``None`` -> ``""``, else ``str().strip()``)."""
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+# Role enum values that are NOT a functional pharmacological modality. A prc=False
+# verdict removes a row from ligands.csv only for one of these roles (or an unset
+# role); a row the model gave a real modality is protected from a stray verdict.
+_NON_FUNCTIONAL_ROLE_VALUES: frozenset[str] = frozenset({"Cofactor", "unknown", "Apo (no ligand)"})
+
+
+def _classify_ligand_row(lig: Any) -> str:
+    """Classify a ligand row as ``"ligands"``, ``"aux"`` or ``"drop"``.
+
+    The single source of truth for where a row goes, shared by the writer loop, the
+    per-site residue partition (so a physical copy is never attributed to a
+    binding-site row that never reaches ligands.csv) and the aggregator's rebuild
+    ("does this component still have a surviving ligands row?").
+
+    * ``"drop"`` -- not a dict; a GHOST the validator could not find (unless a
+      curator kept it); or an apo / "no ligand" placeholder. Emitted nowhere.
+    * ``"aux"`` -- a non-functional auxiliary molecule catalogued into
+      auxiliary_small_molecules.csv instead of ligands.csv: a ``role = Cofactor``
+      row (a transducer nucleotide/cofactor, or a structural lipid / detergent /
+      counter-ion), or a detector-flagged candidate (a lipid / metal in
+      ``INCIDENTAL_CANDIDATES``) the model judged non-functional via prc. A prc=False
+      verdict removes a row only when its role is NOT a real modality, so a stray
+      verdict on the receptor's own drug cannot delete it; an explicit
+      is_functional=True keeps the row; a missing / null verdict is "not assessed".
+    * ``"ligands"`` -- a functional ligand row.
+    """
+    if not isinstance(lig, dict):
+        return "drop"
+    if lig.get("validation_status") == VALIDATION_GHOST_LIGAND and not lig.get(
+        "curator_kept_ghost"
+    ):
+        return "drop"
+    role = sanitize_value((lig.get("role") or {}).get("value"))
+    if (
+        lig.get("validation_status") == VALIDATION_SKIPPED_APO
+        or sanitize_value(lig.get("type")) == "none"
+        or sanitize_value(lig.get("name")) == "Apo"
+        or role == "Apo (no ligand)"
+    ):
+        return "drop"
+    prc = lig.get("pharmacological_role_check")
+    prc_verdict = prc.get("is_functional_ligand") if isinstance(prc, dict) else None
+    if prc_verdict is True:
+        # An explicit functional verdict wins over any structural role label.
+        return "ligands"
+    if role == "Cofactor":
+        # A cofactor is auxiliary: a transducer nucleotide/cofactor the chain rule had
+        # the model type Cofactor, or a structural lipid / detergent / counter-ion.
+        return "aux"
+    comp_id = sanitize_value(lig.get("chem_comp_id"))
+    if prc_verdict is False:
+        if role and role not in _NON_FUNCTIONAL_ROLE_VALUES:
+            # Real-modality guard: the model gave this row a real pharmacological
+            # modality, so a prc=False verdict -- placed on EVERY ligand row once a
+            # candidate opens the block -- must not delete the receptor's own drug. An
+            # unknown / unset role stays unprotected.
+            return "ligands"
+        return "aux" if comp_id in INCIDENTAL_CANDIDATES else "drop"
+    return "ligands"
+
+
+def ligand_row_dropped(lig: Any) -> bool:
+    """Whether a ligand row is filtered OUT of ``ligands.csv`` before it is written.
+
+    True when the row is not a functional ligand -- it is either dropped entirely
+    or catalogued into auxiliary_small_molecules.csv. See :func:`_classify_ligand_row`.
+    """
+    return _classify_ligand_row(lig) != "ligands"
+
+
+def ligand_routed_to_aux(lig: Any) -> bool:
+    """Whether a non-ligands.csv row is catalogued into auxiliary_small_molecules.csv
+    (a cofactor / non-functional auxiliary candidate) rather than dropped entirely."""
+    return _classify_ligand_row(lig) == "aux"
+
+
 # ---------------------------------------------------------------------------
 # Ligand exclude list (common buffers, ions, artifacts, detergents, matrix lipids)
 # ---------------------------------------------------------------------------
 
-# Codes here are stripped from the metadata the model sees, so a code is only
-# safe to add if it is NEVER a functional GPCR ligand. The list keys on the PDB
-# three-letter chem_comp id (what the enriched data carries), so a chemical's
-# human name (e.g. "DMSO", "HEPES") never matches and must be given as its code
-# (DMS, EPE). Any molecule that can EVER be an agonist — notably free fatty
-# acids and other biological lipids — belongs in INCIDENTAL_CANDIDATES, never
-# here.
-LIGAND_EXCLUDE_LIST: frozenset[str] = frozenset(
+# Two model-invisible lanes that share the "stripped before the model sees it"
+# gate (see prompt_builder) but diverge at the OUTPUT:
+#   * HARD_DROP      -- crystallization / cryo / buffer noise and unidentified
+#                       density: nothing is emitted (a log line only).
+#   * MECHANICAL_AUX -- never a receptor ligand, but catalogued deterministically
+#                       into auxiliary_small_molecules.csv with a fixed type
+#                       (AUX_TYPE_MAP), enumerated from the structure's nonpolymer
+#                       roster rather than from model output.
+# The four counter-ion metals (NA/MG/ZN/MN) sit in a third group, still excluded
+# here but freed to the model's auxiliary lane by the metal change, so a genuine
+# functional metal (e.g. Ca-sensing-receptor calcium) is never hidden. Codes key
+# on the PDB three-letter chem_comp id, so a chemical's human name (e.g. "DMSO",
+# "HEPES") never matches and must be given as its code (DMS, EPE). Any molecule
+# that can EVER be an agonist belongs in INCIDENTAL_CANDIDATES, never here.
+HARD_DROP: frozenset[str] = frozenset(
     {
+        # Water
         "HOH",
         "WAT",
         "DOD",
+        # Buffers / cryoprotectants / precipitants
         "SO4",
         "PO4",
         "GOL",
@@ -663,33 +798,52 @@ LIGAND_EXCLUDE_LIST: frozenset[str] = frozenset(
         "FMT",
         "DMS",  # dimethyl sulfoxide cosolvent (the PDB code; the name "DMSO" never matched)
         "EPE",  # HEPES buffer (the PDB code; the name "HEPES" never matched)
-        "NA",
+        # Polyethylene-glycol oligomers (cryoprotectant / precipitant family)
+        "1PE",  # pentaethylene glycol
+        "12P",  # dodecaethylene glycol
+        "P6G",  # hexaethylene glycol
+        # Other crystallization buffers / cryo-additives
+        "HTO",  # heptane-1,2,3-triol
+        "D10",  # decane
+        "TAR",  # D-tartaric acid
+        "TLA",  # L-tartaric acid
+        "NH4",  # ammonium -- crystallization-buffer salt
+        "SCN",  # thiocyanate -- crystallization precipitant salt
+        # Unidentified density: no name / formula / SMILES, never a cataloged row
+        "UNX",  # unknown atom or ion
+        "UNL",  # unknown ligand
+    }
+)
+
+# Never a receptor ligand, so no model judgement -- but catalogued into
+# auxiliary_small_molecules.csv with the fixed type in AUX_TYPE_MAP. Rows are
+# enumerated from the structure's nonpolymer roster (these are stripped before
+# the model sees them, so they never appear in model output).
+MECHANICAL_AUX: frozenset[str] = frozenset(
+    {
+        # Ions
         "K",
         "CL",
-        "MG",
-        "ZN",
-        "MN",
         "FE",
         "HG",
         "CD",
+        "NI",  # nickel from His-tag / IMAC purification; a metal ion, never a receptor ligand
+        # Redox / metabolic cofactors of fusion partners
         "NAD",
         "NADP",
         "FAD",
+        "FMN",  # flavin mononucleotide -- redox cofactor of flavoprotein fusion partners
         "COA",
+        # Glycans
         "NAG",
         "MAN",
         "GAL",
         "FUC",
-        "PLM",
-        # Lipidic-cubic-phase host / matrix lipids (monoacylglycerols). Synthetic
-        # crystallization matrix, never a functional ligand.
+        # Lipidic-cubic-phase host / matrix lipids and solubilization additives
         "OLC",  # monoolein (glyceryl monooleate)
         "OLB",  # monoolein stereoisomer
-        # Cholesterol hemisuccinate: a solubilization additive (cholesterol
-        # surrogate). Distinct from free cholesterol (CLR), which is incidental.
-        "Y01",
-        # Non-ionic detergents (alkyl glucosides / thioglucosides, maltosides,
-        # HEGA, amine oxide). Solubilization agents, not receptor ligands.
+        "Y01",  # cholesterol hemisuccinate (solubilization additive; distinct from free CLR)
+        # Non-ionic detergents (glucosides / thioglucosides / maltosides / HEGA / amine oxide)
         "BOG",  # octyl beta-D-glucoside
         "BNG",  # nonyl beta-D-glucoside
         "SOG",  # octyl 1-thio-beta-D-glucoside
@@ -699,40 +853,127 @@ LIGAND_EXCLUDE_LIST: frozenset[str] = frozenset(
         "AV0",  # lauryl maltose neopentyl glycol (alternate code)
         "LMT",  # dodecyl beta-D-maltoside
         "LDA",  # lauryl dimethylamine-N-oxide
-        # Polyethylene-glycol oligomers (cryoprotectant / precipitant family,
-        # alongside the PEG/PGE/PG4 already listed).
-        "1PE",  # pentaethylene glycol
-        "12P",  # dodecaethylene glycol
-        "P6G",  # hexaethylene glycol
-        # Other crystallization buffers / cryo-additives.
-        "HTO",  # heptane-1,2,3-triol
-        "D10",  # decane
-        "TAR",  # D-tartaric acid
-        "TLA",  # L-tartaric acid
     }
 )
 
+# The model-invisible gate consumed by prompt_builder / geometry / site_ref. The four
+# counter-ion metals (NA/MG/ZN/MN) are deliberately NOT here: they reach the model on
+# the auxiliary lane (INCIDENTAL_CANDIDATES) so a genuine functional metal -- e.g. Ca
+# at the calcium-sensing receptor, or a required Mg co-agonist -- is never hidden. Most
+# such metals are structural and the model routes them to auxiliary_small_molecules.csv.
+LIGAND_EXCLUDE_LIST: frozenset[str] = HARD_DROP | MECHANICAL_AUX
+
+# auxiliary_small_molecules.csv ``Type`` for a catalogued auxiliary molecule.
+# Covers the mechanical lane (fixed) plus the metals and transducer nucleotides
+# that reach aux from the model lane; other molecules fall back through
+# gpcrdb_aux_type_for (known lipid -> "Lipid", else "Other").
+AUX_TYPE_MAP: MappingProxyType[str, str] = MappingProxyType(
+    {
+        # Ions (mechanical ions + counter-ion metals on the model lane)
+        "K": "Ion",
+        "CL": "Ion",
+        "FE": "Ion",
+        "HG": "Ion",
+        "CD": "Ion",
+        "NI": "Ion",
+        "CA": "Ion",
+        "NA": "Ion",
+        "MG": "Ion",
+        "ZN": "Ion",
+        "MN": "Ion",
+        # Redox / metabolic cofactors and glycans
+        "NAD": "Other",
+        "NADP": "Other",
+        "FAD": "Other",
+        "FMN": "Other",
+        "COA": "Other",
+        "NAG": "Other",
+        "MAN": "Other",
+        "GAL": "Other",
+        "FUC": "Other",
+        # Matrix / solubilization lipids
+        "OLC": "Lipid",
+        "OLB": "Lipid",
+        "Y01": "Lipid",
+        # Detergents
+        "BOG": "Detergent",
+        "BNG": "Detergent",
+        "SOG": "Detergent",
+        "HTG": "Detergent",
+        "2CV": "Detergent",
+        "LMN": "Detergent",
+        "AV0": "Detergent",
+        "LMT": "Detergent",
+        "LDA": "Detergent",
+        # Transducer nucleotides / cofactors (chain-rule auxiliaries)
+        "GTP": "Other",
+        "GDP": "Other",
+        "GNP": "Other",
+        "GSP": "Other",
+        "GCP": "Other",
+        "ALF": "Other",
+    }
+)
+
+
+def gpcrdb_aux_type_for(comp_id: str | None) -> str:
+    """auxiliary_small_molecules.csv ``Type`` for a catalogued auxiliary molecule.
+
+    Mechanical-lane codes and the model-lane metals / transducer nucleotides are
+    fixed in :data:`AUX_TYPE_MAP`; any other molecule catalogued as auxiliary is
+    typed ``Lipid`` when it is a known lipid and ``Other`` otherwise.
+    """
+    if not comp_id:
+        return "Other"
+    mapped = AUX_TYPE_MAP.get(comp_id)
+    if mapped is not None:
+        return mapped
+    return "Lipid" if comp_id in LIPID_COMP_IDS else "Other"
+
+
+# Single-atom ion / metal comp ids (AUX_TYPE_MAP Type == "Ion"). They reach the model
+# on the auxiliary lane, but the geometry dual-role detector skips them: that detector
+# discriminates a structural-vs-functional LIPID by burial / pocket geometry, which is
+# meaningless for a single-atom ion -- a metal's functional judgement comes from the
+# paper (its pharmacological_role_check), not pocket geometry.
+ION_COMP_IDS: frozenset[str] = frozenset(
+    comp for comp, aux_type in AUX_TYPE_MAP.items() if aux_type == "Ion"
+)
+
+
 # Incidental-candidate molecules: present in many structures as EITHER a functional ligand OR
 # an incidental / structural lipid. The incidental-candidate prompt fork presents
-# them to the model (any member on LIGAND_EXCLUDE_LIST, e.g. PLM, is un-stripped
-# from the simplified metadata so the model can see it) and guides it to judge
-# the role, recording a dedicated pharmacological_role_check. ~CLR 22% / PLM 5% of corpus.
+# them to the model and guides it to judge the role, recording a dedicated
+# pharmacological_role_check. No incidental candidate is on LIGAND_EXCLUDE_LIST today, so
+# every one reaches the model directly; the un-strip step (see prompt_builder) is a
+# defensive guard that keeps any molecule ever listed on both sets visible to the model
+# rather than silently hard-excluded. ~CLR 22% / PLM 5% of corpus.
 #
-# The additions below are biological lipids / metabolites that flood structures as
+# The lipid members are biological lipids / metabolites that flood structures as
 # membrane or matrix components yet are the endogenous agonist at their cognate
 # receptors (free-fatty-acid, sphingosine-1-phosphate, lysophosphatidic-acid and
-# succinate receptors). They must reach the model for a role judgement, never be
-# hard-excluded, because copy count alone cannot tell agonist from membrane filler.
+# succinate receptors). The counter-ion metals (Ca/Na/Mg/Zn/Mn) are usually
+# structural / counter-ions but ARE the functional actor at a few receptors (Ca at
+# the calcium-sensing receptor; a required Mg co-agonist; Na as a Class A 2.50-pocket
+# NAM); copy count alone cannot tell agonist from filler, so all of these reach the
+# model for a role judgement rather than being hard-excluded.
 INCIDENTAL_CANDIDATES: frozenset[str] = frozenset(
     {
+        # Biological lipids (endogenous agonists at FFA / S1P / LPA / succinate receptors)
         "CLR",  # cholesterol
         "PLM",  # palmitic acid
-        "OLA",  # oleic acid (free fatty-acid agonist at FFA receptors)
-        "S1P",  # sphingosine-1-phosphate (S1P-receptor agonist)
-        "HXA",  # docosahexaenoic acid / DHA (FFA-receptor agonist)
-        "NKP",  # lysophosphatidic acid (LPA-receptor agonist)
-        "ACT",  # acetate (short-chain fatty-acid agonist at FFA receptors)
-        "SIN",  # succinic acid (succinate-receptor agonist)
+        "OLA",  # oleic acid
+        "S1P",  # sphingosine-1-phosphate
+        "HXA",  # docosahexaenoic acid / DHA
+        "NKP",  # lysophosphatidic acid
+        "ACT",  # acetate (short-chain fatty acid)
+        "SIN",  # succinic acid
+        # Counter-ion metals: usually structural, but the functional actor at a few receptors
+        "CA",
+        "NA",
+        "MG",
+        "ZN",
+        "MN",
     }
 )
 
@@ -831,7 +1072,7 @@ POLYMER_FEATURES_CACHE_NAME: str = "polymer_features_cache.json"
 # Top-level marker stamped on a detect output that was written while a
 # sequence-based detector transiently failed to fetch a UniProt reference (a
 # timeout or 5xx -- NOT a definitive 404). The detect resume skip recomputes a
-# record carrying this marker (and only such records), so a G-protein identity call
+# record carrying this marker (and only such records), so a G protein identity call
 # degraded by an upstream outage self-heals on a later run, while a structure
 # that legitimately produced no signal carries no marker and is never re-run.
 DETECT_INCOMPLETE_MARKER_KEY: str = "_detect_incomplete"
@@ -910,7 +1151,7 @@ MEMBRANE_BAND_MARGIN: float = 3.0
 # excluded from the fraction. Calibration-pending, like the other membrane knobs.
 MEMBRANE_FACING_DEADZONE_COS: float = 0.2
 
-# G-protein coupling protomer (detect stage, geometry). A Class C receptor is an
+# G protein coupling protomer (detect stage, geometry). A Class C receptor is an
 # obligate dimer and only ONE protomer engages the G protein; in a heterodimer
 # that protomer is often NOT the agonist-binding one (GABA-B: GABBR1 binds, GABBR2
 # couples). The G-alpha contacts exactly one receptor chain, so the chain with the
@@ -972,7 +1213,7 @@ SITE_REF_MIN_MAPPED_CONTACTS: int = 5
 # the centroid of these receptor cytoplasmic-face residues onto the normal fixes
 # the sign so a ligand's signed depth gains a physical "which side" meaning. This
 # uses the receptor's own 7TM backbone via the shipped generic numbering, so it
-# works for apo / no-G-protein structures too (where a G-alpha reference fails).
+# works for apo / no-G protein structures too (where a G-alpha reference fails).
 # Canonical cytoplasmic-anchor generic numbers: the DRY arginine (3x50) and the
 # NPxxY motif (7x49-7x53), both at the intracellular ends of their helices.
 MEMBRANE_INTRACELLULAR_ANCHOR_GENERIC: frozenset[str] = frozenset(
@@ -989,6 +1230,28 @@ CHIMERA_SUBTYPE_RESOLVED: str = "resolved"
 CHIMERA_SUBTYPE_INSEPARABLE_SET: str = "inseparable_set"
 CHIMERA_SUBTYPE_FAMILY_ONLY: str = "family_only"
 CHIMERA_SUBTYPE_LOW_CONFIDENCE: str = "low_confidence"
+
+# Aggregator-owned provenance marker recorded on the G-alpha alpha-subunit:
+# how far the reported subtype was verified. Pure provenance for the curator and
+# downstream consumer; it never gates accept-all.
+#   RESOLVED          the alpha5 window resolves a single subtype on its own.
+#   FAMILY_VERIFIED   the alpha5 confirms the coupling family and the model's
+#                     subtype is family-consistent (the alpha5 cannot separate
+#                     the subtype, so the specific member follows the model's
+#                     construct-name reading within a verified family).
+#   CONSTRUCT_NAME    neither family nor subtype was verified against the alpha5
+#                     (the family disagreed, the alpha5 was inconclusive, or no
+#                     model subtype was offered); the subtype, if any, rests on
+#                     the model's construct-name reading alone.
+SUBTYPE_BASIS_RESOLVED: str = "resolved"
+SUBTYPE_BASIS_FAMILY_VERIFIED: str = "family-verified"
+SUBTYPE_BASIS_CONSTRUCT_NAME: str = "construct-name-only"
+
+# Honest fallback for the modelled-backbone (scaffold) slug when the structure's
+# G-alpha entity carries no attached UniProt accession, so the scaffold identity
+# cannot be read from the deposition. Recorded rather than silently dropped, so a
+# missing backbone is visible as an explicit "unknown" in provenance.
+CHIMERA_BACKBONE_UNKNOWN: str = "unknown"
 
 # Coupling-family labels.
 G_FAMILY_GS: str = "Gs"
@@ -1068,8 +1331,8 @@ G_ALPHA_EXCLUDE_KEYWORDS: tuple[str, ...] = (
     "subunit g",
 )
 
-# GPCRdb slug prefixes that mark a heterotrimeric G-protein subunit (alpha, beta,
-# or gamma). A transducer-derived / G-protein-mimetic peptide whose chain carries
+# GPCRdb slug prefixes that mark a heterotrimeric G protein subunit (alpha, beta,
+# or gamma). A transducer-derived / G protein-mimetic peptide whose chain carries
 # one of these slugs is a signaling partner, not a receptor ligand. "gnb" covers
 # G-beta-5 (curated slug gnb5_*), which "gbb" does not. ("gnat" stays for clarity
 # though it is redundant under "gna" for str.startswith.)
@@ -1090,7 +1353,7 @@ OLIGOMER_HETEROMER: str = "HETEROMER"
 # ---------------------------------------------------------------------------
 
 # The AI enum values for the receptor's OWN oligomeric state (counts ONLY GPCR
-# receptor copies, not G-protein/arrestin/nanobody/peptide/ligand partners).
+# receptor copies, not G protein/arrestin/nanobody/peptide/ligand partners).
 # Mirrors annotator/schema.py receptor_info.oligomeric_state.value.enum.
 AI_OLIGOMER_MONOMER: str = "monomer"
 AI_OLIGOMER_HOMO_DIMER: str = "homo-dimer"
@@ -1144,12 +1407,19 @@ ALERT_NO_GPCR: str = "NO_GPCR"
 ALERT_TM_DATA_UNAVAILABLE: str = "TM_DATA_UNAVAILABLE"
 # The AI's receptor oligomeric-state call disagrees with the deterministic
 # receptor-level classifier AT THE RECEPTOR LEVEL (both count GPCR receptors
-# only, never G-protein/peptide/ligand partners): e.g. the AI says 'monomer'
+# only, never G protein/peptide/ligand partners): e.g. the AI says 'monomer'
 # while the classifier resolved >=2 receptor chains (a possible crystallographic
 # copy vs a true oligomer), or the two disagree on copy count or homo/hetero.
 # The classification cannot be settled mechanically here, so route to a curator.
 # Promoted to a gating warning.
 ALERT_OLIGOMER_DISAGREEMENT: str = "OLIGOMER_DISAGREEMENT"
+# A chain carrying a GPCR slug was about to be recorded as an ADDITIONAL receptor
+# protomer in the Partner_UniProt column, but its UniProt annotation does not
+# carry enough transmembrane helices to be a 7TM receptor (a peptide ligand, a
+# soluble protein agonist, a single-pass co-receptor mis-mapped to a slug). It is
+# dropped from the partner set so the column only admits real receptor protomers;
+# the eviction is surfaced so the curator can confirm the chain's true role.
+ALERT_NON_RECEPTOR_PARTNER: str = "NON_RECEPTOR_PARTNER"
 
 # ---------------------------------------------------------------------------
 # 7TM statuses & detection constants
@@ -1205,7 +1475,7 @@ GPCR_SLUG_NEGATIVE_PREFIXES: tuple[str, ...] = (
     "gnaz",
     "gnal",
     "gnat",
-    # G-protein beta/gamma
+    # G protein beta/gamma
     "gbb",
     "gbg",
     # Arrestins, GRKs, RAMPs
@@ -1242,6 +1512,16 @@ GPCR_SLUG_NEGATIVE_PREFIXES: tuple[str, ...] = (
 # ---------------------------------------------------------------------------
 
 CRYSTALLIZATION_FUSION_SLUGS: tuple[str, ...] = ("c562", "enlys")
+# BRIL cytochrome substring, kept narrow on purpose. The auxiliary-name
+# normaliser uses this to fold the cytochrome-b562 spellings into the house name
+# "BRIL"; the literal "BRIL"/"bril" spelling is handled separately by a
+# word-boundary `\bbril\b` regex in the normaliser. This constant intentionally
+# holds only the cytochrome substring — "b562" alone is excluded as too greedy
+# (it would match the distinct Pfam "Cytochrome c/b562"). It must NOT reuse
+# CRYSTALLIZATION_FUSION_KEYWORDS below: that tuple also matches lysozyme / GFP /
+# glycogen synthase, which are their own distinct fusions and must keep their own
+# names.
+BRIL_CYTOCHROME_TOKEN: str = "cytochrome b562"
 CRYSTALLIZATION_FUSION_KEYWORDS: tuple[str, ...] = (
     "bril",
     "b562",
@@ -1257,6 +1537,47 @@ CRYSTALLIZATION_FUSION_KEYWORDS: tuple[str, ...] = (
     # fusion aid. Requires both words to match, so the false-keep surface is small.
     "glycogen synthase",
 )
+
+# ---------------------------------------------------------------------------
+# Antibody / binder name correction
+# ---------------------------------------------------------------------------
+# The model sometimes names an auxiliary binder (Fab / nanobody / scFv / DARPin)
+# after the ANTIGEN it binds rather than the binder itself -- e.g. an "anti-BRIL
+# Fab" annotated simply as "BRIL". The correct name lives in the chain's RCSB
+# description (pdbx_description), available only at aggregation time. A binder is
+# rewritten only when ALL THREE hold: (a) its type is a binder type below,
+# (b) its chain carries NO GPCRdb slug (every real receptor-side fusion carries
+# one, so this never misfires on a fusion), and (c) its description matches one of
+# the antigen-agnostic patterns below.
+
+# Binder auxiliary-protein type values (the aux `type.value` enum subset that can
+# be named after an antigen). "Antibody fab fragment" matches the schema enum.
+BINDER_AUX_TYPE_VALUES: frozenset[str] = frozenset(
+    {"Antibody", "Antibody fab fragment", "Nanobody", "scFv", "DARPin"}
+)
+
+# Antigen-agnostic patterns read from the description (NOT the model name):
+#   F1 "anti-X ..."      -> captures the antigen token X after "anti-".
+#   F2 "X-binding <type>" -> captures X before "-binding <binder type>".
+# Deliberately NOT matched: bare "X antibody" (catches clone/format names like
+# scFv16, Nb35) and a lone "binding" token (catches "guanine nucleotide-binding
+# protein"). The type-gate + no-slug-gate + these two patterns are the discriminator.
+BINDER_ANTIGEN_ANTI_PATTERN: str = r"\banti[-\s]+([A-Za-z0-9][\w./-]*)"
+BINDER_ANTIGEN_BINDING_PATTERN: str = (
+    r"\b([\w/-]+)[-\s]binding\s+(nanobody|fab|scfv|sybody|darpin)\b"
+)
+
+# Surface-form normalisation for captured antigen tokens. Unknown tokens keep
+# their captured surface form (default), so the map need only fix known casings.
+BINDER_ANTIGEN_ALIASES: dict[str, str] = {
+    "bril": "BRIL",
+    "5-ht2b": "5-HT2B",
+    "5ht2br": "5-HT2B",
+    "gprc5d": "GPRC5D",
+    "ron": "RON",
+    "fab": "Fab",
+    "hinge": "hinge",
+}
 
 # ---------------------------------------------------------------------------
 # Download log status values (produced by papers/downloader, consumed by papers/watcher)
@@ -1299,13 +1620,24 @@ ALERT_PREFIX_TIE_BREAKER_OVERRIDE: str = "[TIE-BREAKER OVERRIDE]"
 ALERT_PREFIX_HALLUCINATION: str = "[HALLUCINATION ALERT]"
 ALERT_PREFIX_ALGO_WARNING: str = "[ALGO WARNING]"
 ALERT_PREFIX_API_UNAVAILABLE: str = "[API_UNAVAILABLE]"
-ALERT_PREFIX_CHIMERIC_REVIEW: str = "[CHIMERIC G-PROTEIN]"
+ALERT_PREFIX_CHIMERIC_REVIEW: str = "[CHIMERIC G PROTEIN]"
 ALERT_PREFIX_MISSED_POLYMER: str = "[UNANNOTATED CHAIN]"
 ALERT_PREFIX_FUSION_NOTE: str = "[CRYSTALLIZATION FUSION]"
+ALERT_PREFIX_BINDER_RENAME: str = "[BINDER NAME CORRECTED]"
 ALERT_PREFIX_ALPHA5_GRAFT: str = "[ALPHA5 GRAFT]"
 ALERT_PREFIX_UNRECOGNISED_G_ALPHA: str = "[UNRECOGNISED G-ALPHA]"
-ALERT_PREFIX_G_PROTEIN_LIGAND: str = "[G-PROTEIN PEPTIDE AS LIGAND]"
+ALERT_PREFIX_G_PROTEIN_LIGAND: str = "[G PROTEIN PEPTIDE AS LIGAND]"
 ALERT_PREFIX_MULTIPLE_AGONISTS: str = "[MULTIPLE AGONISTS]"
+# An active-state call sits alongside an inactive-stabilising ligand (inverse
+# agonist) with no G protein transducer modelled -- advisory to confirm the state.
+ALERT_PREFIX_STATE_CONFIRMATION: str = "[STATE CONFIRMATION]"
+# A G protein subunit fragment the model misfiled under auxiliary_proteins /
+# ligands, moved into the G protein record by its subunit slug.
+ALERT_PREFIX_G_PROTEIN_RELOCATED: str = "[G PROTEIN SUBUNIT RELOCATED]"
+# A misfiled G protein fragment whose subunit column cannot be resolved
+# deterministically (no subunit slug, or slugs spanning two subunit columns);
+# surfaced for a curator but NOT moved.
+ALERT_PREFIX_G_PROTEIN_MISFILED: str = "[G PROTEIN SUBUNIT MISFILED]"
 
 # ---------------------------------------------------------------------------
 # Annotator function call name
@@ -1356,10 +1688,29 @@ CSV_SCHEMA: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
             # columns positionally (PDB..In structure), so the binding-site type
             # goes at the end alongside the other added columns.
             "Site",
+            # Appended: one token per modelled copy, each "<auth_asym_id>:<auth_seq_id>"
+            # (author chain : author residue number), comma-joined in the same order
+            # as, and 1:1 with, the label_asym_id column (same instance list). The
+            # chain prefix keeps a multi-copy ligand's repeating residue numbers
+            # unambiguous.
+            "Residue_seq_id",
+        ),
+        # Auxiliary small molecules (ions, cofactors, glycans, detergents, matrix
+        # lipids, and model-lane molecules judged non-functional): never receptor
+        # ligands, so catalogued here instead of ligands.csv. Located exactly like a
+        # ligands.csv row (ChainID + label_asym_id + Residue_seq_id copy tokens).
+        "auxiliary_small_molecules.csv": (
+            "PDB",
+            "ChainID",
+            "Name",
+            "Type",
+            "Function",
+            "label_asym_id",
+            "Residue_seq_id",
         ),
         "g_proteins.csv": (
             "PDB",
-            "Alpha_UniProt",
+            "Alpha_identity",
             "Alpha_ChainID",
             "Beta_UniProt",
             "Beta_ChainID",
@@ -1369,6 +1720,13 @@ CSV_SCHEMA: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
             "Alpha_label_asym_id",
             "Beta_label_asym_id",
             "Gamma_label_asym_id",
+            # Appended, never inserted: the downstream build reads the leading
+            # columns positionally (PDB..Note), so these go at the end.
+            # Alpha_identity keeps the model's deposited/voted slug unchanged; the
+            # alpha5 helix identity (Alpha_alpha5_identity) and the modelled backbone
+            # scaffold (Alpha_backbone) are recorded as distinct trailing columns.
+            "Alpha_alpha5_identity",
+            "Alpha_backbone",
         ),
         "arrestins.csv": ("PDB", "UniProt", "ChainID", "Note", "label_asym_id"),
         "fusion_proteins.csv": ("PDB", "Name"),
@@ -1425,6 +1783,46 @@ AUTO_RESOLVE_KEYS: frozenset[str] = frozenset(
     }
 )
 
+# Terminal keys that carry a structure's identity or biology -- the value a
+# curator must decide deliberately, never inherit from a pre-selected default
+# when the runs genuinely disagree. A contested SEMANTIC leaf is offered with NO
+# default, so a bare Enter cannot silently commit an identity call; a
+# display-string field (a ligand/protein `name`, a `pubchem_id`) is deliberately
+# absent and keeps its default. Each entry is the terminal key exactly as it
+# appears at the end of a controversy path (the last dotted segment,
+# list-index brackets stripped):
+#   value                decision-unit value (functional state, oligomeric
+#                        state, ligand role, auxiliary-protein type)
+#   role                 per-copy ligand pharmacological role
+#   site_ref             ligand / per-copy binding-site position
+#   type                 ligand molecular type (small-molecule / lipid /
+#                        peptide / protein / na / none) -- a flat leaf, so its
+#                        disagreements bypass the per-copy `role.value` guard
+#                        above and must be pinned here on their own
+#   uniprot_entry_name   receptor and G protein subunit identity
+#   state                functional-state block
+#   oligomeric_state     receptor oligomeric-state block
+#   is_functional_ligand incidental-candidate functional-vs-structural call
+#   is_chimeric          engineered chimeric G protein flag
+#   family / subtype / functional_coupling
+#                        G-alpha coupling-family and subtype identity
+SEMANTIC_CONTROVERSY_KEYS: frozenset[str] = frozenset(
+    {
+        "value",
+        "role",
+        "site_ref",
+        "type",
+        "uniprot_entry_name",
+        "state",
+        "oligomeric_state",
+        "is_functional_ligand",
+        "is_chimeric",
+        "family",
+        "subtype",
+        "functional_coupling",
+    }
+)
+
 VALIDATION_FATAL_KEYWORDS: tuple[str, ...] = (
     "ghost chain",
     "ghost ligand",
@@ -1444,6 +1842,10 @@ TOPLEVEL_BLOCK_KEYS: tuple[str, ...] = (
     "structure_info",
     "receptor_info",
     "ligands",
+    # The per-copy binding-site sidecar follows the compound-level ligands block
+    # so its contested per-copy site assignments become reachable during review
+    # (and so review visits it right after the ligands it annotates).
+    "ligand_copies",
     "signaling_partners",
     "auxiliary_proteins",
     "key_findings",

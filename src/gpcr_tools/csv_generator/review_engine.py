@@ -6,7 +6,8 @@ resolution, auto-resolve for trivial keys, and top-level block orchestration.
 
 import copy
 import json
-from typing import Any
+from collections.abc import Iterable
+from typing import Any, cast
 
 from rich import box
 from rich.console import Group
@@ -20,11 +21,14 @@ from gpcr_tools.config import (
     AUTO_RESOLVE_KEYS,
     BLACKLISTED_KEYS,
     LIST_ITEM_KEY_FIELDS,
+    SEMANTIC_CONTROVERSY_KEYS,
     TOPLEVEL_BLOCK_KEYS,
     VALIDATION_GHOST_LIGAND,
+    VOTE_NEAR_TIE_MARGIN,
     list_item_identity,
 )
 from gpcr_tools.csv_generator.audit import log_audit_trail
+from gpcr_tools.csv_generator.exceptions import ReviewAbortedError
 from gpcr_tools.csv_generator.ui import (
     console,
     create_display_copy,
@@ -37,6 +41,7 @@ from gpcr_tools.csv_generator.validation_display import (
     display_validation_alert,
     get_relevant_validation_warnings,
 )
+from gpcr_tools.validator.gating import has_gating_controversy as _controversy_gates
 
 
 def _resolve_list_key_field(path: str) -> str | None:
@@ -113,14 +118,20 @@ def coerce_type(original: Any, new_str: str) -> Any:
 def has_gating_controversy(controversies: dict) -> bool:
     """Whether any controversy should disable the one-click accept-all gate.
 
-    Minority-omission advisories (records tagged ``gating=False``: an entity some
-    runs reported but the chosen run omitted) are surfaced to the curator for
-    review but are advisory only -- they do not block accept-all. Every other
+    Advisory-only records (tagged ``gating=False``) are surfaced to the curator
+    for review but do not block accept-all: a minority omission (an entity some
+    runs reported but the chosen run omitted), plus any near-tie / disagreement
+    on a field that cannot encode a real error once identity is settled -- a
+    lexical ``name`` wording variant, or a ``pubchem_id`` split with a blank
+    shipped value or an authoritative ``api_pubchem_cid`` backstop. Every other
     controversy (a near-tie / genuine disagreement) still gates. The advisory
     records remain in the controversy map so they stay visible during review;
     this helper only excludes them from the accept-all gating decision.
+
+    Delegates to the shared gating predicate so the curator UI, the auto-accept
+    pass, and the run manifest decide controversy gating identically.
     """
-    return any(c.get("gating", True) for c in controversies.values())
+    return _controversy_gates(controversies)
 
 
 def has_downstream_controversy(path_prefix: str, controversies: dict) -> bool:
@@ -178,6 +189,52 @@ def get_verified_paths(main_data: dict) -> set:
     return verified
 
 
+# ── Controversy Default Suppression ─────────────────────────────────────
+
+
+def _top_two_vote_margin(vote_counts: Iterable[int]) -> int | None:
+    """Votes separating the top two candidates: (top count) - (runner-up count).
+
+    Returns ``None`` when there are fewer than two candidates, so a single value
+    -- a consensus, whatever its count -- is never treated as a near-tie. (This
+    mirrors the vote aggregator's own near-tie guard: one candidate cannot tie
+    with a runner-up that does not exist.) A tie between the top two, e.g. a 5:5
+    split, yields 0. Non-integer counts are coerced.
+    """
+    counts = sorted((int(c) for c in vote_counts), reverse=True)
+    if len(counts) < 2:
+        return None
+    return counts[0] - counts[1]
+
+
+def fork_requires_explicit_choice(
+    terminal_key: str,
+    best_run_value: Any,
+    majority_vote_value: Any,
+    vote_counts: Iterable[int],
+) -> bool:
+    """Whether a contested leaf must be offered with NO pre-selected default.
+
+    A default lets a bare Enter commit a value -- fine for a wording variant, but
+    unsafe for a genuine disagreement on a value that carries the structure's
+    identity or biology. So a default is suppressed only for a SEMANTIC terminal
+    key (:data:`SEMANTIC_CONTROVERSY_KEYS`) whose disagreement is real: the best
+    run disagrees with the majority vote, OR the top-two vote margin is within
+    :data:`VOTE_NEAR_TIE_MARGIN` (a near-tie -- e.g. a 5:5 split, margin 0). A
+    display-string field (a ligand/protein ``name``, a ``pubchem_id``) always
+    keeps its default, as does a semantic field whose best run and majority agree
+    by a comfortable margin. A lone candidate is a consensus, not a near-tie, so
+    a unanimous value (including a unanimous low-confidence flag, which carries no
+    per-value votes) keeps its default.
+    """
+    if terminal_key not in SEMANTIC_CONTROVERSY_KEYS:
+        return False
+    if best_run_value != majority_vote_value:
+        return True
+    margin = _top_two_vote_margin(vote_counts)
+    return margin is not None and margin <= VOTE_NEAR_TIE_MARGIN
+
+
 # ── Review Functions ────────────────────────────────────────────────────
 
 
@@ -189,7 +246,7 @@ def review_decision_unit(
     validation_data: dict,
     fix_mode: bool = False,
     verified_paths: set | None = None,
-) -> dict | None:
+) -> dict:
     """Review a decision unit (dict with value/confidence/evidence)."""
     display_validation_alert(path, validation_data)
 
@@ -217,15 +274,19 @@ def review_decision_unit(
 
     if has_downstream_controversy(path, controversies):
         console.print(Panel("[bold yellow]Controversy detected downstream.[/]", style="yellow"))
-        return review_node(
-            pdb_id,
-            d_node,
-            controversies,
-            path,
-            True,
-            validation_data,
-            fix_mode,
-            verified_paths,
+        # force_deep review of a decision-unit dict always yields a dict back.
+        return cast(
+            dict,
+            review_node(
+                pdb_id,
+                d_node,
+                controversies,
+                path,
+                True,
+                validation_data,
+                fix_mode,
+                verified_paths,
+            ),
         )
 
     action = Prompt.ask(
@@ -241,17 +302,21 @@ def review_decision_unit(
         log_audit_trail(pdb_id, path, "skip_field", d_node.get("value"), d_node.get("value"))
         return d_node
     if action == "q":
-        return None
+        raise ReviewAbortedError()
     if action == "d":
-        return review_node(
-            pdb_id,
-            d_node,
-            controversies,
-            path,
-            True,
-            validation_data,
-            fix_mode,
-            verified_paths,
+        # force_deep review of a decision-unit dict always yields a dict back.
+        return cast(
+            dict,
+            review_node(
+                pdb_id,
+                d_node,
+                controversies,
+                path,
+                True,
+                validation_data,
+                fix_mode,
+                verified_paths,
+            ),
         )
     if action == "e":
         orig_val = d_node["value"]
@@ -271,7 +336,7 @@ def review_leaf(
     path: str,
     validation_data: dict,
     verified_paths: set | None = None,
-) -> Any | None:
+) -> Any:
     """Review a leaf value (scalar or non-decision-unit)."""
     display_validation_alert(path, validation_data)
 
@@ -394,14 +459,34 @@ def review_leaf(
 
         default_choice = option_choices[target_default_idx] if option_choices else "e"
 
-        choice = Prompt.ask(
+        # A genuine disagreement on an identity/biology-bearing value must NOT
+        # pre-select a default: a bare Enter would otherwise silently commit it.
+        # Build the prompt kwargs conditionally so the default is OMITTED (never
+        # passed as None) in that case, and Rich re-asks cleanly on empty input.
+        terminal_key = path.split(".")[-1]
+        if "[" in terminal_key:
+            terminal_key = terminal_key.split("[")[0]
+        suppress_default = fork_requires_explicit_choice(
+            terminal_key,
+            best_run_value,
+            majority_value,
+            [candidate["count"] for candidate in candidates],
+        )
+        prompt_kwargs: dict[str, Any] = {"choices": prompt_choices}
+        if not suppress_default:
+            prompt_kwargs["default"] = default_choice
+
+        raw_choice = Prompt.ask(
             "\n[prompt]Select option, [bold]s[/]kip, [bold]e[/]dit, or [bold]q[/]uit:[/]",
-            choices=prompt_choices,
-            default=default_choice,
-        ).lower()
+            **prompt_kwargs,
+        )
+        # Defensive: Prompt.ask returns the chosen string, but never let a
+        # non-string slip through to .lower() and crash the review -- fall back
+        # to the explicit edit path rather than committing anything silently.
+        choice = raw_choice.lower() if isinstance(raw_choice, str) else "e"
 
         if choice == "q":
-            return None
+            raise ReviewAbortedError()
         if choice == "s":
             log_audit_trail(pdb_id, path, "skip_field", leaf_val, leaf_val)
             return leaf_val
@@ -431,7 +516,7 @@ def review_leaf(
             default="y",
         ).lower()
         if action == "q":
-            return None
+            raise ReviewAbortedError()
         if action in ("y", "s"):
             audit_action = "accept" if action == "y" else "skip_field"
             log_audit_trail(pdb_id, path, audit_action, leaf_val, leaf_val)
@@ -453,7 +538,7 @@ def review_node(
     validation_data: dict | None = None,
     fix_mode: bool = False,
     verified_paths: set | None = None,
-) -> Any | None:
+) -> Any:
     """Recursively review a JSON node (dict, list, or leaf)."""
     if validation_data is None:
         validation_data = {}
@@ -519,8 +604,6 @@ def review_node(
                 fix_mode,
                 verified_paths,
             )
-            if res is None:
-                return None
             new_dict[key] = res
         return new_dict
 
@@ -547,8 +630,6 @@ def review_node(
                 fix_mode,
                 verified_paths,
             )
-            if res is None:
-                return None
             new_list.append(res)
         return new_list
     else:
@@ -597,7 +678,7 @@ def review_toplevel_blocks(
     controversies: dict,
     validation_data: dict,
     fix_mode: bool = False,
-) -> dict | None:
+) -> dict:
     """Review each top-level block with appropriate context and UI."""
     verified_paths = get_verified_paths(main_data)
     final_data: dict = {}
@@ -633,8 +714,6 @@ def review_toplevel_blocks(
                     fix_mode,
                     verified_paths,
                 )
-                if resolved_block is None:
-                    return None
                 final_data[key] = resolved_block
                 log_audit_trail(pdb_id, key, "auto_accept_trivial_block", "N/A", "ACCEPTED")
             else:
@@ -727,12 +806,23 @@ def review_toplevel_blocks(
                 )
 
                 if action == "q":
-                    return None
+                    raise ReviewAbortedError()
                 if action == "s":
                     core_blocks = {"receptor_info", "ligands", "signaling_partners"}
                     if key in core_blocks and not Confirm.ask(
                         f"[bold red]'{key}' is a core block. "
                         f"Skipping will leave its CSV fields empty. Continue?[/]",
+                        default=False,
+                    ):
+                        continue
+                    # Skipping the per-copy ligand table discards its site
+                    # partitioning: the CSV then falls back to listing every
+                    # matched residue under each ligand (an honest over-listing,
+                    # not silent loss). Confirm so an accidental skip is deliberate.
+                    if key == "ligand_copies" and not Confirm.ask(
+                        f"[bold red]Skipping '{key}' discards the per-copy site "
+                        f"assignments; the CSV will list every matched residue for "
+                        f"each ligand instead. Continue?[/]",
                         default=False,
                     ):
                         continue
@@ -807,12 +897,20 @@ def review_toplevel_blocks(
                         False,
                         verified_paths,
                     )
-                    if res is None:
-                        return None
                     final_data[key] = res
                     break
             continue
         else:
+            # The per-copy ligand table is a derived sidecar built from the
+            # ligands block, not a primary annotation a curator needs to eyeball.
+            # When it carries no controversy or alert there is nothing to decide,
+            # so pass it through without an "Accept?" prompt. The primary blocks
+            # still prompt on clean pass-through (a curator may want to glance at
+            # each), so only this derived block is silenced.
+            if key == "ligand_copies":
+                final_data[key] = block_data
+                log_audit_trail(pdb_id, key, "auto_accept_clean_block", "N/A", "ACCEPTED")
+                continue
             console.print(
                 Panel(
                     Pretty(create_display_copy(block_data)),
@@ -835,8 +933,6 @@ def review_toplevel_blocks(
                     fix_mode,
                     verified_paths,
                 )
-                if res is None:
-                    return None
                 final_data[key] = res
 
     # Preserve any non-reviewed keys

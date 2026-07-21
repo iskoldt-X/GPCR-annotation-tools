@@ -19,9 +19,12 @@ from gpcr_tools.validator.geometry import (
     _SPHERE_DIRECTIONS,
     LigandCopyGeometry,
     _burial,
+    analyze_ligand_copies,
     centroid,
     fetch_structure,
     fibonacci_directions,
+    ligand_contact_residues,
+    ligand_interaction_counts,
     load_structure,
 )
 
@@ -176,3 +179,145 @@ class TestLoadStructure:
         bogus.write_bytes(b"not a structure")
         monkeypatch.setattr(geom, "fetch_structure", lambda *a, **k: bogus)
         assert load_structure("9IIX", tmp_path) is None
+
+
+def _atom(name: str, x: float, y: float, z: float, element: str = "C") -> gemmi.Atom:
+    atom = gemmi.Atom()
+    atom.name = name
+    atom.pos = gemmi.Position(x, y, z)
+    atom.element = gemmi.Element(element)
+    return atom
+
+
+def _het_residue(name: str, seq_id: int, x: float, elements: list[str]) -> gemmi.Residue:
+    """A HETATM (non-polymer) residue -- a genuine free ligand or ion."""
+    res = gemmi.Residue()
+    res.name = name
+    res.seqid = gemmi.SeqId(seq_id, " ")
+    res.het_flag = "H"
+    for i, element in enumerate(elements):
+        res.add_atom(_atom(f"{element}{i}", x + i * 1.4, 0.0, 0.0, element))
+    return res
+
+
+def _polymer_glu_chain(name: str) -> gemmi.Chain:
+    """A short backbone stretch of glutamate residues (ATOM records).
+
+    These share the ``GLU`` name of a free glutamate ligand but are part of the
+    polymer, so they must never be picked up as ligand copies.
+    """
+    chain = gemmi.Chain(name)
+    for i in range(3):
+        res = gemmi.Residue()
+        res.name = "GLU"
+        res.seqid = gemmi.SeqId(i + 1, " ")
+        res.het_flag = "A"
+        base = i * 3.8
+        res.add_atom(_atom("N", base, 0.0, 0.0, "N"))
+        res.add_atom(_atom("CA", base + 1.0, 0.0, 0.0))
+        res.add_atom(_atom("C", base + 2.0, 0.0, 0.0))
+        res.add_atom(_atom("O", base + 2.5, 0.0, 0.0, "O"))
+        chain.add_residue(res)
+    return chain
+
+
+def _modified_residue_chain(name: str) -> gemmi.Chain:
+    """A polymer chain carrying one modified residue (selenomethionine, MSE).
+
+    MSE is deposited as a HETATM but is part of the polymer, so it must be treated
+    as protein -- never selected as a ligand copy. ``setup_entities`` assigns the
+    polymer entity type that ``is_protein_atom`` reads.
+    """
+    chain = gemmi.Chain(name)
+    for i, res_name in enumerate(("MET", "MSE", "MET")):
+        res = gemmi.Residue()
+        res.name = res_name
+        res.seqid = gemmi.SeqId(i + 1, " ")
+        res.het_flag = "H" if res_name == "MSE" else "A"  # MSE is HETATM in-polymer
+        base = i * 3.8
+        res.add_atom(_atom("N", base, 0.0, 0.0, "N"))
+        res.add_atom(_atom("CA", base + 1.0, 0.0, 0.0))
+        res.add_atom(_atom("C", base + 2.0, 0.0, 0.0))
+        res.add_atom(_atom("O", base + 2.5, 0.0, 0.0, "O"))
+        chain.add_residue(res)
+    return chain
+
+
+def _modified_residue_structure() -> gemmi.Structure:
+    """A single polymer chain with an in-polymer modified residue (MSE)."""
+    st = gemmi.Structure()
+    st.cell = gemmi.UnitCell(200, 200, 200, 90, 90, 90)
+    st.spacegroup_hm = "P 1"
+    model = gemmi.Model("1")
+    model.add_chain(_modified_residue_chain("A"))
+    st.add_model(model)
+    st.setup_entities()
+    return st
+
+
+def _name_collision_structure() -> gemmi.Structure:
+    """A structure where a free ``GLU`` ligand shares its name with backbone GLU.
+
+    Chain A is three backbone glutamate residues; chain B carries one free
+    glutamate ligand (comp_id GLU) plus a zinc ion, both close enough to the
+    polymer to register contacts. Only the free ligand is a GLU copy.
+    """
+    st = gemmi.Structure()
+    st.cell = gemmi.UnitCell(200, 200, 200, 90, 90, 90)
+    st.spacegroup_hm = "P 1"
+    model = gemmi.Model("1")
+    model.add_chain(_polymer_glu_chain("A"))
+    ligands = gemmi.Chain("B")
+    ligands.add_residue(_het_residue("GLU", 501, 2.0, ["N", "C", "C", "O"]))
+    ligands.add_residue(_het_residue("ZN", 601, 3.0, ["ZN"]))
+    model.add_chain(ligands)
+    st.add_model(model)
+    st.setup_entities()  # assigns entity types that is_protein_atom relies on
+    return st
+
+
+class TestLigandCopySelectionSkipsPolymer:
+    """A ligand comp_id can collide with a standard amino-acid name (e.g. a free
+    GLU ligand). Copy selection must count only genuine non-polymer copies, never
+    the backbone residues that happen to share the name."""
+
+    def test_analyze_ligand_copies_excludes_backbone(self) -> None:
+        st = _name_collision_structure()
+        copies = analyze_ligand_copies(st, "GLU", {"A"})
+        # The three backbone GLU are excluded; only the free-ligand copy remains.
+        assert len(copies) == 1
+
+    def test_contact_residues_excludes_backbone(self) -> None:
+        st = _name_collision_structure()
+        assert len(ligand_contact_residues(st, "GLU", {"A"})) == 1
+
+    def test_contact_residues_carry_copy_id(self) -> None:
+        # Each copy leads with its own author chain + residue number (the copy identifier
+        # auth_asym_id:auth_seq_id), read from the coordinate residue. The free GLU
+        # ligand is chain B, residue 501.
+        st = _name_collision_structure()
+        (copy,) = ligand_contact_residues(st, "GLU", {"A"})
+        auth_chain, auth_seq_id, burial, contacts = copy
+        assert (auth_chain, auth_seq_id) == ("B", 501)
+        assert isinstance(burial, float)
+        assert isinstance(contacts, list)
+
+    def test_interaction_counts_excludes_backbone(self) -> None:
+        st = _name_collision_structure()
+        assert len(ligand_interaction_counts(st, "GLU")) == 1
+
+    def test_ion_copy_still_counted(self) -> None:
+        # An ion is already non-polymer and must remain unaffected by the gate.
+        st = _name_collision_structure()
+        assert len(analyze_ligand_copies(st, "ZN", {"A"})) == 1
+        assert len(ligand_contact_residues(st, "ZN", {"A"})) == 1
+        assert len(ligand_interaction_counts(st, "ZN")) == 1
+
+    def test_modified_residue_excluded(self) -> None:
+        # A modified residue (MSE) is HETATM but in-polymer, so it is protein and
+        # never a ligand copy. This exercises is_protein_atom's entity_type branch,
+        # not het_flag alone.
+        st = _modified_residue_structure()
+        assert len(analyze_ligand_copies(st, "MSE", {"A"})) == 0
+        assert len(ligand_contact_residues(st, "MSE", {"A"})) == 0
+        assert len(ligand_interaction_counts(st, "MSE")) == 0

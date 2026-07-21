@@ -33,7 +33,7 @@ def test_selects_only_pdbs_with_api_unavailable(tmp_path) -> None:
     vdir = tmp_path / "validation_logs"
     vdir.mkdir()
     _write_report(vdir, "AAAA", ["[API_UNAVAILABLE] at 'signaling_partners': UniProt down"])
-    _write_report(vdir, "BBBB", ["[CHIMERIC G-PROTEIN] at 'signaling_partners': confirm"])
+    _write_report(vdir, "BBBB", ["[CHIMERIC G PROTEIN] at 'signaling_partners': confirm"])
     _write_report(vdir, "CCCC", [])
     cfg = SimpleNamespace(aggregated_dir=tmp_path)
     assert _pdbs_with_api_unavailable(cfg) == ["AAAA"]

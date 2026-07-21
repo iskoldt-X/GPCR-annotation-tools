@@ -18,7 +18,8 @@ from gpcr_tools.detector.geometry import (
     _gpcr_auth_chains,
     detect_dual_role_ligands,
 )
-from gpcr_tools.detector.signals import SIGNAL_DUAL_ROLE_LIGAND
+from gpcr_tools.detector.ligands import detect_transducer_copies
+from gpcr_tools.detector.signals import SIGNAL_DUAL_ROLE_LIGAND, SIGNAL_TRANSDUCER_COPY
 from gpcr_tools.validator.geometry import LigandCopyGeometry
 
 
@@ -78,9 +79,10 @@ class TestEnrichedParsing:
         assert _gpcr_auth_chains(_entry(gpcr_slug="gnas2_human")) == set()
 
     def test_candidate_comp_ids_keeps_real_and_incidental_candidate(self) -> None:
-        # Use an incidental_candidate molecule that is ALSO on the exclude list (PLM), so the
-        # "- INCIDENTAL_CANDIDATES" override is genuinely exercised (it must survive).
-        incidental_candidate = sorted(INCIDENTAL_CANDIDATES & LIGAND_EXCLUDE_LIST)[0]
+        # An incidental candidate (a possible functional ligand) is kept alongside a
+        # real drug: incidental candidates are not on the hard exclude list, so they
+        # always survive the buffer strip and reach the model.
+        incidental_candidate = sorted(INCIDENTAL_CANDIDATES)[0]
         assert _candidate_comp_ids(_entry(("A1AEI", incidental_candidate))) == {
             "A1AEI",
             incidental_candidate,
@@ -89,6 +91,14 @@ class TestEnrichedParsing:
     def test_candidate_comp_ids_drops_buffers(self) -> None:
         buffer = sorted(LIGAND_EXCLUDE_LIST - INCIDENTAL_CANDIDATES)[0]
         assert _candidate_comp_ids(_entry(("A1AEI", buffer))) == {"A1AEI"}
+
+    def test_candidate_comp_ids_skips_single_atom_ions(self) -> None:
+        # A counter-ion metal reaches the model on the auxiliary lane (it is an
+        # incidental candidate), but the geometry dual-role detector skips it: pocket
+        # geometry cannot discriminate a single-atom ion, whose role is judged from
+        # the paper. The real drug alongside it is still a candidate.
+        assert "MG" in INCIDENTAL_CANDIDATES
+        assert _candidate_comp_ids(_entry(("A1AEI", "MG"))) == {"A1AEI"}
 
 
 class TestDualRoleRule:
@@ -182,3 +192,76 @@ class TestShortCircuits:
     def test_missing_structure_skips(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.setattr(detector_geometry, "load_structure", lambda *a, **k: None)
         assert detect_dual_role_ligands("X", _entry(), tmp_path) == []
+
+
+class TestDetectTransducerCopies:
+    """A non-polymer copy on a G-protein / transducer chain is flagged for the model
+    to type as the transducer's own cofactor -- identified from the structure, per copy."""
+
+    @staticmethod
+    def _entry(polymers, nonpolymers):
+        # polymers: [(auth_asym_id, description, slug)]; nonpolymers: [(comp, auth, seq)]
+        return {
+            "polymer_entities": [
+                {
+                    "entity_poly": {"type": "polypeptide(L)"},
+                    "rcsb_polymer_entity": {"pdbx_description": desc},
+                    "uniprots": [{"gpcrdb_entry_name_slug": slug}],
+                    "polymer_entity_instances": [
+                        {
+                            "rcsb_polymer_entity_instance_container_identifiers": {
+                                "auth_asym_id": auth
+                            }
+                        }
+                    ],
+                }
+                for auth, desc, slug in polymers
+            ],
+            "nonpolymer_entities": [
+                {
+                    "rcsb_nonpolymer_entity_container_identifiers": {"nonpolymer_comp_id": comp},
+                    "nonpolymer_entity_instances": [
+                        {
+                            "rcsb_nonpolymer_entity_instance_container_identifiers": {
+                                "asym_id": f"L{i}",
+                                "auth_asym_id": auth,
+                                "auth_seq_id": seq,
+                            }
+                        }
+                    ],
+                }
+                for i, (comp, auth, seq) in enumerate(nonpolymers)
+            ],
+        }
+
+    _GALPHA = ("A", "Guanine nucleotide-binding protein G(s) subunit alpha", "gnas2_human")
+    _RECEPTOR = ("R", "Beta-2 adrenergic receptor", "adrb2_human")
+
+    def test_nucleotide_on_transducer_chain_flagged_receptor_ligand_not(self) -> None:
+        entry = self._entry(
+            polymers=[self._GALPHA, self._RECEPTOR],
+            nonpolymers=[("GDP", "A", "401"), ("JLZ", "R", "501")],
+        )
+        signals = detect_transducer_copies("TEST", entry)
+        assert len(signals) == 1
+        assert signals[0].kind == SIGNAL_TRANSDUCER_COPY
+        assert signals[0].severity == "advisory"
+        # The G-alpha nucleotide is named per copy; the receptor drug is not flagged.
+        assert signals[0].payload["copies"] == ["GDP A:401"]
+
+    def test_no_transducer_chain_yields_no_signal(self) -> None:
+        entry = self._entry(polymers=[self._RECEPTOR], nonpolymers=[("JLZ", "R", "501")])
+        assert detect_transducer_copies("TEST", entry) == []
+
+    def test_stripped_comp_on_transducer_chain_not_flagged(self) -> None:
+        # A mechanical ion / buffer stripped before the model (here K on the G-alpha
+        # chain) is not named in the advisory: the model never sees it, so naming it
+        # would be noise it cannot act on. The visible nucleotide alongside it still is.
+        assert "K" in LIGAND_EXCLUDE_LIST
+        entry = self._entry(
+            polymers=[self._GALPHA, self._RECEPTOR],
+            nonpolymers=[("K", "A", "402"), ("GDP", "A", "401")],
+        )
+        signals = detect_transducer_copies("TEST", entry)
+        assert len(signals) == 1
+        assert signals[0].payload["copies"] == ["GDP A:401"]

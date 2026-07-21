@@ -8,8 +8,10 @@ import csv
 from dataclasses import replace
 from unittest.mock import patch
 
+from gpcr_tools.aggregator.runner import _prune_excluded_buffer_ligands
 from gpcr_tools.config import (
     CSV_SCHEMA,
+    VALIDATION_EXCLUDED_BUFFER,
     VALIDATION_GHOST_LIGAND,
     VALIDATION_MATCHED_SMALL_MOLECULE,
 )
@@ -56,14 +58,20 @@ class TestGpcrdbColumnContract:
             "Date",
             "In structure",
         )
-        assert {"label_asym_id", "SMILES", "InChIKey", "Sequence", "is_endogenous", "Site"} <= set(
-            CSV_SCHEMA["ligands.csv"][9:]
-        )
+        assert {
+            "label_asym_id",
+            "SMILES",
+            "InChIKey",
+            "Sequence",
+            "is_endogenous",
+            "Site",
+            "Residue_seq_id",
+        } <= set(CSV_SCHEMA["ligands.csv"][9:])
 
     def test_g_proteins_core_columns(self):
         assert CSV_SCHEMA["g_proteins.csv"][:8] == (
             "PDB",
-            "Alpha_UniProt",
+            "Alpha_identity",
             "Alpha_ChainID",
             "Beta_UniProt",
             "Beta_ChainID",
@@ -71,9 +79,15 @@ class TestGpcrdbColumnContract:
             "Gamma_ChainID",
             "Note",
         )
-        assert {"Alpha_label_asym_id", "Beta_label_asym_id", "Gamma_label_asym_id"} <= set(
-            CSV_SCHEMA["g_proteins.csv"][8:]
-        )
+        # The label_asym_id columns and the alpha5 functional-coupling / backbone
+        # columns are appended after the positional contract, never inserted.
+        assert {
+            "Alpha_label_asym_id",
+            "Beta_label_asym_id",
+            "Gamma_label_asym_id",
+            "Alpha_alpha5_identity",
+            "Alpha_backbone",
+        } <= set(CSV_SCHEMA["g_proteins.csv"][8:])
 
     def test_arrestins_core_columns(self):
         assert CSV_SCHEMA["arrestins.csv"][:4] == ("PDB", "UniProt", "ChainID", "Note")
@@ -143,13 +157,18 @@ class TestTransformForCSV:
         assert len(rows) == 1
         row = rows[0]
         assert row["PDB"] == "TEST1"
-        assert row["Name"] == "Adenosine"
+        # Name carries the canonical PDBe chemical-component code; the descriptive
+        # name moves to Title.
+        assert row["Name"] == "ADN"
+        assert row["Title"] == "Adenosine"
         assert row["PubChemID"] == "2519"
         assert row["Role"] == "Agonist"
         assert row["ChainID"] == "A"
         assert row["InChIKey"] == "OIRDTQYFTABQOQ-KQYNXXCUSA-N"
         # An ordinary ligand has no dual-role site_ref, so the Site column is blank.
         assert row["Site"] == ""
+        # No nonpolymer instance index in this fixture -> no residue numbers.
+        assert row["Residue_seq_id"] == ""
 
     def test_site_ref_populates_site_column(self, sample_pdb_data):
         data = copy.deepcopy(sample_pdb_data)
@@ -169,10 +188,31 @@ class TestTransformForCSV:
         rows = result["g_proteins.csv"]
         assert len(rows) == 1
         row = rows[0]
-        assert row["Alpha_UniProt"] == "gnas2_human"
+        assert row["Alpha_identity"] == "gnas2_human"
         assert row["Alpha_ChainID"] == "G"
         assert row["Beta_UniProt"] == "gbb1_human"
         assert row["Gamma_UniProt"] == "gbg2_human"
+
+    def test_g_protein_functional_coupling_and_backbone_columns(self, sample_pdb_data):
+        # The aggregator records the alpha5 functional coupling identity and the
+        # modelled backbone scaffold as distinct fields on the alpha subunit; the
+        # CSV exports them as trailing columns while Alpha_identity stays the
+        # deposited slug.
+        data = copy.deepcopy(sample_pdb_data)
+        alpha = data["signaling_partners"]["g_protein"]["alpha_subunit"]
+        alpha["functional_coupling"] = "gnaq_human"
+        alpha["backbone"] = "gnas2_human"
+        row = transform_for_csv("TEST1", data)["g_proteins.csv"][0]
+        assert row["Alpha_identity"] == "gnas2_human"
+        assert row["Alpha_alpha5_identity"] == "gnaq_human"
+        assert row["Alpha_backbone"] == "gnas2_human"
+
+    def test_g_protein_new_columns_blank_when_absent(self, sample_pdb_data):
+        # When the aggregator left functional_coupling unset (family mismatch /
+        # off-roster), the column is blank rather than a stray "None".
+        row = transform_for_csv("TEST1", sample_pdb_data)["g_proteins.csv"][0]
+        assert row["Alpha_alpha5_identity"] == ""
+        assert row["Alpha_backbone"] == ""
 
     def test_g_protein_chain_collapses_multivalue(self, sample_pdb_data):
         # Redundant complexes in the asymmetric unit give a multi-chain subunit
@@ -197,8 +237,30 @@ class TestTransformForCSV:
                 "site_ref": "orthosteric",
             }
         )
-        names = [r["Name"] for r in transform_for_csv("TEST1", data)["ligands.csv"]]
+        # Descriptive names now live in Title (Name carries the component code).
+        names = [r["Title"] for r in transform_for_csv("TEST1", data)["ligands.csv"]]
         assert "Apo" not in names
+        assert "Adenosine" in names
+
+    def test_excluded_buffer_pruned_upstream_yields_no_ligand_row(self, sample_pdb_data):
+        # Belt-and-suspenders: a BOG / NAG-shaped EXCLUDED_BUFFER ligand is dropped
+        # upstream by the aggregator's prune helper, so it never reaches the CSV
+        # transform and produces no ligands.csv row -- the bona-fide ligand stays.
+        data = copy.deepcopy(sample_pdb_data)
+        data["ligands"].append(
+            {
+                "name": "n-octyl-beta-D-glucoside",
+                "chem_comp_id": "BOG",
+                "chain_id": "A",
+                "type": "small-molecule",
+                "role": {"value": "Cofactor"},
+                "validation_status": VALIDATION_EXCLUDED_BUFFER,
+            }
+        )
+        _prune_excluded_buffer_ligands(data)
+        # Descriptive names now live in Title (Name carries the component code).
+        names = [r["Title"] for r in transform_for_csv("TEST1", data)["ligands.csv"]]
+        assert "n-octyl-beta-D-glucoside" not in names
         assert "Adenosine" in names
 
     def test_nanobody_dispatch(self, sample_pdb_data):
@@ -222,7 +284,7 @@ class TestTransformForCSV:
         result = transform_for_csv("TEST2", sample_controversy_data)
         assert len(result["structures.csv"]) == 1
         assert result["structures.csv"][0]["Method"] == "X-RAY DIFFRACTION"
-        assert result["g_proteins.csv"] == []  # no g-protein in this fixture
+        assert result["g_proteins.csv"] == []  # no g protein in this fixture
 
     def test_label_asym_id_with_oligomer(self, sample_oligomer_data):
         """Oligomer fixture with label_asym_id_map → mapped values in CSV rows."""
@@ -256,7 +318,7 @@ class TestTransformForCSV:
         assert "MISSED_PROTOMER" in note
 
     def test_g_protein_label_asym_id(self, sample_oligomer_data):
-        """G-protein subunit chain IDs are mapped via label_asym_id_map."""
+        """G protein subunit chain IDs are mapped via label_asym_id_map."""
         result = transform_for_csv("OLIGO1", sample_oligomer_data)
         gp_row = result["g_proteins.csv"][0]
         # label_map: D→A, C→D, E→B
@@ -448,7 +510,9 @@ class TestGhostLigandExport:
             },
         ]
         rows = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"]
-        assert [r["Name"] for r in rows] == ["Real"]
+        # Name now carries the component code; "Real" is the descriptive name (ATP).
+        assert [r["Name"] for r in rows] == ["ATP"]
+        assert [r["Title"] for r in rows] == ["Real"]
 
     def test_ghost_ligand_kept_when_curator_confirms(self, sample_pdb_data):
         sample_pdb_data["ligands"] = [
@@ -462,7 +526,9 @@ class TestGhostLigandExport:
             },
         ]
         rows = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"]
-        assert [r["Name"] for r in rows] == ["Sucralose"]
+        # Name now carries the component code (SUL); the descriptive name is Title.
+        assert [r["Name"] for r in rows] == ["SUL"]
+        assert [r["Title"] for r in rows] == ["Sucralose"]
 
     def test_non_ghost_ligands_unaffected(self, sample_pdb_data):
         sample_pdb_data["ligands"] = [
@@ -481,7 +547,9 @@ class TestGhostLigandExport:
             },
         ]
         rows = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"]
-        assert {r["Name"] for r in rows} == {"Matched", "NoStatus"}
+        # Name now carries the component codes; the descriptive names are in Title.
+        assert {r["Name"] for r in rows} == {"ATP", "GTP"}
+        assert {r["Title"] for r in rows} == {"Matched", "NoStatus"}
 
 
 class TestNonFunctionalLigandExport:
@@ -512,7 +580,9 @@ class TestNonFunctionalLigandExport:
             },
         ]
         rows = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"]
-        assert [r["Name"] for r in rows] == ["Retinal"]
+        # Name now carries the component code (Retinal -> RET); Palmitate is dropped.
+        assert [r["Name"] for r in rows] == ["RET"]
+        assert [r["Title"] for r in rows] == ["Retinal"]
 
     def test_functional_ligand_kept(self, sample_pdb_data):
         sample_pdb_data["ligands"] = [
@@ -529,7 +599,9 @@ class TestNonFunctionalLigandExport:
             },
         ]
         rows = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"]
-        assert [r["Name"] for r in rows] == ["Sphingosine-1-phosphate"]
+        # Name now carries the component code (S1P); descriptive name -> Title.
+        assert [r["Name"] for r in rows] == ["S1P"]
+        assert [r["Title"] for r in rows] == ["Sphingosine-1-phosphate"]
 
     def test_ligand_without_role_check_unaffected(self, sample_pdb_data):
         sample_pdb_data["ligands"] = [
@@ -542,7 +614,9 @@ class TestNonFunctionalLigandExport:
             },
         ]
         rows = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"]
-        assert [r["Name"] for r in rows] == ["Adenosine"]
+        # Name now carries the component code (Adenosine -> ADN); name -> Title.
+        assert [r["Name"] for r in rows] == ["ADN"]
+        assert [r["Title"] for r in rows] == ["Adenosine"]
 
 
 class TestLigandLabelAsymId:
@@ -572,6 +646,9 @@ class TestLigandLabelAsymId:
         row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
         # 'F' is the ligand's own label, not its author chain 'A' nor polymer 'Z'.
         assert row["label_asym_id"] == "F"
+        # The residue token comes from the same instance, aligned to the label, and
+        # is prefixed with the copy's author chain: "<auth_asym_id>:<auth_seq_id>".
+        assert row["Residue_seq_id"] == "A:501"
 
     def test_multi_instance_joins_labels(self, sample_pdb_data):
         sample_pdb_data["oligomer_analysis"] = {
@@ -587,6 +664,9 @@ class TestLigandLabelAsymId:
         row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
         # Both copies' own labels, never the receptor polymer label 'Z'.
         assert row["label_asym_id"] == "F, G"
+        # Residue tokens track the same instance order, copy-for-copy, each carrying
+        # the copy's own author chain prefix.
+        assert row["Residue_seq_id"] == "A:501, A:502"
 
     def test_unindexed_ligand_has_blank_label(self, sample_pdb_data):
         sample_pdb_data["oligomer_analysis"] = {"label_asym_id_map": {"A": "Z"}}
@@ -594,6 +674,713 @@ class TestLigandLabelAsymId:
         row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
         # No instance index -> blank, NOT the receptor's polymer label 'Z'.
         assert row["label_asym_id"] == ""
+        # No instance -> no residue numbers either.
+        assert row["Residue_seq_id"] == ""
+
+
+class TestLigandNameAndResidue:
+    """Name carries the canonical PDBe chemical-component code (falling back to the
+    descriptive name only when no code exists); Title carries the descriptive name;
+    Residue_seq_id carries an "<auth_asym_id>:<auth_seq_id>" token per modelled copy
+    (author chain : author residue number), aligned copy-for-copy with label_asym_id,
+    with the chain sourced from the instance's own auth_asym_id (NOT the AI
+    chain_id)."""
+
+    def _ligand(self, **extra):
+        base = {
+            "name": "descriptive name",
+            "chem_comp_id": "LIG",
+            "chain_id": "A",
+            "validation_status": VALIDATION_MATCHED_SMALL_MOLECULE,
+            "role": {"value": "Agonist"},
+        }
+        base.update(extra)
+        return base
+
+    def test_three_letter_code_with_residue(self, sample_pdb_data):
+        # A three-letter small-molecule code with one modelled copy (6WHA's U0G,
+        # the agonist 25CN-NBOH, sits at auth_seq_id 501 on label chain F).
+        sample_pdb_data["oligomer_analysis"] = {
+            "nonpolymer_instance_index": {
+                "U0G": [{"auth_asym_id": "A", "label_asym_id": "F", "auth_seq_id": "501"}]
+            }
+        }
+        sample_pdb_data["ligands"] = [self._ligand(name="25CN-NBOH", chem_comp_id="U0G")]
+        row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
+        assert row["Name"] == "U0G"
+        assert row["Title"] == "25CN-NBOH"
+        assert row["label_asym_id"] == "F"
+        assert row["Residue_seq_id"] == "A:501"
+
+    def test_five_letter_ccd_code_passes_through(self, sample_pdb_data):
+        # A five-letter CCD code (the newer PDBe extended namespace) must pass
+        # through into Name verbatim, not be truncated or rejected.
+        sample_pdb_data["oligomer_analysis"] = {
+            "nonpolymer_instance_index": {
+                "A1H1S": [{"auth_asym_id": "A", "label_asym_id": "C", "auth_seq_id": "201"}]
+            }
+        }
+        sample_pdb_data["ligands"] = [self._ligand(name="some inhibitor", chem_comp_id="A1H1S")]
+        row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
+        assert row["Name"] == "A1H1S"
+        assert row["Title"] == "some inhibitor"
+        assert row["Residue_seq_id"] == "A:201"
+
+    def test_no_comp_id_peptide_falls_back_to_name(self, sample_pdb_data):
+        # A peptide ligand carries no chemical-component code (the schema emits the
+        # "None" sentinel); Name must fall back to the descriptive name, never the
+        # literal string "None", and the residue column stays blank.
+        sample_pdb_data["oligomer_analysis"] = {}
+        sample_pdb_data["ligands"] = [
+            self._ligand(name="Substance P", chem_comp_id="None", type="peptide")
+        ]
+        row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
+        assert row["Name"] == "Substance P"
+        assert row["Name"] != "None"
+        assert row["Title"] == "Substance P"
+        assert row["Residue_seq_id"] == ""
+
+    def test_no_comp_id_and_no_name_yields_blank_not_sentinel(self, sample_pdb_data):
+        # When BOTH the component code and the descriptive name are empty/"None"
+        # sentinels, the fallback must collapse to an empty string -- never the
+        # literal "None" leaking into Name (nor into the residue column).
+        sample_pdb_data["oligomer_analysis"] = {}
+        sample_pdb_data["ligands"] = [self._ligand(name="None", chem_comp_id="None")]
+        row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
+        assert row["Name"] == ""
+        assert row["Residue_seq_id"] == ""
+
+    def test_branched_glycan_no_instance_blank_residue(self, sample_pdb_data):
+        # A branched glycan has no entry in the non-polymer instance index, so the
+        # residue column is blank (and Name still carries whatever code it has).
+        sample_pdb_data["oligomer_analysis"] = {
+            "nonpolymer_instance_index": {"OTHER": [{"label_asym_id": "F", "auth_seq_id": "1"}]}
+        }
+        sample_pdb_data["ligands"] = [
+            self._ligand(name="glycan", chem_comp_id="NAG", type="branched")
+        ]
+        row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
+        assert row["Name"] == "NAG"
+        assert row["label_asym_id"] == ""
+        assert row["Residue_seq_id"] == ""
+
+    def test_residue_aligns_to_label_not_ai_chain_order(self, sample_pdb_data):
+        # 9AYF's 9IG (NPS R-568) is modelled twice; the index is sorted by
+        # label_asym_id to ["EA" (chain R, 1011), "T" (chain Q, 1010)] -- the
+        # REVERSE of the AI chain_id order "Q, R". The residue column must follow
+        # the label order, proving it is sourced from the instance list and not
+        # zipped against the AI chain_id.
+        sample_pdb_data["oligomer_analysis"] = {
+            "nonpolymer_instance_index": {
+                "9IG": [
+                    {"auth_asym_id": "R", "label_asym_id": "EA", "auth_seq_id": "1011"},
+                    {"auth_asym_id": "Q", "label_asym_id": "T", "auth_seq_id": "1010"},
+                ]
+            }
+        }
+        sample_pdb_data["ligands"] = [
+            self._ligand(name="NPS R-568", chem_comp_id="9IG", chain_id="Q, R")
+        ]
+        row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
+        assert row["Name"] == "9IG"
+        # label order is "EA, T" (chain R's copy first); residue tokens follow in
+        # lockstep, each carrying that copy's own author chain prefix (R, then Q) --
+        # the REVERSE of the AI chain_id order "Q, R", proving the chain is sourced
+        # per-copy from the instance list, not zipped against the AI chain_id.
+        assert row["label_asym_id"] == "EA, T"
+        assert row["Residue_seq_id"] == "R:1011, Q:1010"
+
+    def test_high_cardinality_multi_copy(self, sample_pdb_data):
+        # 9AYF models calcium eight times across two author chains (Q and R), so the
+        # bare residue numbers repeat (1006-1009 on each chain) and are ambiguous on
+        # their own. The chain prefix makes every token unique. The instance list is
+        # sorted by label_asym_id (AA, BA, CA on R; then P, Q, R, S on Q; then Z on
+        # R), so the emitted order is NOT grouped by chain -- the prefix is what
+        # disambiguates the two "1006"s, the two "1007"s, etc.
+        instances = [
+            {"auth_asym_id": "R", "label_asym_id": "AA", "auth_seq_id": "1007"},
+            {"auth_asym_id": "R", "label_asym_id": "BA", "auth_seq_id": "1008"},
+            {"auth_asym_id": "R", "label_asym_id": "CA", "auth_seq_id": "1009"},
+            {"auth_asym_id": "Q", "label_asym_id": "P", "auth_seq_id": "1006"},
+            {"auth_asym_id": "Q", "label_asym_id": "Q", "auth_seq_id": "1007"},
+            {"auth_asym_id": "Q", "label_asym_id": "R", "auth_seq_id": "1008"},
+            {"auth_asym_id": "Q", "label_asym_id": "S", "auth_seq_id": "1009"},
+            {"auth_asym_id": "R", "label_asym_id": "Z", "auth_seq_id": "1006"},
+        ]
+        sample_pdb_data["oligomer_analysis"] = {"nonpolymer_instance_index": {"CA": instances}}
+        sample_pdb_data["ligands"] = [self._ligand(name="Calcium ion", chem_comp_id="CA")]
+        row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
+        labels = row["label_asym_id"].split(", ")
+        residues = row["Residue_seq_id"].split(", ")
+        assert len(labels) == 8
+        assert len(residues) == 8
+        # Residue tokens stay 1:1 and in the same order as label_asym_id.
+        assert labels == ["AA", "BA", "CA", "P", "Q", "R", "S", "Z"]
+        assert residues == [
+            "R:1007",
+            "R:1008",
+            "R:1009",
+            "Q:1006",
+            "Q:1007",
+            "Q:1008",
+            "Q:1009",
+            "R:1006",
+        ]
+        # The repeating bare number "1006" is disambiguated by its chain prefix.
+        assert "Q:1006" in residues
+        assert "R:1006" in residues
+
+
+class TestPerSiteResidueFiltering:
+    """A compound modelled at several binding sites is emitted as one ligand row
+    per site; each row's Residue_seq_id must list ONLY the copies whose per-copy
+    vote placed them at that site, so the rows are distinguishable instead of
+    repeating the full copy list. Fallbacks stay honest: no per-copy votes keeps
+    the old full-join behavior, and a copy that cannot be attributed is tagged and
+    surfaced rather than silently dropped."""
+
+    def _lig(self, site_ref: str, **extra) -> dict:
+        base = {
+            "name": "Cholesterol",
+            "chem_comp_id": "CLR",
+            "chain_id": "R",
+            "validation_status": VALIDATION_MATCHED_SMALL_MOLECULE,
+            # A surviving ligand is the vehicle for the per-site partition; role
+            # 'unknown' survives without a prc verdict and (unlike a real modality)
+            # still leaves ligands on an explicit prc=False, which several tests use.
+            "role": {"value": "unknown"},
+            "site_ref": site_ref,
+        }
+        base.update(extra)
+        return base
+
+    @staticmethod
+    def _residue_by_site(rows: list[dict[str, str]]) -> dict[str, str]:
+        return {r["Site"]: r["Residue_seq_id"] for r in rows}
+
+    def test_two_sites_partition_residues(self, sample_pdb_data):
+        # A cholesterol modelled at two sites: one copy voted orthosteric, the other
+        # membrane_facing. The two rows must carry DIFFERENT, correctly-partitioned
+        # residues -- not the same full copy list.
+        sample_pdb_data["oligomer_analysis"] = {
+            "nonpolymer_instance_index": {
+                "CLR": [
+                    {"auth_asym_id": "R", "label_asym_id": "F", "auth_seq_id": "601"},
+                    {"auth_asym_id": "R", "label_asym_id": "G", "auth_seq_id": "602"},
+                ]
+            }
+        }
+        sample_pdb_data["ligand_copies"] = [
+            {"copy_id": "R:601", "site_ref": "orthosteric", "role": {"value": "Cofactor"}},
+            {"copy_id": "R:602", "site_ref": "membrane_facing", "role": {"value": "Cofactor"}},
+        ]
+        sample_pdb_data["ligands"] = [
+            self._lig("orthosteric"),
+            self._lig("membrane_facing"),
+        ]
+        by_site = self._residue_by_site(transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"])
+        assert by_site["orthosteric"] == "R:601"
+        assert by_site["membrane_facing"] == "R:602"
+        # The two rows are genuinely distinct (the original bug was identical lists).
+        assert by_site["orthosteric"] != by_site["membrane_facing"]
+
+    def test_undetermined_copy_lands_on_unknown_row_clean(self, sample_pdb_data):
+        # Post-aggregator shape: the compound has an orthosteric row AND a
+        # Site=unknown row (the aggregator builds the latter for copies it could not
+        # place). One copy is voted orthosteric, one 'unknown', and a third is absent
+        # from the votes. The unknown and absent copies land on the Site=unknown row
+        # with CLEAN residue tokens -- the uncertainty is in the Site column, never a
+        # mark on the residue -- and nothing is dropped nor falsely sited.
+        sample_pdb_data["oligomer_analysis"] = {
+            "nonpolymer_instance_index": {
+                "CLR": [
+                    {"auth_asym_id": "R", "label_asym_id": "F", "auth_seq_id": "601"},
+                    {"auth_asym_id": "R", "label_asym_id": "G", "auth_seq_id": "602"},
+                    {"auth_asym_id": "R", "label_asym_id": "H", "auth_seq_id": "603"},
+                ]
+            }
+        }
+        sample_pdb_data["ligand_copies"] = [
+            {"copy_id": "R:601", "site_ref": "orthosteric", "role": {"value": "Cofactor"}},
+            {"copy_id": "R:602", "site_ref": "unknown", "role": {"value": "Cofactor"}},
+            # R:603 deliberately absent from the per-copy votes.
+        ]
+        sample_pdb_data["ligands"] = [self._lig("orthosteric"), self._lig("unknown")]
+        by_site = self._residue_by_site(transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"])
+        # The determined copy sits on its real site; the unknown and absent copies
+        # both land on the Site=unknown row, clean -- nothing lost, nothing mismarked.
+        assert by_site["orthosteric"] == "R:601"
+        assert by_site["unknown"] == "R:602, R:603"
+        assert not any("(?)" in residue for residue in by_site.values())
+
+    def test_orphan_vote_falls_back_clean_never_lost(self, sample_pdb_data):
+        # Legacy / non-aggregated shape: a copy voted to a site that has NO matching
+        # ligand row, and there is no Site=unknown row to catch it. It must never be
+        # dropped -- it falls back to the compound's first surviving row with a CLEAN
+        # residue token (never a "(?)" mark).
+        sample_pdb_data["oligomer_analysis"] = {
+            "nonpolymer_instance_index": {
+                "CLR": [
+                    {"auth_asym_id": "R", "label_asym_id": "F", "auth_seq_id": "601"},
+                    {"auth_asym_id": "R", "label_asym_id": "G", "auth_seq_id": "602"},
+                ]
+            }
+        }
+        sample_pdb_data["ligand_copies"] = [
+            {"copy_id": "R:601", "site_ref": "orthosteric", "role": {"value": "Cofactor"}},
+            # Voted to a site with no corresponding ligand row -> orphan.
+            {"copy_id": "R:602", "site_ref": "allosteric", "role": {"value": "Cofactor"}},
+        ]
+        sample_pdb_data["ligands"] = [self._lig("orthosteric")]
+        residue = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]["Residue_seq_id"]
+        assert residue == "R:601, R:602"
+        assert "(?)" not in residue
+
+    def test_copy_follows_a_dropped_nonfunctional_row_out(self, sample_pdb_data):
+        # A cholesterol modelled at two sites where the membrane row was judged
+        # non-functional (dropped). Its copy must follow that row OUT of the CSV --
+        # neither placed nor tagged onto the surviving allosteric row. This is the
+        # difference from the orphan case above: here a DROPPED row exists for the
+        # voted site, so the copy is dropped rather than surfaced as homeless.
+        sample_pdb_data["oligomer_analysis"] = {
+            "nonpolymer_instance_index": {
+                "CLR": [
+                    {"auth_asym_id": "R", "label_asym_id": "F", "auth_seq_id": "601"},
+                    {"auth_asym_id": "R", "label_asym_id": "G", "auth_seq_id": "602"},
+                ]
+            }
+        }
+        sample_pdb_data["ligand_copies"] = [
+            {"copy_id": "R:601", "site_ref": "allosteric_7tm", "role": {"value": "Cofactor"}},
+            {"copy_id": "R:602", "site_ref": "membrane_facing", "role": {"value": "Cofactor"}},
+        ]
+        sample_pdb_data["ligands"] = [
+            self._lig("allosteric_7tm"),
+            self._lig(
+                "membrane_facing",
+                pharmacological_role_check={"is_functional_ligand": False},  # dropped
+            ),
+        ]
+        rows = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"]
+        # Only the allosteric row ships; the membrane row is dropped.
+        assert [r["Site"] for r in rows] == ["allosteric_7tm"]
+        # Its copy follows the dropped row out: allosteric keeps only R:601, no tag.
+        assert rows[0]["Residue_seq_id"] == "R:601"
+        assert "(?)" not in rows[0]["Residue_seq_id"]
+
+    def test_no_ligand_copies_matches_current_behavior(self, sample_pdb_data):
+        # Regression guard: with NO ligand_copies on the record, the residue column
+        # must be the full component-id join on every row -- byte-identical to the
+        # pre-feature behavior (no partitioning, no tags).
+        sample_pdb_data["oligomer_analysis"] = {
+            "nonpolymer_instance_index": {
+                "CLR": [
+                    {"auth_asym_id": "R", "label_asym_id": "F", "auth_seq_id": "601"},
+                    {"auth_asym_id": "R", "label_asym_id": "G", "auth_seq_id": "602"},
+                ]
+            }
+        }
+        sample_pdb_data["ligands"] = [
+            self._lig("orthosteric"),
+            self._lig("membrane_facing"),
+        ]
+        by_site = self._residue_by_site(transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"])
+        # Both rows carry the full copy list (the old ambiguous-but-not-wrong output).
+        assert by_site["orthosteric"] == "R:601, R:602"
+        assert by_site["membrane_facing"] == "R:601, R:602"
+
+    def test_single_copy_single_site_unchanged(self, sample_pdb_data):
+        # A single-copy compound has nothing to partition: its one copy is listed as
+        # before, even when per-copy votes exist for the record.
+        sample_pdb_data["oligomer_analysis"] = {
+            "nonpolymer_instance_index": {
+                "LIG": [{"auth_asym_id": "A", "label_asym_id": "F", "auth_seq_id": "501"}]
+            }
+        }
+        sample_pdb_data["ligand_copies"] = [
+            {"copy_id": "A:501", "site_ref": "orthosteric", "role": {"value": "Agonist"}},
+        ]
+        sample_pdb_data["ligands"] = [
+            self._lig("orthosteric", name="Ligand", chem_comp_id="LIG", chain_id="A"),
+        ]
+        row = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"][0]
+        assert row["Residue_seq_id"] == "A:501"
+
+    def test_label_and_residue_stay_aligned_per_site(self, sample_pdb_data):
+        # A two-site compound must keep label_asym_id and Residue_seq_id 1:1
+        # copy-for-copy on EVERY row -- same cardinality AND correct per-site
+        # correspondence. The bug was label joining ALL copies unfiltered ("F, G"
+        # on both rows) while the residue column was site-partitioned, so the two
+        # columns diverged.
+        sample_pdb_data["oligomer_analysis"] = {
+            "nonpolymer_instance_index": {
+                "CLR": [
+                    {"auth_asym_id": "R", "label_asym_id": "F", "auth_seq_id": "601"},
+                    {"auth_asym_id": "R", "label_asym_id": "G", "auth_seq_id": "602"},
+                ]
+            }
+        }
+        sample_pdb_data["ligand_copies"] = [
+            {"copy_id": "R:601", "site_ref": "orthosteric", "role": {"value": "Cofactor"}},
+            {"copy_id": "R:602", "site_ref": "membrane_facing", "role": {"value": "Cofactor"}},
+        ]
+        sample_pdb_data["ligands"] = [self._lig("orthosteric"), self._lig("membrane_facing")]
+        rows = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"]
+        # Same cardinality on every row (this is what regressed).
+        for r in rows:
+            labels = r["label_asym_id"].split(", ") if r["label_asym_id"] else []
+            residues = r["Residue_seq_id"].split(", ") if r["Residue_seq_id"] else []
+            assert len(labels) == len(residues)
+        by_site = {r["Site"]: r for r in rows}
+        # Correct per-site correspondence: F<->R:601, G<->R:602 -- not "F, G" on both.
+        assert by_site["orthosteric"]["label_asym_id"] == "F"
+        assert by_site["orthosteric"]["Residue_seq_id"] == "R:601"
+        assert by_site["membrane_facing"]["label_asym_id"] == "G"
+        assert by_site["membrane_facing"]["Residue_seq_id"] == "R:602"
+
+    def test_copies_follow_a_dropped_nonfunctional_sibling_row_out(self, sample_pdb_data):
+        # When a compound's site row is dropped as non-functional, the copies voted
+        # to that site follow the row OUT of the CSV rather than piling onto the
+        # surviving sibling row as tagged homeless copies. CLR with 3 copies: 2
+        # voted to a NON-functional 'membrane_facing' row + 1 to a functional
+        # 'orthosteric' row. The non-functional row (and its 2 copies) are dropped;
+        # the surviving row lists ONLY its own copy, with no "(?)" inflation.
+        sample_pdb_data["oligomer_analysis"] = {
+            "nonpolymer_instance_index": {
+                "CLR": [
+                    {"auth_asym_id": "R", "label_asym_id": "F", "auth_seq_id": "601"},
+                    {"auth_asym_id": "R", "label_asym_id": "G", "auth_seq_id": "602"},
+                    {"auth_asym_id": "R", "label_asym_id": "H", "auth_seq_id": "603"},
+                ]
+            }
+        }
+        sample_pdb_data["ligand_copies"] = [
+            {"copy_id": "R:601", "site_ref": "orthosteric", "role": {"value": "Cofactor"}},
+            {"copy_id": "R:602", "site_ref": "membrane_facing", "role": {"value": "Cofactor"}},
+            {"copy_id": "R:603", "site_ref": "membrane_facing", "role": {"value": "Cofactor"}},
+        ]
+        sample_pdb_data["ligands"] = [
+            self._lig("orthosteric"),
+            self._lig(
+                "membrane_facing", pharmacological_role_check={"is_functional_ligand": False}
+            ),
+        ]
+        rows = transform_for_csv("TEST1", sample_pdb_data)["ligands.csv"]
+        # Non-functional sibling dropped -> only the functional row survives.
+        assert len(rows) == 1
+        residue = rows[0]["Residue_seq_id"]
+        # The copies of the dropped row follow it out; the surviving row is clean.
+        assert residue == "R:601"
+        assert "(?)" not in residue
+        assert len(rows[0]["label_asym_id"].split(", ")) == len(residue.split(", "))
+
+
+class TestPerCopyEditsReachCsv:
+    """A curator's per-copy edit reaches the CSV exactly where it should: editing a
+    copy's binding site (``site_ref``) moves its residue token to the matching site
+    row, while editing a copy's ``role`` leaves the CSV Role column unchanged (the
+    Role column is sourced from the compound-level ligand, not the per-copy row)."""
+
+    def _clr(self, site_ref: str, **extra) -> dict:
+        base = {
+            "name": "Cholesterol",
+            "chem_comp_id": "CLR",
+            "chain_id": "R",
+            "validation_status": VALIDATION_MATCHED_SMALL_MOLECULE,
+            # A surviving ligand is the vehicle for the per-site partition; role
+            # 'unknown' survives without a prc verdict and (unlike a real modality)
+            # still leaves ligands on an explicit prc=False, which several tests use.
+            "role": {"value": "unknown"},
+            "site_ref": site_ref,
+        }
+        base.update(extra)
+        return base
+
+    @staticmethod
+    def _residue_by_site(rows: list[dict[str, str]]) -> dict[str, str]:
+        return {r["Site"]: r["Residue_seq_id"] for r in rows}
+
+    def _two_site_data(self, sample_pdb_data, site_602: str) -> dict:
+        # A cholesterol modelled twice, with an orthosteric row and an intracellular
+        # row. R:601 is always orthosteric; R:602's binding site is the variable.
+        data = copy.deepcopy(sample_pdb_data)
+        data["oligomer_analysis"] = {
+            "nonpolymer_instance_index": {
+                "CLR": [
+                    {"auth_asym_id": "R", "label_asym_id": "F", "auth_seq_id": "601"},
+                    {"auth_asym_id": "R", "label_asym_id": "G", "auth_seq_id": "602"},
+                ]
+            }
+        }
+        data["ligand_copies"] = [
+            {"copy_id": "R:601", "site_ref": "orthosteric", "role": {"value": "Cofactor"}},
+            {"copy_id": "R:602", "site_ref": site_602, "role": {"value": "Cofactor"}},
+        ]
+        data["ligands"] = [self._clr("orthosteric"), self._clr("intracellular")]
+        return data
+
+    def test_editing_a_copy_site_ref_moves_its_residue_token(self, sample_pdb_data):
+        # Before the edit each site row lists its own copy; re-siting R:602 from
+        # intracellular to orthosteric (a per-copy binding-site edit) moves its
+        # residue token onto the orthosteric row and empties the intracellular row.
+        before = self._residue_by_site(
+            transform_for_csv("TEST1", self._two_site_data(sample_pdb_data, "intracellular"))[
+                "ligands.csv"
+            ]
+        )
+        assert before["orthosteric"] == "R:601"
+        assert before["intracellular"] == "R:602"
+
+        after = self._residue_by_site(
+            transform_for_csv("TEST1", self._two_site_data(sample_pdb_data, "orthosteric"))[
+                "ligands.csv"
+            ]
+        )
+        # R:602's token followed the edit onto the orthosteric row; nothing lost.
+        assert after["orthosteric"] == "R:601, R:602"
+        assert after["intracellular"] == ""
+
+    def test_editing_a_copy_role_leaves_csv_role_column_identical(self, sample_pdb_data):
+        # The CSV Role column comes from the compound-level ligands[].role.value;
+        # ligand_copies is consumed only for per-copy site partitioning. So editing
+        # a per-copy role must leave the Role column byte-identical.
+        def _role_column(copy_role: str) -> list[str]:
+            data = copy.deepcopy(sample_pdb_data)
+            data["oligomer_analysis"] = {
+                "nonpolymer_instance_index": {
+                    "CLR": [
+                        {"auth_asym_id": "R", "label_asym_id": "F", "auth_seq_id": "601"},
+                        {"auth_asym_id": "R", "label_asym_id": "G", "auth_seq_id": "602"},
+                    ]
+                }
+            }
+            data["ligand_copies"] = [
+                {"copy_id": "R:601", "site_ref": "orthosteric", "role": {"value": copy_role}},
+                {"copy_id": "R:602", "site_ref": "orthosteric", "role": {"value": copy_role}},
+            ]
+            # The compound-level role (here 'unknown') is unchanged by copy-role edits.
+            data["ligands"] = [self._clr("orthosteric")]
+            return [r["Role"] for r in transform_for_csv("TEST1", data)["ligands.csv"]]
+
+        before = _role_column("Cofactor")
+        after = _role_column("Agonist")  # a per-copy role edit
+        assert before == after
+        assert before == ["unknown"]
+
+
+class TestAuxiliarySmallMolecules:
+    """auxiliary_small_molecules.csv: mechanical-lane molecules enumerated from the
+    nonpolymer roster and model-lane candidates the model judged non-functional,
+    each located exactly like a ligands.csv row."""
+
+    @staticmethod
+    def _by_name(rows: list[dict[str, str]]) -> dict[str, dict[str, str]]:
+        return {r["Name"]: r for r in rows}
+
+    def test_mechanical_ion_enumerated_from_roster(self):
+        # A potassium ion is stripped before the model, so it is enumerated from the
+        # roster and catalogued with a fixed Type and a blank Function.
+        data = {
+            "ligands": [],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "K": [{"auth_asym_id": "A", "label_asym_id": "B", "auth_seq_id": "401"}]
+                }
+            },
+        }
+        row = self._by_name(transform_for_csv("T1", data)["auxiliary_small_molecules.csv"])["K"]
+        assert row["Type"] == "Ion"
+        assert row["Function"] == ""
+        assert row["ChainID"] == "A"
+        assert row["label_asym_id"] == "B"
+        assert row["Residue_seq_id"] == "A:401"
+
+    def test_mechanical_types_cover_each_class(self):
+        data = {
+            "ligands": [],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "NAG": [{"auth_asym_id": "A", "label_asym_id": "C", "auth_seq_id": "1"}],
+                    "BOG": [{"auth_asym_id": "A", "label_asym_id": "D", "auth_seq_id": "2"}],
+                    "OLC": [{"auth_asym_id": "A", "label_asym_id": "E", "auth_seq_id": "3"}],
+                }
+            },
+        }
+        by_name = self._by_name(transform_for_csv("T1", data)["auxiliary_small_molecules.csv"])
+        assert by_name["NAG"]["Type"] == "Other"
+        assert by_name["BOG"]["Type"] == "Detergent"
+        assert by_name["OLC"]["Type"] == "Lipid"
+        assert all(r["Function"] == "" for r in by_name.values())
+
+    def test_multi_copy_row_joins_all_copies_aligned(self):
+        # A mechanical ion with several copies is ONE row, the copies comma-joined
+        # 1:1 across label_asym_id and Residue_seq_id (token = auth_chain:auth_seq).
+        # FE is a mechanical ion; the counter-ion metals (NA/MG/ZN/MN) reach aux only
+        # once the metal change frees them to the model lane.
+        data = {
+            "ligands": [],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "FE": [
+                        {"auth_asym_id": "A", "label_asym_id": "M", "auth_seq_id": "501"},
+                        {"auth_asym_id": "B", "label_asym_id": "N", "auth_seq_id": "502"},
+                    ]
+                }
+            },
+        }
+        aux = transform_for_csv("T1", data)["auxiliary_small_molecules.csv"]
+        assert len(aux) == 1
+        assert aux[0]["label_asym_id"] == "M, N"
+        assert aux[0]["Residue_seq_id"] == "A:501, B:502"
+
+    def test_model_lane_candidate_nonfunctional_routes_to_aux(self):
+        # A cholesterol the model judged non-functional leaves ligands.csv and is
+        # catalogued as an auxiliary Cofactor, located from its roster copies.
+        data = {
+            "ligands": [
+                {
+                    "chem_comp_id": "CLR",
+                    "chain_id": "R",
+                    "role": {"value": "Cofactor"},
+                    "pharmacological_role_check": {"is_functional_ligand": False},
+                    "validation_status": VALIDATION_MATCHED_SMALL_MOLECULE,
+                }
+            ],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "CLR": [{"auth_asym_id": "R", "label_asym_id": "F", "auth_seq_id": "601"}]
+                }
+            },
+        }
+        result = transform_for_csv("T1", data)
+        assert result["ligands.csv"] == []  # not a functional ligands row
+        aux = result["auxiliary_small_molecules.csv"]
+        assert len(aux) == 1
+        assert aux[0]["Name"] == "CLR"
+        assert aux[0]["Type"] == "Lipid"
+        assert aux[0]["Function"] == "Cofactor"
+        assert aux[0]["Residue_seq_id"] == "R:601"
+
+    def test_functional_candidate_stays_in_ligands_not_aux(self):
+        # A cholesterol the model judged functional stays a ligands row and is NOT
+        # catalogued as auxiliary.
+        data = {
+            "ligands": [
+                {
+                    "chem_comp_id": "CLR",
+                    "chain_id": "R",
+                    "role": {"value": "Agonist"},
+                    "pharmacological_role_check": {"is_functional_ligand": True},
+                    "validation_status": VALIDATION_MATCHED_SMALL_MOLECULE,
+                }
+            ],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "CLR": [{"auth_asym_id": "R", "label_asym_id": "F", "auth_seq_id": "601"}]
+                }
+            },
+        }
+        result = transform_for_csv("T1", data)
+        assert [r["Name"] for r in result["ligands.csv"]] == ["CLR"]
+        assert result["auxiliary_small_molecules.csv"] == []
+
+    def test_mechanical_comp_surviving_in_ligands_not_double_cataloged(self):
+        # A mechanical comp that survives as a functional ligands row (a curator-kept
+        # entry) is not also emitted as an auxiliary row -- no double-count.
+        data = {
+            "ligands": [
+                {
+                    "chem_comp_id": "NAG",
+                    "chain_id": "A",
+                    "role": {"value": "Agonist"},
+                    "validation_status": VALIDATION_MATCHED_SMALL_MOLECULE,
+                }
+            ],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "NAG": [{"auth_asym_id": "A", "label_asym_id": "C", "auth_seq_id": "1"}]
+                }
+            },
+        }
+        result = transform_for_csv("T1", data)
+        assert [r["Name"] for r in result["ligands.csv"]] == ["NAG"]
+        assert result["auxiliary_small_molecules.csv"] == []
+
+    def test_functional_role_protected_from_stray_prc_false(self):
+        # Real-modality guard: once a co-present candidate opens the prc block on every
+        # ligand row, a stray is_functional=False mis-placed on the receptor's own drug
+        # (a real modality) must NOT delete it -- it stays a ligands row, never aux.
+        data = {
+            "ligands": [
+                {
+                    "chem_comp_id": "8NU",  # the receptor's drug, not an aux candidate
+                    "chain_id": "R",
+                    "role": {"value": "Antagonist"},
+                    "pharmacological_role_check": {"is_functional_ligand": False},
+                    "validation_status": VALIDATION_MATCHED_SMALL_MOLECULE,
+                }
+            ],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "8NU": [{"auth_asym_id": "R", "label_asym_id": "F", "auth_seq_id": "701"}]
+                }
+            },
+        }
+        result = transform_for_csv("T1", data)
+        assert [r["Name"] for r in result["ligands.csv"]] == ["8NU"]
+        assert result["auxiliary_small_molecules.csv"] == []
+
+    def test_incidental_candidate_via_prc_false_path_routes_to_aux(self):
+        # The second aux path: a detector-flagged candidate the model left role
+        # 'unknown' but judged non-functional (prc=False). It is auxiliary, and its
+        # Function is blank -- an incidental structural molecule, not a cofactor.
+        data = {
+            "ligands": [
+                {
+                    "chem_comp_id": "CLR",
+                    "chain_id": "R",
+                    "role": {"value": "unknown"},
+                    "pharmacological_role_check": {"is_functional_ligand": False},
+                    "validation_status": VALIDATION_MATCHED_SMALL_MOLECULE,
+                }
+            ],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "CLR": [{"auth_asym_id": "R", "label_asym_id": "F", "auth_seq_id": "601"}]
+                }
+            },
+        }
+        result = transform_for_csv("T1", data)
+        assert result["ligands.csv"] == []
+        aux = result["auxiliary_small_molecules.csv"]
+        assert len(aux) == 1
+        assert aux[0]["Name"] == "CLR"
+        assert aux[0]["Type"] == "Lipid"
+        assert aux[0]["Function"] == ""  # incidental structural, not a cofactor
+
+    def test_functional_metal_stays_in_ligands(self):
+        # A metal the model judged the receptor's agonist (e.g. Ca at the calcium-
+        # sensing receptor) stays a functional ligand, not auxiliary. A structural
+        # metal is routed to aux by its role=Cofactor / prc=False verdict; an
+        # unjudged metal is kept conservatively (not-assessed), like any other row.
+        data = {
+            "ligands": [
+                {
+                    "chem_comp_id": "CA",
+                    "chain_id": "R",
+                    "role": {"value": "Agonist"},
+                    "validation_status": VALIDATION_MATCHED_SMALL_MOLECULE,
+                }
+            ],
+            "oligomer_analysis": {
+                "nonpolymer_instance_index": {
+                    "CA": [{"auth_asym_id": "R", "label_asym_id": "F", "auth_seq_id": "301"}]
+                }
+            },
+        }
+        result = transform_for_csv("T1", data)
+        assert [r["Name"] for r in result["ligands.csv"]] == ["CA"]
+        assert result["auxiliary_small_molecules.csv"] == []
 
 
 def test_transform_skips_non_dict_ligand():
@@ -615,6 +1402,36 @@ def test_pubchem_none_sentinel_blanked():
     }
     rows = transform_for_csv("X1", data)["ligands.csv"]
     assert rows[0]["PubChemID"] == ""
+    assert rows[1]["PubChemID"] == "271"
+
+
+def test_pubchem_authoritative_cid_wins():
+    """The authoritative, structure-derived CID (api_pubchem_cid) must take
+    precedence over a differing model-reported pubchem_id; when it is absent or
+    empty the column falls back to the model's pubchem_id."""
+    data = {
+        "ligands": [
+            # Authoritative present and differing -> authoritative wins.
+            {
+                "name": "A",
+                "chem_comp_id": "ATP",
+                "chain_id": "A",
+                "pubchem_id": "999999",
+                "api_pubchem_cid": "5957",
+            },
+            # Authoritative explicitly None (the shape the validator produces
+            # when the PDBe entity has no CID) -> fall back to model's id.
+            {
+                "name": "B",
+                "chem_comp_id": "GDP",
+                "chain_id": "B",
+                "pubchem_id": "271",
+                "api_pubchem_cid": None,
+            },
+        ]
+    }
+    rows = transform_for_csv("X1", data)["ligands.csv"]
+    assert rows[0]["PubChemID"] == "5957"
     assert rows[1]["PubChemID"] == "271"
 
 
@@ -640,3 +1457,56 @@ def test_append_to_csvs_upserts_by_pdb(configure_paths):
 
     append_to_csvs({"structures.csv": [_row("BBB")]})  # a different PDB
     assert {r[pdb_col] for r in _read()} == {"AAA", "BBB"}
+
+
+def test_copy_id_enum_matches_csv_residue_tokens():
+    """Cross-module drift guard: the copy_id enum baked into the per-PDB schema
+    (``ligand_copy_id_enum(ligand_copy_identifiers(...))``) and the residue tokens
+    the CSV writer emits both derive from the SAME instance index, so they MUST be
+    byte-for-byte the same strings. If either side ever changed the
+    "<auth_asym_id>:<auth_seq_id>" format, the per-copy votes would key on
+    identifiers the CSV never writes -- caught here rather than in production."""
+    from gpcr_tools.annotator.detect_orchestrator import (
+        ligand_copy_id_enum,
+        ligand_copy_identifiers,
+    )
+    from gpcr_tools.csv_generator.csv_writer import _per_site_label_and_residue_columns
+    from gpcr_tools.validator.oligomer import build_nonpolymer_instance_index
+
+    def _np_entity(comp_id: str, copies: list[tuple[str, str, str]]) -> dict:
+        # (auth_asym_id, label_asym_id, auth_seq_id) per modelled copy.
+        return {
+            "rcsb_nonpolymer_entity_container_identifiers": {"nonpolymer_comp_id": comp_id},
+            "nonpolymer_entity_instances": [
+                {
+                    "rcsb_nonpolymer_entity_instance_container_identifiers": {
+                        "auth_asym_id": auth,
+                        "asym_id": label,
+                        "auth_seq_id": seq,
+                    }
+                }
+                for (auth, label, seq) in copies
+            ],
+        }
+
+    entry = {
+        "nonpolymer_entities": [
+            _np_entity("J40", [("R", "A", "601")]),
+            _np_entity("CLR", [("R", "B", "602"), ("R", "C", "603")]),
+        ]
+    }
+
+    # SCHEMA side: the copy_id enum the model binds each per-copy answer to.
+    roster = ligand_copy_identifiers(entry)
+    copy_ids = ligand_copy_id_enum(roster)
+    assert copy_ids  # non-empty -> a real comparison
+
+    # CSV side: residue tokens built from the SAME instance index, no per-copy votes
+    # (so each row is the full component-id join), one row per candidate component.
+    index = build_nonpolymer_instance_index(entry)
+    comp_ids = sorted({comp for comp, _cid in roster})
+    ligands = [{"chem_comp_id": comp, "site_ref": "orthosteric"} for comp in comp_ids]
+    pairs = _per_site_label_and_residue_columns(ligands, index, None)
+    csv_tokens = [tok for _label, residue in pairs for tok in residue.split(", ") if tok]
+
+    assert sorted(csv_tokens) == sorted(copy_ids)

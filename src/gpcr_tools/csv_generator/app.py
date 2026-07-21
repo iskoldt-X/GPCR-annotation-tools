@@ -20,7 +20,7 @@ from gpcr_tools.csv_generator.data_loader import (
     load_pdb_data,
     update_processed_log,
 )
-from gpcr_tools.csv_generator.exceptions import CsvSchemaMismatchError
+from gpcr_tools.csv_generator.exceptions import CsvSchemaMismatchError, ReviewAbortedError
 from gpcr_tools.csv_generator.review_engine import (
     has_gating_controversy,
     review_toplevel_blocks,
@@ -30,6 +30,7 @@ from gpcr_tools.csv_generator.ui import (
     create_display_copy,
     display_critical_warnings_summary,
     display_dashboard_header,
+    display_decision_brief,
     display_oligomer_analysis_panel,
     display_pdb_footer,
 )
@@ -103,6 +104,13 @@ def main(target_pdb: str | None = None, auto_accept: bool = False) -> None:
                 update_processed_log(pdb_id, "failed")
                 continue
 
+            # Read-only decision brief for gated structures: identity, the
+            # oligomer and G protein calls, and the severity-ordered per-signal
+            # decision list, shown before the raw summary so the curator sees why
+            # this structure needs a human. Informational only; it does not write
+            # or edit (by-path editing is a later increment).
+            display_decision_brief(pdb_id, main_data, controversies, validation_data)
+
             console.print(
                 Panel(
                     Pretty(create_display_copy(main_data)),
@@ -136,8 +144,9 @@ def main(target_pdb: str | None = None, auto_accept: bool = False) -> None:
             choices = ["r", "s", "f"]
             prompt_txt = "Select mode ([bold]r[/]eview, [bold]s[/]kip, [bold]f[/]ix issues only"
 
-            # Minority-omission advisories stay in `controversies` (so review mode
-            # still shows them) but must not block accept-all -- only gating
+            # Advisory-only records (minority omissions, and lexical name /
+            # backstopped pubchem_id variants) stay in `controversies` (so review
+            # mode still shows them) but must not block accept-all -- only gating
             # controversies (near-ties / real disagreements) do.
             if not has_crit_issues and not has_gating_controversy(controversies):
                 choices.insert(0, "a")
@@ -153,19 +162,16 @@ def main(target_pdb: str | None = None, auto_accept: bool = False) -> None:
                 log_audit_trail(pdb_id, "*", "skip_pdb", "N/A", "SKIPPED")
                 continue
 
-            final_data = None
+            # mode is one of {a, r, f} here ("s" already continued above), and
+            # every branch assigns final_data, so it is always bound below.
             if mode == "a":
                 final_data = main_data
                 log_audit_trail(pdb_id, "*", "accept_all_pdb", "N/A", "ACCEPTED")
-
-            if mode == "r":
+            elif mode == "r":
                 final_data = review_toplevel_blocks(
                     pdb_id, copy.deepcopy(main_data), controversies, validation_data
                 )
-                if final_data is None:
-                    raise KeyboardInterrupt
-
-            if mode == "f":
+            elif mode == "f":
                 final_data = review_toplevel_blocks(
                     pdb_id,
                     copy.deepcopy(main_data),
@@ -173,39 +179,36 @@ def main(target_pdb: str | None = None, auto_accept: bool = False) -> None:
                     validation_data,
                     fix_mode=True,
                 )
-                if final_data is None:
-                    raise KeyboardInterrupt
 
-            if final_data is not None:
-                console.print(
-                    Panel(
-                        Pretty(create_display_copy(final_data)),
-                        title="Final Data",
-                        border_style="green",
-                    )
+            console.print(
+                Panel(
+                    Pretty(create_display_copy(final_data)),
+                    title="Final Data",
+                    border_style="green",
                 )
-                if Confirm.ask("Write to CSV?"):
-                    try:
-                        append_to_csvs(transform_for_csv(pdb_id, final_data))
-                        update_processed_log(pdb_id, "completed")
-                        console.print("[green]Saved![/green]")
-                    except CsvSchemaMismatchError as e:
-                        console.print(
-                            Panel(
-                                f"[bold red]SCHEMA MISMATCH:[/] {e.message}",
-                                border_style="red",
-                                box=box.DOUBLE,
-                            )
-                        )
-                        update_processed_log(pdb_id, "failed")
-                else:
+            )
+            if Confirm.ask("Write to CSV?"):
+                try:
+                    append_to_csvs(transform_for_csv(pdb_id, final_data))
+                    update_processed_log(pdb_id, "completed")
+                    console.print("[green]Saved![/green]")
+                except CsvSchemaMismatchError as e:
                     console.print(
-                        f"[yellow]PDB {pdb_id} NOT saved. "
-                        f"It will reappear as pending in the next session.[/yellow]"
+                        Panel(
+                            f"[bold red]SCHEMA MISMATCH:[/] {e.message}",
+                            border_style="red",
+                            box=box.DOUBLE,
+                        )
                     )
-                    log_audit_trail(pdb_id, "*", "csv_write_declined", "N/A", "DEFERRED")
+                    update_processed_log(pdb_id, "failed")
+            else:
+                console.print(
+                    f"[yellow]PDB {pdb_id} NOT saved. "
+                    f"It will reappear as pending in the next session.[/yellow]"
+                )
+                log_audit_trail(pdb_id, "*", "csv_write_declined", "N/A", "DEFERRED")
 
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ReviewAbortedError):
         console.print("\n[yellow]Exiting...[/yellow]")
     except EOFError:
         # stdin closed / exhausted (e.g. piped input ran out, or a
@@ -234,10 +237,22 @@ def _run_auto_accept(target_pdb: str | None) -> None:
         print("auto-accept: nothing to process", file=sys.stderr)
         return
 
+    from gpcr_tools.config import AGG_STATUS_SKIPPED
+    from gpcr_tools.validator.gating import is_pdb_gated
+
     for pdb_id in pending_pdbs:
-        main_data, _controversies, _validation = load_pdb_data(pdb_id)
+        main_data, controversies, validation = load_pdb_data(pdb_id)
         if not main_data:
             update_processed_log(pdb_id, "failed")
+            continue
+
+        # A gated PDB needs a human; mirror the interactive UI, which disables
+        # accept-all when any source gates. Skip it rather than silently accepting.
+        oligo = main_data.get("oligomer_analysis")
+        if is_pdb_gated(validation, oligo, controversies):
+            log_audit_trail(pdb_id, "*", "auto_accept_skip_gated", "N/A", "SKIPPED")
+            update_processed_log(pdb_id, AGG_STATUS_SKIPPED)
+            print(f"auto-accept: SKIPPED {pdb_id} (gated; needs review)", file=sys.stderr)
             continue
 
         log_audit_trail(pdb_id, "*", "auto_accept", "N/A", "ACCEPTED")

@@ -1,4 +1,13 @@
 repos:
+  - repo: local
+    hooks:
+      - id: no-local-paths
+        name: reject developer-local paths
+        entry: python scripts/check_no_local_paths.py
+        language: system
+        types: [text]
+        pass_filenames: true
+
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.11.6
     hooks:

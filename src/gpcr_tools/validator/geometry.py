@@ -11,7 +11,7 @@ geometry for small-molecule ligands:
 * **pocket residues** -- the receptor residues lining the copy, used to tell two
   copies in different pockets apart from two copies in the same pocket.
 * **partner contact** -- whether the copy also touches a non-receptor protein
-  chain (a G-protein / peptide), a hint that it sits in the active-state pocket.
+  chain (a G protein / peptide), a hint that it sits in the active-state pocket.
 
 Network and parsing failures degrade to ``None`` / an empty result so the detect
 stage never breaks on a missing or unreadable structure.
@@ -73,7 +73,7 @@ class LigandCopyGeometry:
     seq_id: int
     burial: float  # angular coverage in [0, 1]; higher = more enclosed
     pocket_residues: frozenset[tuple[str, int]]  # (gpcr_chain, residue_number)
-    contacts_partner: bool  # touches a non-GPCR protein chain (e.g. a G-protein)
+    contacts_partner: bool  # touches a non-GPCR protein chain (e.g. a G protein)
 
     @property
     def n_pocket_residues(self) -> int:
@@ -266,7 +266,10 @@ def analyze_ligand_copies(
     copies: list[LigandCopyGeometry] = []
     for chain in model:
         for residue in chain:
-            if residue.name == comp_id:
+            # A ligand comp_id can collide with a standard amino-acid name (e.g. a
+            # free GLU ligand), so exclude polymer residues -- only a genuine
+            # non-polymer residue of this name is a ligand copy.
+            if residue.name == comp_id and not is_protein_atom(residue):
                 copies.append(
                     _analyze_copy(model, neighbor_search, chain.name, residue, gpcr_chains)
                 )
@@ -277,13 +280,18 @@ def ligand_contact_residues(
     structure: gemmi.Structure,
     comp_id: str,
     receptor_chains: set[str],
-) -> list[tuple[float, list[tuple[str, int, str]]]]:
-    """Per-copy burial + receptor contacts of *comp_id*, for site classification.
+) -> list[tuple[str, int, float, list[tuple[str, int, str]]]]:
+    """Per-copy identity + burial + receptor contacts of *comp_id*.
 
-    Returns one ``(burial, contacts)`` per modelled copy. *burial* is the angular
-    coverage in [0, 1] (how enclosed the copy is, by any protein atom) -- it lets
-    the caller require that a multi-site split come from deeply-buried copies (real
-    pockets) rather than a structural lipid scattered across surface grooves.
+    Returns one ``(auth_chain, auth_seq_id, burial, contacts)`` per modelled copy.
+    ``auth_chain`` / ``auth_seq_id`` are the copy's own author chain and residue
+    number, read straight from the coordinate residue -- together they are its
+    stable identifier (``auth_asym_id:auth_seq_id``), the same identity
+    :func:`analyze_ligand_copies` carries, so a caller can key each copy to the
+    non-polymer instance metadata without relying on list position. *burial* is the
+    angular coverage in [0, 1] (how enclosed the copy is, by any protein atom) -- it
+    lets the caller require that a multi-site split come from deeply-buried copies
+    (real pockets) rather than a structural lipid scattered across surface grooves.
     *contacts* are ``(receptor_auth_chain, label_seq, amino_acid_one_letter)`` for
     each receptor residue the copy touches; ``label_seq`` (the entity SEQRES index)
     is what the RCSB alignment maps to a UniProt position, and the amino acid lets
@@ -293,10 +301,12 @@ def ligand_contact_residues(
     neighbor_search = gemmi.NeighborSearch(
         model, structure.cell, GEOMETRY_NEIGHBOR_SEARCH_RADIUS
     ).populate()
-    copies: list[tuple[float, list[tuple[str, int, str]]]] = []
+    copies: list[tuple[str, int, float, list[tuple[str, int, str]]]] = []
     for chain in model:
         for residue in chain:
-            if residue.name != comp_id:
+            # Skip polymer residues sharing the ligand name (a free GLU ligand vs
+            # backbone glutamate); only a non-polymer residue is a ligand copy.
+            if residue.name != comp_id or is_protein_atom(residue):
                 continue
             ligand_atoms = list(residue)
             env: dict[tuple[str, int, str], gemmi.Position] = {}
@@ -320,8 +330,14 @@ def ligand_contact_residues(
                                 info.one_letter_code.upper() if info else "X"
                             )
             burial = _burial(centroid(ligand_atoms), list(env.values())) if ligand_atoms else 0.0
+            copy_seq = residue.seqid.num
             copies.append(
-                (burial, [(chain_name, ls, aa) for (chain_name, ls), aa in contacts.items()])
+                (
+                    chain.name,
+                    copy_seq if copy_seq is not None else 0,
+                    burial,
+                    [(chain_name, ls, aa) for (chain_name, ls), aa in contacts.items()],
+                )
             )
     return copies
 
@@ -391,6 +407,9 @@ def ligand_interaction_counts(structure: gemmi.Structure, comp_id: str) -> list[
     metal ligand atom counts only toward ``metal`` (never ``polar``), and a
     metal-near-carbon contact falls in no bucket. One dict per modelled copy, in
     model order.
+
+    Note: this has no production caller yet (exercised only by tests). When wiring
+    it in, keep the polymer gate below -- do not restore a bare name match.
     """
     if len(structure) == 0:
         return []
@@ -401,7 +420,9 @@ def ligand_interaction_counts(structure: gemmi.Structure, comp_id: str) -> list[
     counts: list[dict[str, int]] = []
     for chain in model:
         for residue in chain:
-            if residue.name != comp_id:
+            # Skip polymer residues sharing the ligand name (a free GLU ligand vs
+            # backbone glutamate); only a non-polymer residue is a ligand copy.
+            if residue.name != comp_id or is_protein_atom(residue):
                 continue
             polar: set[tuple[str, int, str]] = set()
             metal: set[tuple[str, int, str]] = set()

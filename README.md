@@ -61,7 +61,7 @@ Each step is **resumable** and **idempotent** — re-running any command skips a
 
 A coordinate-driven detect stage (built on [gemmi](https://gemmi.readthedocs.io/)) runs before annotation and supplies the model with objective structural **facts** — not computed verdicts — leaving the final judgment to the AI:
 
-- **G-protein coupling subtype** — Identifies the G-alpha subtype by matching the structure's alpha5 C-terminal window against reference sequences; subtypes that share an identical alpha5 helix (an inseparable set) are routed to family-level review instead of guessing one confident subtype.
+- **G protein coupling subtype** — Identifies the G-alpha subtype by matching the structure's alpha5 C-terminal window against reference sequences; subtypes that share an identical alpha5 helix (an inseparable set) are routed to family-level review instead of guessing one confident subtype.
 - **Binding-site geometry** — Each ligand's contacted residues are mapped to GPCRdb generic numbers and segments, with an ANVIL-style membrane-frame fit (oriented from the receptor's own intracellular landmarks: DRY, NPxxY, H8) that reports lipid-facing vs pocket-facing fraction and signed membrane depth. The model infers `site_ref` from these facts plus the paper, with `unknown` a first-class answer.
 - **Dimer coupling protomer** — For an obligate Class C dimer, the protomer the G-alpha actually engages is detected from coordinates and used to pick the dimer's primary chain (e.g. GABA-B's GABBR2 couples while GABBR1 binds the agonist); the partner protomer is recorded.
 - **Incidental-candidate ligands** — Dual-use molecules (cholesterol, palmitate, etc.) are surfaced to the model for a functional-vs-structural judgment rather than being silently dropped.
@@ -74,7 +74,7 @@ A coordinate-driven detect stage (built on [gemmi](https://gemmi.readthedocs.io/
 - **Context-rich prompts** — The AI receives not just the paper PDF but also pre-enriched PDB metadata, the detect stage's structural evidence, a per-chain polymer table carrying each chain's 7TM status and residue length (to tell a true 7TM receptor from a non-receptor partner), a chain inventory reminder, and sibling structure warnings — reducing hallucination by grounding the model in API-verified and coordinate-derived facts.
 - **Model-judged oligomeric state** — The model annotates the receptor's `oligomeric_state` (monomer / homo-/hetero-dimer / etc.) from neutral facts, counting only GPCR protomers (not transducer or ligand partners).
 - **Flexible model selection** — Switch models at runtime via `--model` flag or `GPCR_GEMINI_MODEL` environment variable without code changes; sampling depth is tunable via `--temperature` and `--thinking-level` (threaded through both single and batch paths).
-- **Batch API support** — Large-scale annotation via Gemini Batch API with JSONL submission, polling, and automatic result recovery; submissions are sharded into jobs (never splitting a structure's runs) and tracked in a registry for idempotent recovery.
+- **Batch API support** — Large-scale annotation via Gemini Batch API with JSONL submission, polling, and automatic result recovery; submissions are sharded into jobs (never splitting a structure's runs) and tracked in a registry for idempotent recovery. A `--sequential` mode submits one shard per invocation and refuses to overlap an in-flight job, so scheduled or repeated runs advance the corpus without overrunning the provider's enqueued-token limit.
 - **Rate-limited client** — Sliding-window rate limiting (1000 RPM) with exponential backoff on 429 responses.
 
 ### Post-Annotation Validation
@@ -90,12 +90,13 @@ A coordinate-driven detect stage (built on [gemmi](https://gemmi.readthedocs.io/
 
 #### Warn-only safety cross-checks (surface, don't rewrite)
 
-A family of checks routes likely mistakes to the review channel that disables one-click accept-all, while leaving the model's answer untouched: role-vs-site contradictions (e.g. an allosteric role at the orthosteric site), mis-filed GPCR protomers evicted from auxiliary proteins (sparing crystallization fusions and soluble partners), co-agonist reminders when multiple agonists are present, BRIL / T4-lysozyme fusion advisories, unannotated non-GPCR polymer chains, hallucinated ligands in ligand-free structures, and unrecognised G-alpha subtypes or G-protein-derived peptides mis-filed as ligands. Assembly-vs-oligomer mismatches are informational, not alerts.
+A family of checks routes likely mistakes to the review channel that disables one-click accept-all, while leaving the model's answer untouched: role-vs-site contradictions (e.g. an allosteric role at the orthosteric site), mis-filed GPCR protomers evicted from auxiliary proteins (sparing crystallization fusions and soluble partners), co-agonist reminders when multiple agonists are present, BRIL / T4-lysozyme fusion advisories, unannotated non-GPCR polymer chains, hallucinated ligands in ligand-free structures, and unrecognised G-alpha subtypes or G protein-derived peptides mis-filed as ligands. Assembly-vs-oligomer mismatches are informational, not alerts.
 
 ### Expert Curation
 
 - **Rich terminal dashboard** — An ergonomic review interface built with [Rich](https://github.com/Textualize/rich) for rapid, informed decision-making.
 - **Context-aware validation alerts** — Real-time display of ghost chains, hallucinated ligands, UniProt identity clashes, and chimera warnings alongside the data being reviewed.
+- **Read-only decision brief** — Each gated structure opens with a ranked list of every signal that needs a decision (validation findings, oligomer findings, and each AI-run voting fork), so the reviewer sees the full picture before drilling in.
 - **Recursive review engine** — Navigate field-by-field through the annotation tree, with controversy highlights guiding attention to disputed values.
 - **Append-only audit trail** — Every human decision (accept / edit / reject) is logged to `audit_trail.jsonl` with timestamps, providing full reproducibility.
 - **Resumable sessions** — Curation progress is persisted; interrupted sessions resume exactly where they left off.
@@ -230,7 +231,7 @@ docker run --rm -it \
 
 ### `gpcr-tools detect`
 
-Pre-annotation structural detection: compute coordinate-driven evidence (G-protein coupling, binding-site geometry, oligomeric state, chimera provenance) for the AI and flag hard cases for review.
+Pre-annotation structural detection: compute coordinate-driven evidence (G protein coupling, binding-site geometry, oligomeric state, chimera provenance) for the AI and flag hard cases for review.
 
 ```bash
 gpcr-tools detect                       # All enriched PDBs (tops up missing/degraded)
@@ -251,6 +252,7 @@ gpcr-tools annotate --prompt prompts/custom.md          # Custom prompt template
 gpcr-tools annotate --temperature 0.7                   # Sampling temperature (default: model's own)
 gpcr-tools annotate --thinking-level low                # Reasoning depth: minimal|low|medium|high
 gpcr-tools annotate --batch                             # Submit via Batch API
+gpcr-tools annotate --batch --sequential                # One shard/run; won't overlap an in-flight batch (cron-safe)
 gpcr-tools annotate --check-batch                       # Poll batch status
 gpcr-tools annotate --recover                           # Re-process raw batch output
 ```
@@ -285,7 +287,7 @@ Print an operational report over pipeline outputs.
 ```bash
 gpcr-tools report pdf-coverage          # Paper-PDF outcomes
 gpcr-tools report full-audit            # Validation warnings + chimera conflicts across PDBs
-gpcr-tools report tail-analysis         # G-protein chimera score distribution
+gpcr-tools report tail-analysis         # G protein chimera score distribution
 gpcr-tools report run-manifest          # Per-target accounting (no-PDF / incomplete /
                                         # acceptable / gated, with provenance);
                                         # writes output/run_manifest.{json,md}
@@ -379,8 +381,9 @@ Tab-separated, normalized files ready for database ingestion:
 | File | Contents |
 |------|----------|
 | `structures.csv` | PDB ID, receptor UniProt, method, resolution, state, chain, date, and (for a heterodimer) the partner protomer's UniProt + chain |
-| `ligands.csv` | Ligand names, PubChem IDs, roles, binding-site type (`Site`, from the geometry-informed `site_ref`), entity types, SMILES, InChIKey, sequences, and whether the bound compound is an endogenous ligand (`is_endogenous`, GtoPdb). Incidental molecules the model judged non-functional are omitted. |
-| `g_proteins.csv` | G-protein subunit UniProt IDs and chain assignments |
+| `ligands.csv` | Ligand identity (`Name`, the PDBe chemical-component code such as `RET` or `U0G`, falling back to the descriptive name when no component code exists), the full descriptive name (`Title`), PubChem IDs, roles, binding-site type (`Site`, from the geometry-informed `site_ref`), entity types, SMILES, InChIKey, sequences, the residue numbers of each modelled copy (`Residue_seq_id`, comma-joined and aligned copy-for-copy with `label_asym_id`), and whether the bound compound is an endogenous ligand (`is_endogenous`, GtoPdb). Molecules that are not functional ligands (ions, cofactors, glycans, detergents, matrix lipids, and molecules the model judged non-functional or structural) are catalogued in `auxiliary_small_molecules.csv` instead. |
+| `auxiliary_small_molecules.csv` | Small molecules present but not functional receptor ligands: `Name` (component code), `Type` (`Ion` / `Lipid` / `Detergent` / `Other`), `Function` (`Cofactor` or blank), located like `ligands.csv` (`ChainID` + `label_asym_id` + `Residue_seq_id`) |
+| `g_proteins.csv` | G protein subunit identities and chain assignments: `Alpha_identity` (alpha subunit UniProt entry name), `Alpha_alpha5_identity` (alpha5-helix functional coupling), `Alpha_backbone` (modelled scaffold), plus beta/gamma UniProt IDs and chains |
 | `arrestins.csv` | Arrestin UniProt IDs and chains |
 | `fusion_proteins.csv` | Fusion protein names |
 | `nanobodies.csv`, `antibodies.csv`, `scfv.csv` | Binding partner names |
@@ -426,8 +429,8 @@ src/gpcr_tools/
 │
 ├── detector/                  # Pre-annotation detect stage (runs before annotate)
 │   ├── signals.py             #   DetectSignal contract (advisory→prompt, review→curator)
-│   ├── gprotein.py            #   G-protein alpha5 identity detector
-│   ├── coupling.py            #   G-protein-coupling protomer of a dimer (geometry)
+│   ├── gprotein.py            #   G protein alpha5 identity detector
+│   ├── coupling.py            #   G protein-coupling protomer of a dimer (geometry)
 │   ├── site_ref.py            #   Ligand binding-site detector (geometry → generic numbers)
 │   ├── geometry.py            #   Dual-role ligand detector (multi-pocket burial)
 │   ├── ligands.py             #   Incidental-candidate ligand detector (cholesterol, palmitate)
@@ -447,7 +450,7 @@ src/gpcr_tools/
 │   └── runner.py              #   12-step orchestration with error isolation
 │
 ├── validator/                 # Cross-validation + enrichment modules
-│   ├── chimera.py             #   G-protein alpha5 identity (sequence matching)
+│   ├── chimera.py             #   G protein alpha5 identity (sequence matching)
 │   ├── receptor_validator.py  #   UniProt identity verification
 │   ├── ligand_validator.py    #   PDB-CCD existence check + endogenous tagging
 │   ├── endogenous.py          #   Endogenous-ligand classifier (GtoPdb table)
@@ -503,7 +506,7 @@ pytest tests/ -v
 
 ### Test Suite
 
-The test suite includes 1,100+ tests:
+The test suite includes 1,700+ tests:
 
 - **Unit tests** for every module across all five pipeline stages
 - **Integration tests** for the full aggregation pipeline, error isolation, and atomic write safety

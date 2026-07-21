@@ -382,7 +382,7 @@ _G_ALPHA_DESC = "GUANINE NUCLEOTIDE-BINDING PROTEIN G(T) SUBUNIT ALPHA-3"
 
 
 class TestGProteinPeptideAsLigand:
-    """A transducer-derived / G-protein-mimetic peptide filed as a receptor ligand
+    """A transducer-derived / G protein-mimetic peptide filed as a receptor ligand
     with a functional pocket role is a signaling partner mis-annotation. The net
     surfaces it for the curator; an honest abstention (unknown role) is never
     flagged, and genuine small-molecule agonists / auxiliary proteins are untouched.
@@ -396,7 +396,7 @@ class TestGProteinPeptideAsLigand:
         warnings = validate_and_enrich_ligands(
             "TEST", {"ligands": [lig]}, _make_enriched(polymer=polymer)
         )
-        return [w for w in warnings if "G-PROTEIN PEPTIDE AS LIGAND" in w]
+        return [w for w in warnings if "G PROTEIN PEPTIDE AS LIGAND" in w]
 
     def test_g_alpha_description_peptide_agonist_warns(self) -> None:
         # Chain B's polymer description reads as a G-alpha subunit, yet the peptide
@@ -420,11 +420,11 @@ class TestGProteinPeptideAsLigand:
             "TEST", {"ligands": [lig]}, _make_enriched(polymer=polymer)
         )
         report = _build_validation_report("TEST", {}, {}, ligand_warnings, {}, None)
-        assert any("G-PROTEIN PEPTIDE AS LIGAND" in w for w in report["critical_warnings"])
+        assert any("G PROTEIN PEPTIDE AS LIGAND" in w for w in report["critical_warnings"])
 
     def test_slug_branch_peptide_agonist_warns(self) -> None:
         # Description does NOT read as a G-alpha, but the chain's GPCRdb slug is a
-        # G-protein subunit -> the slug branch (+ poly_by_chain slug extension) fire.
+        # G protein subunit -> the slug branch (+ poly_by_chain slug extension) fire.
         lig = {"chain_id": "B", "name": "Transducin mimetic", "type": "peptide"}
         lig["role"] = {"value": "Agonist"}
         polymer = [
@@ -454,7 +454,7 @@ class TestGProteinPeptideAsLigand:
             assert self._gp_warnings(lig, polymer), slug
 
     def test_small_molecule_agonist_not_flagged(self) -> None:
-        # The real agonist is a small molecule, not a peptide on a G-protein chain.
+        # The real agonist is a small molecule, not a peptide on a G protein chain.
         data: dict[str, Any] = {
             "ligands": [
                 {
@@ -467,7 +467,7 @@ class TestGProteinPeptideAsLigand:
         }
         enriched = _make_enriched(nonpolymer=[_np_entity("RET")])
         warnings = validate_and_enrich_ligands("TEST", data, enriched)
-        assert not any("G-PROTEIN PEPTIDE AS LIGAND" in w for w in warnings)
+        assert not any("G PROTEIN PEPTIDE AS LIGAND" in w for w in warnings)
 
     def test_auxiliary_fab_not_flagged(self) -> None:
         # A stabilising Fab/nanobody is an auxiliary protein, not a peptide ligand
@@ -479,7 +479,7 @@ class TestGProteinPeptideAsLigand:
 
     def test_bare_sequence_alpha5_mimetic_peptide_warns(self) -> None:
         # A G-alpha alpha5 C-terminal mimetic deposited under a bare-sequence name
-        # (no G-protein wording, no slug) is now recognised via its conserved motif.
+        # (no G protein wording, no slug) is now recognised via its conserved motif.
         lig = {"chain_id": "B", "name": "alpha5 mimetic", "type": "peptide"}
         lig["role"] = {"value": "Agonist"}
         polymer = [_poly_entity("B", sequence="ILENLKDVGLF", description="ILENLKDVGLF peptide CT2")]
@@ -498,23 +498,45 @@ class TestGProteinPeptideAsLigand:
         assert self._gp_warnings(lig, polymer)
 
     def test_glp1_peptide_agonist_not_flagged(self) -> None:
-        # A genuine peptide-hormone agonist on a non-G-protein chain is not flagged.
+        # A genuine peptide-hormone agonist on a non-G protein chain is not flagged.
         lig = {"chain_id": "P", "name": "GLP-1", "type": "peptide"}
         lig["role"] = {"value": "Agonist"}
         polymer = [_poly_entity("P", sequence="HAEGTFTSD", description="Glucagon-like peptide-1")]
         assert not self._gp_warnings(lig, polymer)
 
-    def test_g_alpha_peptide_with_unknown_role_not_flagged(self) -> None:
-        # The model honestly abstaining (role unknown) must never be flagged.
+    def test_g_alpha_peptide_with_unknown_role_flagged(self) -> None:
+        # A G protein fragment does not belong in the ligand bucket regardless of
+        # role: an 'unknown' role no longer suppresses the flag, because the
+        # mis-filing is the identity, not the role.
         lig = {"chain_id": "B", "name": "C-terminal peptide", "type": "peptide"}
         lig["role"] = {"value": "unknown"}
         polymer = [_poly_entity("B", sequence="ACDEF", description=_G_ALPHA_DESC)]
-        assert not self._gp_warnings(lig, polymer)
+        warnings = self._gp_warnings(lig, polymer)
+        assert warnings
+        assert _WARNING_REGEX.search(warnings[0]) is not None
 
-    def test_g_alpha_peptide_with_absent_role_not_flagged(self) -> None:
+    def test_g_alpha_peptide_with_absent_role_flagged(self) -> None:
+        # Same for a missing role: the G protein piece is misfiled in ligands.
         lig = {"chain_id": "B", "name": "C-terminal peptide", "type": "peptide"}
         polymer = [_poly_entity("B", sequence="ACDEF", description=_G_ALPHA_DESC)]
-        assert not self._gp_warnings(lig, polymer)
+        warnings = self._gp_warnings(lig, polymer)
+        assert warnings
+        assert _WARNING_REGEX.search(warnings[0]) is not None
+
+    def test_gact_alpha5_peptide_as_ligand_unknown_role_caught(self) -> None:
+        # 6NWE-style GaCT / alpha5 peptide (bare-sequence name, no slug) filed as a
+        # ligand with role unknown -> caught by identity (the alpha5 motif), even
+        # though the model made no functional-role claim.
+        lig = {
+            "chain_id": "B",
+            "name": "ILENLKDVGLF peptide CT2",
+            "type": "peptide",
+            "role": {"value": "unknown"},
+        }
+        polymer = [_poly_entity("B", sequence="ILENLKDVGLF", description="ILENLKDVGLF peptide CT2")]
+        warnings = self._gp_warnings(lig, polymer)
+        assert warnings
+        assert _WARNING_REGEX.search(warnings[0]) is not None
 
 
 class TestMultipleAgonists:
@@ -774,24 +796,24 @@ class TestKeylessPubChemGate:
         assert not any("Mismatch" in w for w in warnings)
 
     def test_keyed_excluded_buffer_not_gated(self) -> None:
-        # An excluded buffer (e.g. PLM) is a keyed component: it has a chem_comp_id
-        # and its CID is echoed from metadata, not guessed -> never synonym-gated,
-        # and no network call is made.
+        # An excluded buffer (e.g. LMT, a detergent) is a keyed component: it has a
+        # chem_comp_id and its CID is echoed from metadata, not guessed -> never
+        # synonym-gated, and no network call is made.
         from unittest.mock import patch
 
         cache = _FakeSynonymCache({})
         lig = {
-            "name": "Palmitic acid",
-            "chem_comp_id": "PLM",
-            "type": "lipid",
-            "pubchem_id": "985",
+            "name": "dodecyl beta-D-maltoside",
+            "chem_comp_id": "LMT",
+            "type": "detergent",
+            "pubchem_id": "445029",
         }
         with patch(
             "gpcr_tools.validator.ligand_validator.check_pubchem_synonym_match"
         ) as mock_check:
             warnings = self._gate_warnings([lig], cache)
         mock_check.assert_not_called()
-        assert lig["pubchem_id"] == "985"
+        assert lig["pubchem_id"] == "445029"
         assert not any("Mismatch" in w or "API_UNAVAILABLE" in w for w in warnings)
 
     def test_correct_cid_kept_via_reported_synonym(self) -> None:

@@ -123,8 +123,8 @@ def test_receptor_oligomeric_state_description_counts_only_receptors() -> None:
     desc = _receptor_info().properties["oligomeric_state"].properties["value"].description or ""
     lower = desc.lower()
     assert "do not count" in lower
-    assert "g-protein" in lower
-    # The three baked-in examples: receptor+G-protein -> monomer; GABA-B -> hetero;
+    assert "g protein" in lower
+    # The three baked-in examples: receptor+G protein -> monomer; GABA-B -> hetero;
     # mGlu2/CaSR -> homo.
     assert "monomer" in lower
     assert "gaba-b" in lower

@@ -10,6 +10,8 @@ from __future__ import annotations
 from gpcr_tools.config import (
     ALERT_HALLUCINATION,
     ALERT_MISSED_PROTOMER,
+    ALERT_NON_RECEPTOR_PARTNER,
+    GPCR_MIN_ANNOTATED_TM,
     OLIGOMER_HETEROMER,
     OLIGOMER_HOMOMER,
     ensure_alert_prefix,
@@ -129,14 +131,34 @@ def resolve_partner_protomer(oligo: dict, primary_chain: str) -> tuple[str, str]
 
     A higher-order assembly (more than two protomers) comma-joins the extra chains.
     Distinct partner slugs are de-duplicated; chains are sorted for stable output.
+
+    The partner column holds ADDITIONAL real receptor protomers only. A chain
+    whose UniProt annotation does not carry enough transmembrane helices to be a
+    7TM receptor (a peptide ligand, a soluble protein agonist, a single-pass
+    co-receptor mis-mapped to a GPCR slug) is dropped here -- the roster is built
+    by a denylist that does not check the TM count, so such chains can slip in.
+    The threshold mirrors the classifier's (``GPCR_MIN_ANNOTATED_TM``); a chain
+    missing the ``total_tms`` annotation passes (backward-compat with pre-TM and
+    legacy data). When the TM-feature fetch failed for the whole structure
+    (``tm_data_available`` is ``False``) the gate is skipped entirely -- the
+    counts are unverified, so filtering would be guessing; that case is already
+    routed via TM_DATA_UNAVAILABLE at analysis time. An evicted slug-bearing chain
+    yields a domain-language curator alert on ``oligo["alerts"]``.
     """
     primary_chains = {c.strip() for c in str(primary_chain).split(",") if c.strip()}
     # With no known primary chain (malformed receptor_info), every chain would look
     # like a partner -- a mis-attribution. Record no partner rather than guess.
     if not primary_chains:
         return "", ""
+    # Skip the TM gate only when the fetch failed for the whole structure: the
+    # counts are then unverified, so filtering on them would be guessing. NOTE the
+    # condition is the flag ALONE -- never "the partner set is empty" (an empty
+    # partner column is the correct outcome for a receptor + peptide-ligand
+    # structure, and "empty -> don't gate" would wrongly re-admit the bad chains).
+    tm_gate_active = oligo.get("tm_data_available", False)
     partner_slugs: list[str] = []
     partner_chains: list[str] = []
+    evicted: list[str] = []
     seen: set[str] = set()
     for chain_info in oligo.get("all_gpcr_chains") or []:
         if not isinstance(chain_info, dict):
@@ -144,15 +166,50 @@ def resolve_partner_protomer(oligo: dict, primary_chain: str) -> tuple[str, str]
         cid = chain_info.get("chain_id")
         if not cid or cid in primary_chains:
             continue
+        # A chain with a present-but-too-low TM count is not a 7TM receptor; drop
+        # it from the partner set. A chain missing the key passes (legacy data).
+        if (
+            tm_gate_active
+            and "total_tms" in chain_info
+            and (chain_info.get("total_tms") or 0) < GPCR_MIN_ANNOTATED_TM
+        ):
+            if chain_info.get("slug"):
+                evicted.append(cid)
+            continue
         partner_chains.append(cid)
         slug = chain_info.get("slug")
         if slug and slug not in seen:
             seen.add(slug)
             partner_slugs.append(slug)
+    if evicted:
+        _raise_non_receptor_partner_alert(oligo, evicted)
     # Slugs keep annotation order (the partner genes), chains are sorted for stability;
     # the two columns are sets (genes / chains), not positionally paired -- a homodimer
     # is one gene over several chains.
     return ", ".join(partner_slugs), ", ".join(sorted(partner_chains))
+
+
+def _raise_non_receptor_partner_alert(oligo: dict, evicted_chains: list[str]) -> None:
+    """Record that slug-bearing chains were dropped from the partner set.
+
+    Mirrors the validator's oligomer-alert pattern: a ``{"type", "message"}`` dict
+    appended to ``oligo["alerts"]`` (the same list :func:`reconcile_gpcr_in_auxiliary`
+    raises into), so the eviction is recorded on the analysis independently of the
+    chain also being captured as a ligand.
+    """
+    chains_text = ", ".join(sorted(evicted_chains))
+    oligo.setdefault("alerts", []).append(
+        {
+            "type": ALERT_NON_RECEPTOR_PARTNER,
+            "message": (
+                f"[{ALERT_NON_RECEPTOR_PARTNER}] at 'oligomer_analysis': "
+                f"chain {chains_text} carries a GPCR slug but its annotation is not "
+                f"7TM, so it was dropped from the additional-receptor (Partner) "
+                f"column. It is likely a peptide ligand, soluble agonist, or "
+                f"single-pass co-receptor; confirm the chain's role manually."
+            ),
+        }
+    )
 
 
 def build_structure_note(

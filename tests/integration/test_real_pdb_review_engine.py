@@ -11,6 +11,8 @@ from typing import Any
 
 import pytest
 
+from gpcr_tools.csv_generator.exceptions import ReviewAbortedError
+
 # ── RP-4.1: PromptScript Helper ─────────────────────────────────────────
 
 
@@ -105,7 +107,7 @@ class TestCleanBlockReviewFlow:
         real_pdb_workspace: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Declining a clean block enters deep review via review_node."""
+        """Declining a clean block enters deep review via review_node; quitting there aborts."""
         from gpcr_tools.csv_generator.review_engine import review_toplevel_blocks
 
         main_data, controversies, validation_data = _load_and_inject("5G53")
@@ -118,7 +120,8 @@ class TestCleanBlockReviewFlow:
         confirm_script = PromptScript(confirm_responses)
 
         # When review_node fires for key_findings, first child will prompt.
-        # We respond "q" to quit, which propagates None → returns None.
+        # We respond "q" to quit, which now raises ReviewAbortedError (a
+        # control-flow signal) instead of collapsing the review to None.
         prompt_script = PromptScript(["q"])
 
         monkeypatch.setattr(
@@ -130,11 +133,9 @@ class TestCleanBlockReviewFlow:
             prompt_script,
         )
 
-        result = review_toplevel_blocks(
-            "5G53", copy.deepcopy(main_data), controversies, validation_data
-        )
+        with pytest.raises(ReviewAbortedError):
+            review_toplevel_blocks("5G53", copy.deepcopy(main_data), controversies, validation_data)
 
-        assert result is None
         confirm_script.assert_exhausted()
 
 

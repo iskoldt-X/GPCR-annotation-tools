@@ -33,7 +33,10 @@ from gpcr_tools.config import (
     VALIDATION_SKIPPED_APO,
 )
 from gpcr_tools.validator.api_clients import SynonymCache, check_pubchem_synonym_match
-from gpcr_tools.validator.chimera import is_g_alpha_description
+from gpcr_tools.validator.chimera import (
+    is_alpha5_mimetic_description,
+    is_g_alpha_description,
+)
 from gpcr_tools.validator.endogenous import ENDOGENOUS_UNKNOWN, classify_endogenous
 
 logger = logging.getLogger(__name__)
@@ -204,7 +207,7 @@ def _gate_keyless_pubchem_ids(
     from its own memory).  Any ligand carrying a ``chem_comp_id`` is left
     untouched: a matched
     small molecule keeps the authoritative CID copied from enriched data, and an
-    excluded buffer (e.g. a structural lipid such as PLM) carries a CID echoed from
+    excluded buffer (e.g. a detergent such as LMT) carries a CID echoed from
     that same metadata -- neither is a from-memory guess, and matched CIDs also
     carry occasional sparse-synonym entries that a synonym check would wrongly
     reject.
@@ -220,7 +223,7 @@ def _gate_keyless_pubchem_ids(
             continue  # Matched small molecule -> authoritative CID, leave it.
         comp_id = lig.get("chem_comp_id")
         if comp_id and str(comp_id).strip().lower() not in EMPTY_VALUES:
-            # A keyed component (e.g. an excluded buffer like PLM) is identified by
+            # A keyed component (e.g. an excluded buffer like LMT) is identified by
             # its chem_comp_id and its CID is echoed from metadata, not guessed.
             continue
         cid = lig.get("pubchem_id")
@@ -299,23 +302,48 @@ def _warn_on_role_site_mismatch(ligands: list[Any], warnings: list[str]) -> None
             )
 
 
+def _chain_is_g_protein_fragment(poly: dict[str, Any]) -> bool:
+    """Whether a polymer chain is a G protein subunit / transducer-mimetic fragment.
+
+    Identity comes from the STRUCTURE, never the model name: a conserved G-alpha
+    alpha5 C-terminal motif in the modelled sequence, an RCSB description that reads
+    as a G-alpha, or a GPCRdb slug that is a G protein alpha/beta/gamma subunit.
+    This is the same identity logic the aggregator's misfiled-fragment relocator
+    uses, so the ligand net and the relocator agree on what counts as a G protein
+    piece.
+    """
+    desc = (poly.get("description") or "").strip()
+    seq = (poly.get("sequence") or "").strip()
+    slug = (poly.get("slug") or "").strip().lower()
+    return (
+        is_alpha5_mimetic_description(seq)
+        or is_g_alpha_description(desc)
+        or slug.startswith(G_PROTEIN_SUBUNIT_SLUG_PREFIXES)
+    )
+
+
 def _warn_on_g_protein_peptide_as_ligand(
     ligands: list[Any],
     poly_by_chain: dict[str, dict[str, Any]],
     warnings: list[str],
 ) -> None:
-    """Flag (for the curator) a transducer-derived / G-protein-mimetic peptide that
-    the model has filed as a receptor ligand with a functional pocket role.
+    """Flag (for the curator) a transducer-derived / G protein-mimetic peptide that
+    the model has filed as a receptor ligand instead of under signaling partners.
 
-    A peptide whose chain is a G-protein subunit (its polymer description reads as a
-    G-alpha, or its GPCRdb slug is a G-protein alpha/beta/gamma subunit) is a
-    signaling partner, not an agonist. This catches a G-alpha C-terminal /
-    transducin-mimetic peptide mislabelled as e.g. role 'Agonist', which would
-    otherwise sit next to the genuine small-molecule agonist.
+    A peptide whose chain is a G protein subunit (its sequence carries the conserved
+    G-alpha alpha5 C-terminal motif, its polymer description reads as a G-alpha, or
+    its GPCRdb slug is a G protein alpha/beta/gamma subunit) is a signaling partner,
+    not a receptor ligand. This catches a G-alpha C-terminal / transducin-mimetic
+    peptide -- or a beta/gamma subunit -- that the model dropped into the ligand
+    bucket.
 
-    Fires only when the model committed to a functional pocket role; an honest
-    'unknown' / 'Apo' / absent role is never flagged (abstaining is not an error).
-    Warning-only -- the ligand is left untouched for the curator to decide.
+    The IDENTITY (a G protein piece sitting in ``ligands``) is the mis-filing, so
+    the check fires regardless of the annotated role: a functional pocket role
+    (e.g. 'Agonist') AND an honest 'unknown' / absent / 'Apo' role both flag, since
+    the fragment does not belong in ``ligands`` either way. A genuine peptide-hormone
+    agonist on a non-G protein chain (GLP-1, alpha-MSH) is not a G protein fragment
+    and is never flagged. Warning-only -- the ligand is left untouched for the
+    curator to decide (the aggregator's relocator moves the unambiguous cases).
     """
     for lig in ligands:
         if not isinstance(lig, dict):
@@ -323,31 +351,29 @@ def _warn_on_g_protein_peptide_as_ligand(
         lig_type = (lig.get("type") or "").strip().lower()
         if lig_type not in (LIGAND_TYPE_PEPTIDE, LIGAND_TYPE_PROTEIN):
             continue
-        role = ((lig.get("role") or {}).get("value") or "").strip()
-        if role not in _FUNCTIONAL_POCKET_ROLES:
-            continue
 
         chain_id = (lig.get("chain_id") or "").strip()
         matched_desc: str | None = None
         for c in (c.strip() for c in chain_id.split(",")):
             poly = poly_by_chain.get(c)
-            if not poly:
-                continue
-            desc = (poly.get("description") or "").strip()
-            slug = (poly.get("slug") or "").strip().lower()
-            if is_g_alpha_description(desc) or slug.startswith(G_PROTEIN_SUBUNIT_SLUG_PREFIXES):
-                matched_desc = desc
+            if poly and _chain_is_g_protein_fragment(poly):
+                matched_desc = (poly.get("description") or "").strip()
                 break
         if matched_desc is None:
             continue
 
+        role = ((lig.get("role") or {}).get("value") or "").strip()
+        role_clause = (
+            f"is annotated as role '{role}'"
+            if role in _FUNCTIONAL_POCKET_ROLES
+            else "has no functional receptor-ligand role"
+        )
         name = lig.get("name") or lig.get("chem_comp_id") or "?"
         warnings.append(
             f"{ALERT_PREFIX_G_PROTEIN_LIGAND} at 'ligands': ligand '{name}' "
             f"(chain {chain_id}) is described as '{matched_desc}', a "
-            f"G-protein-derived / transducer-mimetic peptide, but is annotated as "
-            f"role '{role}'. Verify it belongs under signaling partners, not as a "
-            f"receptor agonist."
+            f"G protein-derived / transducer-mimetic peptide, but {role_clause}. "
+            f"Verify it belongs under signaling partners, not in the ligand list."
         )
 
 

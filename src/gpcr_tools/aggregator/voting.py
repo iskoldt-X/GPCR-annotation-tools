@@ -16,6 +16,7 @@ from gpcr_tools.config import (
     LIST_ITEM_KEY_FIELDS,
     SOFT_FIELD_KEYS,
     VOTE_NEAR_TIE_MARGIN,
+    is_empty_key,
 )
 from gpcr_tools.config import (
     list_item_identity as _list_item_identity,
@@ -41,7 +42,7 @@ def _first_list_entry(container: Any, key: str) -> dict[str, Any]:
 
 
 def extract_ai_g_protein(data: dict[str, Any]) -> str | None:
-    """Safely extract the G-protein alpha-subunit UniProt entry name.
+    """Safely extract the G protein alpha-subunit UniProt entry name.
 
     Uses the None-safe ``(x.get(k) or {})`` chain at every level so a missing
     or null intermediate node never raises.
@@ -117,7 +118,15 @@ def get_majority_votes(
         return None, {}
 
     # --- List-of-dict branch (e.g. ligands, auxiliary_proteins) ---
-    if isinstance(first_item, list) and first_item and isinstance(first_item[0], dict):
+    # Select this branch from the FIRST NON-EMPTY LIST among the runs, not
+    # ``values[0]``: a run may omit a list field (``None``) or emit an empty
+    # list, and such a run can sort first (e.g. run_1 whose ligand_copies was
+    # dropped upstream). Keying off ``values[0]`` alone would misroute the whole
+    # field to the scalar JSON tally, collapsing a genuine per-copy split into one
+    # atomic value and hiding the disagreement. The inner loop already tolerates
+    # the None/empty runs via ``continue``.
+    first_list = next((v for v in values if isinstance(v, list) and v), None)
+    if first_list is not None and isinstance(first_list[0], dict):
         key_field = _resolve_key_field(path)
 
         if key_field:
@@ -306,7 +315,24 @@ def find_discrepancies(
             all_votes_val = (
                 (all_votes_data.get(key) or {}) if isinstance(all_votes_data, dict) else {}
             )
-            discrepancies.extend(find_discrepancies(run_val, maj_val, all_votes_val, new_path))
+            child = find_discrepancies(run_val, maj_val, all_votes_val, new_path)
+            # A pubchem_id vote controversy cannot encode a real error when the
+            # shipped value is blank (nothing was asserted) or an authoritative
+            # api_pubchem_cid was resolved for this ligand (the CID is settled
+            # outside the vote). Mark only those advisory-only (gating=False) so
+            # they stay visible without blocking accept-all; every other
+            # pubchem_id split keeps gating. api_pubchem_cid is a sibling leaf of
+            # this ligand dict, so it is only in scope at this level.
+            if (
+                key == "pubchem_id"
+                and child
+                and (
+                    is_empty_key(run_val) or not is_empty_key(best_run_data.get("api_pubchem_cid"))
+                )
+            ):
+                for record in child:
+                    record["gating"] = False
+            discrepancies.extend(child)
         return discrepancies
 
     if isinstance(majority_data, list):
@@ -382,27 +408,57 @@ def find_discrepancies(
                 and best_run_data.casefold() == majority_data.casefold()
             ):
                 return discrepancies
-            discrepancies.append(
-                {
+            record = {
+                "path": path,
+                "best_run_value": best_run_data,
+                "majority_vote_value": majority_data,
+                "all_votes": all_votes_data,
+            }
+            # A vote controversy on a terminal ``name`` (a ligand name or an
+            # auxiliary-protein name) is always lexical: the entity identity is
+            # fixed by the group key (het chem_comp_id / aux name key) before the
+            # name leaf is voted, so a differing wording cannot encode a wrong
+            # entity. Mark it advisory-only (gating=False), mirroring the
+            # minority-omission carve-out above, so it stays visible for review
+            # without blocking one-click accept-all.
+            if current_key == "name":
+                record["gating"] = False
+            # A per-copy ``role`` vote controversy (a ligand_copies sidecar row)
+            # cannot encode a shipped error: the CSV Role column is taken from the
+            # compound-level ligand (``ligands[].role``), while a ligand_copies
+            # row's role is read nowhere in the CSV or validation path. Mark it
+            # advisory-only (gating=False), mirroring the name carve-out above, so
+            # it stays visible for review without blocking one-click accept-all.
+            # The compound-level role controversy has terminal key ``value`` (path
+            # ``ligands[...].role.value``), so it is not matched and keeps gating;
+            # per-copy ``site_ref`` (which does drive CSV residue partitioning)
+            # also keeps gating.
+            if current_key == "role" and path.startswith("ligand_copies["):
+                record["gating"] = False
+            discrepancies.append(record)
+        else:
+            margin = _vote_margin(all_votes_data)
+            if margin is not None and margin <= VOTE_NEAR_TIE_MARGIN:
+                record = {
                     "path": path,
                     "best_run_value": best_run_data,
                     "majority_vote_value": majority_data,
                     "all_votes": all_votes_data,
+                    "needs_review": True,
+                    "vote_margin": margin,
                 }
-            )
-        else:
-            margin = _vote_margin(all_votes_data)
-            if margin is not None and margin <= VOTE_NEAR_TIE_MARGIN:
-                discrepancies.append(
-                    {
-                        "path": path,
-                        "best_run_value": best_run_data,
-                        "majority_vote_value": majority_data,
-                        "all_votes": all_votes_data,
-                        "needs_review": True,
-                        "vote_margin": margin,
-                    }
-                )
+                # Same lexical-name carve-out as the differing-value branch: a
+                # near-tie between name wordings cannot change the entity, so
+                # surface it for review without gating accept-all.
+                if current_key == "name":
+                    record["gating"] = False
+                # Same per-copy role carve-out as the differing-value branch: a
+                # near-tie on a ligand_copies row's role cannot change a shipped
+                # value (the CSV role comes from the compound-level ligand), so
+                # surface it for review without gating accept-all.
+                if current_key == "role" and path.startswith("ligand_copies["):
+                    record["gating"] = False
+                discrepancies.append(record)
         return discrepancies
 
     return []
@@ -454,5 +510,32 @@ def flag_low_confidence_consensus(
         if isinstance(aux, dict) and _is_low(aux.get("type")):
             key = _list_item_identity(aux, "name", idx)
             flags.append(_record(f"auxiliary_proteins[{key}].type.value", aux["type"]))
+
+    # Per-copy site/role assignments carry a flat top-level ``confidence`` (the
+    # ligand_copies sidecar row), not the nested ``{value, confidence}`` shape of
+    # the ligands list, so they are checked directly here. A unanimous but
+    # low-confidence per-copy call is still a guess -- surface it on the same
+    # ``ligand_copies[<copy_id>].<field>`` paths the near-tie flag uses, reusing
+    # the existing review path rather than a new mechanism. The one flat
+    # ``confidence`` governs the WHOLE row, so both the site_ref and the role it
+    # produced are low-confidence guesses and each is flagged. The paths match the
+    # discrepancy walker's so the runner's dedupe-by-path keeps a copy already
+    # flagged as a near-tie from being reported twice.
+    for idx, copy_row in enumerate(best_run_data.get("ligand_copies") or []):
+        if isinstance(copy_row, dict) and copy_row.get("confidence") in low_levels:
+            key = _list_item_identity(copy_row, "copy_id", idx)
+            confidence = copy_row.get("confidence")
+            for field in ("site_ref", "role"):
+                value = copy_row.get(field)
+                flags.append(
+                    {
+                        "path": f"ligand_copies[{key}].{field}",
+                        "best_run_value": value,
+                        "majority_vote_value": value,
+                        "all_votes": {},
+                        "needs_review": True,
+                        "low_confidence": confidence,
+                    }
+                )
 
     return flags

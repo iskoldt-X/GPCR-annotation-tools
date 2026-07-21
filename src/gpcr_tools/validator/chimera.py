@@ -1,4 +1,4 @@
-"""G-protein identity verification via alpha5-helix sequence matching.
+"""G protein identity verification via alpha5-helix sequence matching.
 
 The receptor-coupling determinant of a G-alpha subunit is its C-terminal alpha5
 helix. This module compares the alpha5 window of the G-alpha entity found in the
@@ -53,9 +53,9 @@ logger = logging.getLogger(__name__)
 
 # The conserved C-terminus of the G-alpha alpha5 helix -- the receptor-coupling
 # determinant. A synthetic peptide reproducing this tail (an "alpha5 mimetic") is a
-# G-protein-derived fragment, not a receptor agonist, but it is sometimes deposited
+# G protein-derived fragment, not a receptor agonist, but it is sometimes deposited
 # under a BARE SEQUENCE name (e.g. "ILENLKDVGLF peptide CT2") that carries no
-# G-protein wording for the name-based tiers to catch. These motifs are the highly
+# G protein wording for the name-based tiers to catch. These motifs are the highly
 # conserved alpha5 C-terminal tips of the Gi/Gt (transducin) family; they are long
 # and specific enough that a genuine peptide-hormone or small-molecule ligand name
 # will not contain them, so anchoring on them does not create false positives.
@@ -67,7 +67,7 @@ def is_alpha5_mimetic_description(desc: str) -> bool:
 
     Catches the at-risk class that ``is_g_alpha_description`` misses: a G-alpha
     C-terminal ("alpha5") mimetic peptide deposited under a bare-sequence name with
-    no G-protein wording (e.g. "ILENLKDVGLF peptide CT2"). Recognition is anchored
+    no G protein wording (e.g. "ILENLKDVGLF peptide CT2"). Recognition is anchored
     solely on the conserved alpha5 C-terminal motif itself; it is long and specific
     enough that a genuine small-molecule or peptide-hormone ligand name will not
     contain it, so anchoring on it does not create false positives.
@@ -326,7 +326,7 @@ def get_chimera_analysis(
             break
 
     if g_alpha_entity is None:
-        # status already defaults to no-G-protein in _base_result().
+        # status already defaults to no-G protein in _base_result().
         return result
 
     # 2. Get the modelled sequence.

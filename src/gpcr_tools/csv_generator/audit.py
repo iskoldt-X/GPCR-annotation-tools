@@ -15,7 +15,6 @@ from gpcr_tools.csv_generator.ui import console
 def log_audit_trail(pdb_id: str, path: str, action: str, orig_val: Any, final_val: Any) -> None:
     """Append a single audit entry to the JSONL audit trail file."""
     cfg = get_config()
-    cfg.audit_output_dir.mkdir(parents=True, exist_ok=True)
     audit_file = cfg.audit_output_dir / "audit_trail.jsonl"
     entry = {
         "pdb_id": pdb_id,
@@ -26,7 +25,11 @@ def log_audit_trail(pdb_id: str, path: str, action: str, orig_val: Any, final_va
         "final_value": final_val,
     }
     try:
+        # Creating the audit directory can fail on a read-only mount or when a
+        # plain file sits at that path; keep it inside the try so any filesystem
+        # error soft-fails here rather than crashing the whole curate session.
+        cfg.audit_output_dir.mkdir(parents=True, exist_ok=True)
         with open(audit_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
     except Exception as e:
-        console.print(f"[bold red]FATAL: Failed to write audit trail: {e}[/bold red]")
+        console.print(f"[bold red]FATAL: Failed to record audit trail entry: {e}[/bold red]")

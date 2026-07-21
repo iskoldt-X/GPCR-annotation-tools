@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from google.genai import types
 
 ANNOTATION_TOOL = types.Tool(
@@ -114,10 +116,10 @@ ANNOTATION_TOOL = types.Tool(
                                             "type": "string",
                                             "description": (
                                                 "How many GPCR receptor copies form the biological unit, and whether they are the same or different receptors. "
-                                                "Count ONLY the GPCR receptor(s); do NOT count G-protein, arrestin, nanobody, antibody, peptide, or ligand partners — "
+                                                "Count ONLY the GPCR receptor(s); do NOT count G protein, arrestin, nanobody, antibody, peptide, or ligand partners — "
                                                 "they are not receptor protomers. Use the per-chain 7TM status and residue length in the polymer table to tell a true "
                                                 "7TM receptor from a non-receptor partner, and weigh the paper and the (reference-only) author biological assembly.\n"
-                                                "'monomer' = one receptor copy (a single receptor with a G-protein heterotrimer is still 'monomer' — the Gα/β/γ are partners, "
+                                                "'monomer' = one receptor copy (a single receptor with a G protein heterotrimer is still 'monomer' — the Gα/β/γ are partners, "
                                                 "not receptor copies, even when the author assembly is reported as a 'Hetero 5-mer').\n"
                                                 "'homo-dimer' / 'homo-trimer' / 'homo-tetramer' = two / three / four copies of the SAME receptor (e.g. a mGlu2 or CaSR receptor dimer is 'homo-dimer').\n"
                                                 "'hetero-dimer' = two DIFFERENT receptor subunits forming one obligate receptor (e.g. the GABA-B receptor, GBR1 + GBR2).\n"
@@ -174,7 +176,7 @@ ANNOTATION_TOOL = types.Tool(
                         },
                         "ligands": {
                             "type": "array",
-                            "description": "A list of ALL ligands. Must include an 'Apo' entry if no ligand is present. A ligand is any entity — small molecule, peptide, or protein — that binds the receptor and acts on its function (agonist / antagonist / PAM / NAM / allosteric modulator); this includes a functional protein or peptide binder (e.g. a protein agonist such as R-spondin, or an activating antibody/nanobody). A G-protein-derived or transducer-mimetic peptide is not a ligand.",
+                            "description": "A list of ALL ligands. Must include an 'Apo' entry if no ligand is present. A ligand is any entity — small molecule, peptide, or protein — that binds the receptor and acts on its function (agonist / antagonist / PAM / NAM / allosteric modulator); this includes a functional protein or peptide binder (e.g. a protein agonist such as R-spondin, or an activating antibody/nanobody). A G protein-derived or transducer-mimetic peptide is not a ligand.",
                             "items": {
                                 "type": "object",
                                 "properties": {
@@ -204,7 +206,7 @@ ANNOTATION_TOOL = types.Tool(
                                                     "only potentiates or only inhibits the orthosteric response with no intrinsic activation → 'PAM' / 'NAM';\n"
                                                     "blocks from an allosteric site → 'Allosteric antagonist'.\n"
                                                     "Default to 'Allosteric agonist' over 'Ago-PAM' unless the paper explicitly shows both standalone activation and potentiation.\n"
-                                                    "Not a pharmacological ligand (a structural lipid, detergent, or cofactor) → 'Cofactor';\n"
+                                                    "Not a pharmacological ligand (a structural lipid, detergent, bound cofactor, or a structural / counter-ion metal) → 'Cofactor';\n"
                                                     "truly undetermined → 'unknown'.\n"
                                                     "An endogenous peptide or protein hormone binding the extracellular domain (e.g. FSH) is an 'Agonist', not 'Allosteric agonist'."
                                                 ),
@@ -331,7 +333,7 @@ ANNOTATION_TOOL = types.Tool(
                             "properties": {
                                 "g_protein": {
                                     "type": "object",
-                                    "description": "G-protein heterotrimer details. Omit if not present. When only a fragment of the Gα subunit is present — its C-terminal / α5 helix, or a transducer-mimetic peptide that substitutes for the full subunit (e.g. a GαCT peptide) — it still belongs here as the alpha_subunit; record the fragment's UniProt entry name and chain ID in alpha_subunit, and note in the g_protein-level 'note' field that only the C-terminal/α5 fragment is modelled. Do not place such a peptide in ligands or auxiliary_proteins.",
+                                    "description": "G protein heterotrimer details. Omit if not present. When only a fragment of the Gα subunit is present — its C-terminal / α5 helix, or a transducer-mimetic peptide that substitutes for the full subunit (e.g. a GαCT peptide) — it still belongs here as the alpha_subunit; record the fragment's UniProt entry name and chain ID in alpha_subunit, and note in the g_protein-level 'note' field that only the C-terminal/α5 fragment is modelled. Do not place such a peptide in ligands or auxiliary_proteins.",
                                     "properties": {
                                         "alpha_subunit": {
                                             "type": "object",
@@ -496,9 +498,15 @@ ANNOTATION_TOOL = types.Tool(
 PHARMACOLOGICAL_ROLE_CHECK_SCHEMA = types.Schema(
     type=types.Type.OBJECT,
     description=(
-        "Only for a detector-flagged incidental-candidate molecule (e.g. cholesterol, "
-        "palmitate): your judgment of whether it is a functional ligand or an "
-        "incidental / structural component, with the evidence."
+        "Only for a detector-flagged molecule (a lipid, a metal ion, or a molecule "
+        "flagged as sitting on a G protein / transducer chain): your judgment of "
+        "whether THAT molecule is a FUNCTIONAL ligand of THIS receptor or an "
+        "AUXILIARY / structural / counter-ion / transducer-cofactor component, with "
+        "the evidence. Fill it ONLY for the flagged molecule and leave it absent on "
+        "every other ligand -- including the receptor's primary drug. Base it on an "
+        "explicit site / mechanism claim in the paper; when the paper shows no "
+        "functional role for it at this receptor, set is_functional_ligand = false "
+        "and role = Cofactor."
     ),
     properties={
         "is_functional_ligand": types.Schema(
@@ -512,6 +520,95 @@ PHARMACOLOGICAL_ROLE_CHECK_SCHEMA = types.Schema(
         ),
     },
 )
+
+
+def _base_ligand_item_properties() -> dict[str, types.Schema]:
+    """Return the base per-ligand array-item properties (None-safe).
+
+    This is the single source of the ``site_ref`` and ``role`` enums that the
+    per-copy ``ligand_copies`` schema reuses, so the two answer spaces can never
+    drift apart.
+    """
+    declarations = ANNOTATION_TOOL.function_declarations or []
+    params = declarations[0].parameters if declarations else None
+    ligands = (params.properties or {}).get("ligands") if params else None
+    items = ligands.items if ligands is not None else None
+    return (items.properties or {}) if items is not None else {}
+
+
+def build_ligand_copies_schema(copy_ids: Sequence[str]) -> types.Schema:
+    """Build a per-PDB ``ligand_copies`` array schema for *copy_ids*.
+
+    One row per modelled ligand copy in the structure. ``copy_id`` is pinned by
+    enum to exactly this structure's copy identifiers ("<auth_asym_id>:<auth_seq_id>"),
+    so the model assigns a site/role to a fixed roster of copies rather than
+    inventing identities. ``site_ref`` and ``role`` reuse the compound-level ligand
+    enums verbatim, so the per-copy answer space matches the compound-level one.
+
+    Deliberately sets no ``min_items`` / ``max_items``: a fixed-length pin is
+    rejected by the API at higher copy counts, and every copy is instead accounted
+    for by the ``copy_id`` enum (coverage is enforced separately, downstream).
+    """
+    props = _base_ligand_item_properties()
+    site_ref = props.get("site_ref")
+    role = props.get("role")
+    site_ref_enum = list(site_ref.enum or []) if site_ref is not None else []
+    role_value = (role.properties or {}).get("value") if role is not None else None
+    role_enum = list(role_value.enum or []) if role_value is not None else []
+    return types.Schema(
+        type=types.Type.ARRAY,
+        description=(
+            "Per-copy binding-site and role assignment: one entry for each modelled "
+            "ligand copy listed in the LIGAND COPIES block. Provide an entry for every "
+            "listed copy; the copy_id values are fixed by this structure and must be "
+            "reused exactly."
+        ),
+        items=types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                "copy_id": types.Schema(
+                    type=types.Type.STRING,
+                    enum=list(copy_ids),
+                    description=(
+                        "Identifier of the modelled copy, author chain and residue "
+                        "number as '<chain>:<seq>'. Must be one of this structure's "
+                        "listed copies."
+                    ),
+                ),
+                "site_ref": types.Schema(
+                    type=types.Type.STRING,
+                    enum=site_ref_enum,
+                    description=(
+                        "Where this copy sits -- a pure position, with the same meaning "
+                        "and values as the ligand site_ref field. Use 'unknown' when the "
+                        "copy's position is genuinely undetermined."
+                    ),
+                ),
+                "role": types.Schema(
+                    type=types.Type.STRING,
+                    enum=role_enum,
+                    description=(
+                        "This copy's pharmacological role, with the same values as the "
+                        "ligand role field."
+                    ),
+                ),
+                "confidence": types.Schema(
+                    type=types.Type.STRING,
+                    enum=["High", "Medium", "Low"],
+                    description="Confidence level of this per-copy assignment.",
+                ),
+                "evidence": types.Schema(
+                    type=types.Type.STRING,
+                    description=(
+                        "Brief justification for this copy's site_ref / role, from its "
+                        "geometry facts and/or the paper. Optional."
+                    ),
+                ),
+            },
+            required=["copy_id", "site_ref", "role", "confidence"],
+        ),
+    )
+
 
 # No temperature override here: the default model is tuned to run at its own
 # default temperature, and pinning a low value can trigger reasoning loops or

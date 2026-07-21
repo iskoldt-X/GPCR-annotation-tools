@@ -30,6 +30,7 @@ from gpcr_tools.config import (
     GEOMETRY_DUAL_ROLE_POCKET_JACCARD_MAX,
     GEOMETRY_MIN_POCKET_RESIDUES,
     INCIDENTAL_CANDIDATES,
+    ION_COMP_IDS,
     LIGAND_EXCLUDE_LIST,
     LOCUS_LIGANDS,
 )
@@ -78,7 +79,9 @@ def _candidate_comp_ids(enriched_entry: dict[str, Any]) -> set[str]:
     that flag is unreliable (it misses many real ligands), so the geometry gates
     (deep burial + a small copy count + distinct pockets) do the discrimination
     instead: a structural lipid scattered across shallow surface grooves fails the
-    burial gate, and a detergent flood fails the copy-count cap.
+    burial gate, and a detergent flood fails the copy-count cap. Single-atom ions are
+    skipped outright -- burial / pocket geometry cannot discriminate a metal, whose
+    role is judged from the paper rather than from its pocket.
     """
     comp_ids: set[str] = set()
     for entity in enriched_entry.get("nonpolymer_entities") or []:
@@ -89,7 +92,7 @@ def _candidate_comp_ids(enriched_entry: dict[str, Any]) -> set[str]:
         )
         if comp_id:
             comp_ids.add(comp_id)
-    return comp_ids - (LIGAND_EXCLUDE_LIST - INCIDENTAL_CANDIDATES)
+    return comp_ids - (LIGAND_EXCLUDE_LIST - INCIDENTAL_CANDIDATES) - ION_COMP_IDS
 
 
 def _cluster_pockets(group: list[LigandCopyGeometry], chain: str) -> list[list[LigandCopyGeometry]]:

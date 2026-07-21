@@ -2,7 +2,7 @@
 
 Fetches a known two-pocket structure (9IIX: the studied ligand A1AEI modelled in
 two distinct buried pockets on the TAS2R14 chain, one of which contacts the
-G-protein) and confirms the production geometry flags it. Gated on the network so
+G protein) and confirms the production geometry flags it. Gated on the network so
 the unit suite stays offline and fast.
 """
 
@@ -49,5 +49,5 @@ def test_9iix_dual_role_flagged(tmp_path: Path) -> None:
     copies = signal.payload["copies"]
     assert len(copies) == 2
     assert all(c["burial"] >= 0.80 for c in copies)
-    # The orthosteric copy contacts the G-protein (active-state hint).
+    # The orthosteric copy contacts the G protein (active-state hint).
     assert any(c["contacts_partner"] for c in copies)

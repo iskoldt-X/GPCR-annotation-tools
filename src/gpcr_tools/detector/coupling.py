@@ -1,8 +1,8 @@
-"""Pre-annotation G-protein coupling-protomer detector (structure geometry, no AI).
+"""Pre-annotation G protein coupling-protomer detector (structure geometry, no AI).
 
 A Class C receptor is an obligate dimer, and only ONE protomer engages the G
 protein. In a heterodimer that coupling protomer is often NOT the agonist-binding
-one (GABA-B: GABBR1 binds the agonist in its VFT, GABBR2 is the only G-protein
+one (GABA-B: GABBR1 binds the agonist in its VFT, GABBR2 is the only G protein
 coupler), so "which protomer is primary/active" cannot be read off the ligand. It
 can be read off the coordinates: the G-alpha contacts exactly one receptor 7TM, so
 the protomer with the G-alpha interface is the coupling (active) one.
@@ -91,7 +91,7 @@ def detect_coupling_protomer(
     enriched_entry: dict[str, Any],
     cache_dir: Path,
 ) -> list[DetectSignal]:
-    """One advisory signal naming the G-protein-coupling receptor protomer.
+    """One advisory signal naming the G protein-coupling receptor protomer.
 
     Fires only when the structure has a G-alpha chain and >= 2 receptor protomer
     chains (a dimer to disambiguate) and the geometry resolves a single coupling
@@ -130,7 +130,7 @@ def detect_coupling_protomer(
             target_ref=_COUPLING_LOCUS,
             summary=(
                 f"The G protein engages receptor chain {top_chain} ({slug}); that "
-                f"protomer is the G-protein-coupling (active) protomer of the dimer. "
+                f"protomer is the G protein-coupling (active) protomer of the dimer. "
                 f"In a heterodimer this need not be the agonist-binding protomer."
             ),
             payload={

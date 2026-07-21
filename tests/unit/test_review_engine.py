@@ -6,6 +6,7 @@ Tests focus on controversy detection, auto-resolve, and significance checks.
 import pytest
 
 from gpcr_tools import config
+from gpcr_tools.csv_generator.exceptions import ReviewAbortedError
 from gpcr_tools.csv_generator.review_engine import (
     _list_item_path,
     _resolve_list_key_field,
@@ -13,6 +14,9 @@ from gpcr_tools.csv_generator.review_engine import (
     has_downstream_controversy,
     has_gating_controversy,
     is_controversy_significant,
+    review_leaf,
+    review_node,
+    review_toplevel_blocks,
 )
 
 
@@ -214,3 +218,283 @@ class TestConfidenceStyle:
         from gpcr_tools.csv_generator.review_engine import _confidence_style
 
         assert _confidence_style("Medium") == "warning"
+
+
+class _ScriptedResponses:
+    """Deterministic stand-in for a monkeypatched Prompt.ask / Confirm.ask.
+
+    Each call pops the next scripted response; raises if the queue runs dry.
+    """
+
+    def __init__(self, responses: list) -> None:
+        self._responses = list(responses)
+
+    def __call__(self, *args, **kwargs):
+        assert self._responses, f"scripted responses exhausted: args={args}, kwargs={kwargs}"
+        return self._responses.pop(0)
+
+
+class TestNullLeafAcceptedNotAborted:
+    """A JSON ``null`` leaf accepted during review must survive as ``None`` in the
+    result, never be mistaken for the 'q' quit signal. Quitting raises
+    ``ReviewAbortedError`` (a control-flow signal) so the two can no longer collide
+    on a bare ``return None``.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _silence_audit(self, monkeypatch):
+        # These tests assert value-shape preservation, not audit content. The
+        # accept path calls log_audit_trail -> get_config() (default workspace
+        # /workspace), so no-op it to keep the tests hermetic and off any real
+        # workspace's audit trail.
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.log_audit_trail",
+            lambda *a, **k: None,
+        )
+
+    def test_deep_review_dict_preserves_null_leaf(self, monkeypatch):
+        # A non-blacklisted leaf whose value is null, accepted with "y", must be
+        # kept as None in the returned dict — not collapse the whole node to None.
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Prompt.ask",
+            _ScriptedResponses(["y"]),
+        )
+        node = {"annotation_note": None}
+        result = review_node(
+            "XXXX", node, {}, path="key_findings", force_deep=True, validation_data={}
+        )
+        assert result == {"annotation_note": None}
+        assert result["annotation_note"] is None
+
+    def test_deep_review_list_row_preserves_null_soft_fields(self, monkeypatch):
+        # A ligand row carrying the site-undetermined "unknown" shape (soft
+        # fields left null == "not assessed"), accepted leaf-by-leaf, must be
+        # preserved intact rather than aborting the review at the first null.
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Prompt.ask",
+            _ScriptedResponses(["y", "y", "y"]),
+        )
+        ligands = [
+            {
+                "chem_comp_id": "CA",
+                "site_ref_justification": None,
+                "pharmacological_role_check": None,
+            }
+        ]
+        result = review_node(
+            "XXXX", ligands, {}, path="ligands", force_deep=True, validation_data={}
+        )
+        assert result == [
+            {
+                "chem_comp_id": "CA",
+                "site_ref_justification": None,
+                "pharmacological_role_check": None,
+            }
+        ]
+        assert result[0]["site_ref_justification"] is None
+        assert result[0]["pharmacological_role_check"] is None
+
+    def test_review_leaf_quit_raises(self, monkeypatch):
+        # The genuine quit path is now an exception, not a None return.
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Prompt.ask",
+            _ScriptedResponses(["q"]),
+        )
+        with pytest.raises(ReviewAbortedError):
+            review_leaf("XXXX", "some-value", {}, "receptor_info.chain_id", {})
+
+    def test_toplevel_quit_at_leaf_raises(self, monkeypatch):
+        # Declining a clean block enters deep review; quitting at a leaf aborts
+        # the whole review via ReviewAbortedError rather than returning None.
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Confirm.ask",
+            _ScriptedResponses([False]),
+        )
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Prompt.ask",
+            _ScriptedResponses(["q"]),
+        )
+        main_data = {"structure_info": {"method": "X-RAY DIFFRACTION"}}
+        with pytest.raises(ReviewAbortedError):
+            review_toplevel_blocks("XXXX", main_data, {}, {})
+
+
+class TestLigandCopiesReviewable:
+    """The per-copy binding-site sidecar (``ligand_copies``) is reviewed as a
+    top-level block, so the review walker now descends into it: a contested
+    per-copy ``site_ref`` is reachable and the curator's choice is captured in the
+    returned data; a null soft field survives an accept; and a clean block ships
+    verbatim (or auto-accepts in fix mode) without a spurious prompt.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _silence_audit(self, monkeypatch):
+        # The accept/edit paths call log_audit_trail -> get_config() (default
+        # workspace), so no-op it to keep the tests hermetic and off any real
+        # workspace's audit trail. (Same pattern as TestNullLeafAcceptedNotAborted.)
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.log_audit_trail",
+            lambda *a, **k: None,
+        )
+
+    def test_contested_site_ref_reachable_and_edit_captured(self, monkeypatch):
+        # A per-copy site_ref where the best run disagrees with the majority vote --
+        # the same vote-controversy shape aggregation records for a real
+        # disagreement (best_run_value != majority_vote_value). Because the values
+        # differ, the contested leaf is offered with NO pre-selected default, so a
+        # bare Enter cannot commit it and the curator must choose explicitly.
+        controversies = {
+            "ligand_copies[R:602].site_ref": {
+                "path": "ligand_copies[R:602].site_ref",
+                "best_run_value": "orthosteric",
+                "majority_vote_value": "intracellular",
+                "all_votes": {"intracellular": 3, "orthosteric": 2},
+            }
+        }
+        main_data = {
+            "ligand_copies": [
+                {"copy_id": "R:602", "site_ref": "orthosteric"},
+            ]
+        }
+        # Scripted interaction, in order:
+        #   "r" -> at the ligand_copies block, choose to review it (not accept-all).
+        #   "y" -> accept the clean copy_id leaf as-is.
+        #   "1" -> at the site_ref CONTROVERSY, pick option 1. Candidates sort by
+        #          vote count, so the 3-vote "intracellular" is option 1; selecting
+        #          it changes the copy's site_ref away from the original
+        #          "orthosteric" -- a deliberate choice, since the differing values
+        #          suppress the default.
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Prompt.ask",
+            _ScriptedResponses(["r", "y", "1"]),
+        )
+        # Completing the call (no ReviewAbortedError) is itself the "did not abort"
+        # assertion; the edited value proves the walker reached the contested leaf.
+        final_data = review_toplevel_blocks("XXXX", main_data, controversies, {})
+        assert final_data["ligand_copies"] == [{"copy_id": "R:602", "site_ref": "intracellular"}]
+        assert final_data["ligand_copies"][0]["site_ref"] == "intracellular"
+
+    def test_null_soft_field_row_accepted_returns_dict_not_abort(self, monkeypatch):
+        # A per-copy row whose soft fields are null (role/evidence == None, the
+        # "not assessed" shape) must survive a deep review: a null leaf accepted
+        # with "y" is kept as None, never mistaken for the quit signal. Guards that
+        # the null-vs-quit fix covers this now-reachable block.
+        main_data = {
+            "ligand_copies": [
+                {"copy_id": "R:602", "role": None, "evidence": None},
+            ]
+        }
+        # "no" declines the clean-block accept, entering a deep review of every
+        # leaf; then "y", "y" accept the copy_id and the null role leaf. (evidence
+        # is a soft/blacklisted field and passes through untouched, no prompt.)
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Confirm.ask",
+            _ScriptedResponses([False]),
+        )
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Prompt.ask",
+            _ScriptedResponses(["y", "y"]),
+        )
+        final_data = review_toplevel_blocks("XXXX", main_data, {}, {})
+        assert final_data["ligand_copies"] == [{"copy_id": "R:602", "role": None, "evidence": None}]
+        assert final_data["ligand_copies"][0]["role"] is None
+
+    def test_clean_block_passes_through_without_prompt(self, monkeypatch):
+        # A clean ligand_copies block (no controversy, no validation alert) is a
+        # derived sidecar with nothing for a curator to decide, so it ships
+        # verbatim with NO "Accept?" prompt. Both Prompt.ask and Confirm.ask are
+        # scripted empty, so ANY prompt would exhaust the queue and fail the test.
+        block = [{"copy_id": "R:602", "site_ref": "orthosteric"}]
+        main_data = {"ligand_copies": [dict(block[0])]}
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Confirm.ask",
+            _ScriptedResponses([]),  # asserts if a clean-block accept prompt fires
+        )
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Prompt.ask",
+            _ScriptedResponses([]),  # asserts if any per-leaf prompt fires
+        )
+        final_data = review_toplevel_blocks("XXXX", main_data, {}, {})
+        assert final_data["ligand_copies"] == block
+
+    def test_clean_primary_block_still_prompts(self, monkeypatch):
+        # Regression: silencing the derived ligand_copies sidecar must NOT silence
+        # the primary annotation blocks. A clean structure_info block still emits
+        # its "Accept?" confirm -- proven by requiring the scripted confirm to be
+        # consumed (an un-drained queue would mean the prompt never fired).
+        confirms = _ScriptedResponses([True])
+        monkeypatch.setattr("gpcr_tools.csv_generator.review_engine.Confirm.ask", confirms)
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Prompt.ask",
+            _ScriptedResponses([]),
+        )
+        block = {"method": "X-RAY DIFFRACTION"}
+        main_data = {"structure_info": dict(block)}
+        final_data = review_toplevel_blocks("XXXX", main_data, {}, {})
+        assert final_data["structure_info"] == block
+        # The Accept? confirm was actually offered (scripted response consumed).
+        assert confirms._responses == []
+
+    def test_skip_requires_confirmation_and_drops_block(self, monkeypatch):
+        # Explicitly skipping the sidecar discards its per-copy site partitioning,
+        # so the skip must be confirmed. A contested block reaches the interactive
+        # menu; choosing "s" then confirming drops it from the shipped data.
+        controversies = {
+            "ligand_copies[R:602].site_ref": {
+                "path": "ligand_copies[R:602].site_ref",
+                "best_run_value": "orthosteric",
+                "majority_vote_value": "intracellular",
+                "all_votes": {"intracellular": 3, "orthosteric": 2},
+            }
+        }
+        main_data = {"ligand_copies": [{"copy_id": "R:602", "site_ref": "orthosteric"}]}
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Prompt.ask",
+            _ScriptedResponses(["s"]),
+        )
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Confirm.ask",
+            _ScriptedResponses([True]),  # yes, really skip
+        )
+        final_data = review_toplevel_blocks("XXXX", main_data, controversies, {})
+        assert "ligand_copies" not in final_data
+
+    def test_skip_declined_keeps_block(self, monkeypatch):
+        # Declining the skip confirmation returns to the action menu; the block is
+        # not dropped. Here the curator then accepts it, so it ships intact.
+        controversies = {
+            "ligand_copies[R:602].site_ref": {
+                "path": "ligand_copies[R:602].site_ref",
+                "best_run_value": "orthosteric",
+                "majority_vote_value": "intracellular",
+                "all_votes": {"intracellular": 3, "orthosteric": 2},
+            }
+        }
+        block = [{"copy_id": "R:602", "site_ref": "orthosteric"}]
+        main_data = {"ligand_copies": [dict(block[0])]}
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Prompt.ask",
+            _ScriptedResponses(["s", "a"]),  # skip, (decline), then accept block
+        )
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Confirm.ask",
+            _ScriptedResponses([False]),  # no, do not skip
+        )
+        final_data = review_toplevel_blocks("XXXX", main_data, controversies, {})
+        assert final_data["ligand_copies"] == block
+
+    def test_clean_block_auto_accepts_in_fix_mode_without_prompt(self, monkeypatch):
+        # In fix mode a clean block auto-accepts silently: NEITHER a confirm NOR a
+        # per-leaf prompt should fire (both scripted empty -> assert if called).
+        block = [{"copy_id": "R:602", "site_ref": "orthosteric"}]
+        main_data = {"ligand_copies": [dict(block[0])]}
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Confirm.ask",
+            _ScriptedResponses([]),
+        )
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Prompt.ask",
+            _ScriptedResponses([]),
+        )
+        final_data = review_toplevel_blocks("XXXX", main_data, {}, {}, fix_mode=True)
+        assert final_data["ligand_copies"] == block

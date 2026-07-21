@@ -56,7 +56,10 @@ class TestCSVPipeline:
             reader = csv.DictReader(f, delimiter="\t")
             rows = list(reader)
         assert len(rows) == 1
-        assert rows[0]["Name"] == "Adenosine"
+        # Name carries the canonical chemical-component code; the descriptive name
+        # is now in Title.
+        assert rows[0]["Name"] == "ADN"
+        assert rows[0]["Title"] == "Adenosine"
         assert rows[0]["SMILES"] != ""
 
         gp_path = csv_dir / "g_proteins.csv"
@@ -65,7 +68,7 @@ class TestCSVPipeline:
             reader = csv.DictReader(f, delimiter="\t")
             rows = list(reader)
         assert len(rows) == 1
-        assert rows[0]["Alpha_UniProt"] == "gnas2_human"
+        assert rows[0]["Alpha_identity"] == "gnas2_human"
 
         update_processed_log("TEST1", "completed")
 

@@ -5,12 +5,16 @@ from pathlib import Path
 import pytest
 
 from gpcr_tools.config import (
+    AUX_TYPE_MAP,
+    HARD_DROP,
     INCIDENTAL_CANDIDATES,
     LIGAND_EXCLUDE_LIST,
+    MECHANICAL_AUX,
     SOFT_FIELD_KEYS,
     WorkspaceConfig,
     ensure_alert_prefix,
     get_config,
+    gpcrdb_aux_type_for,
     list_item_identity,
     reset_config,
     safe_name_normalize,
@@ -86,6 +90,25 @@ class TestListItemIdentity:
         # must key apart even after normalization.
         a = list_item_identity({"chem_comp_id": "None", "name": "Compound 28"}, "chem_comp_id", 0)
         b = list_item_identity({"chem_comp_id": "None", "name": "Compound 29"}, "chem_comp_id", 1)
+        assert a != b
+
+    def test_ligand_copy_keyed_by_copy_id_alone(self) -> None:
+        # A per-copy row (key_field == "copy_id") keys on the copy identifier
+        # ALONE. Its site_ref must NOT be appended -- otherwise one physical copy
+        # whose site churns across runs would split into more than one group.
+        assert (
+            list_item_identity({"copy_id": "R:602", "site_ref": "orthosteric"}, "copy_id", 0)
+            == "R:602"
+        )
+        assert (
+            list_item_identity({"copy_id": "R:602", "site_ref": "intracellular"}, "copy_id", 1)
+            == "R:602"
+        )
+
+    def test_distinct_ligand_copies_stay_distinct(self) -> None:
+        # Two different physical copies (distinct copy_id) never merge.
+        a = list_item_identity({"copy_id": "R:601", "site_ref": "orthosteric"}, "copy_id", 0)
+        b = list_item_identity({"copy_id": "R:602", "site_ref": "orthosteric"}, "copy_id", 1)
         assert a != b
 
 
@@ -210,11 +233,51 @@ class TestLigandLists:
             assert code in INCIDENTAL_CANDIDATES
             assert code not in LIGAND_EXCLUDE_LIST
 
-    def test_incidental_override_member_present(self) -> None:
-        # The incidental fork un-strips a member that is also on the exclude
-        # list (PLM); that override must keep at least one such member so the
-        # bypass path stays exercised.
-        assert "PLM" in (INCIDENTAL_CANDIDATES & LIGAND_EXCLUDE_LIST)
+    def test_incidental_candidates_never_hard_excluded(self) -> None:
+        # Incidental candidates must reach the model for a role judgment, so no
+        # incidental candidate may also sit on the hard exclude list -- the two
+        # sets are disjoint. (The prompt-builder un-strip step and the detector
+        # ``- INCIDENTAL_CANDIDATES`` subtractions are defensive guards should the
+        # sets ever overlap again; this invariant asserts they do not today.)
+        assert not (INCIDENTAL_CANDIDATES & LIGAND_EXCLUDE_LIST)
+
+
+class TestAuxiliaryLaneConfig:
+    """The exclude-list split (HARD_DROP + MECHANICAL_AUX) and the aux type map."""
+
+    def test_hard_drop_and_mechanical_aux_are_disjoint(self) -> None:
+        assert HARD_DROP.isdisjoint(MECHANICAL_AUX)
+
+    def test_both_lanes_share_the_model_invisible_gate(self) -> None:
+        # HARD_DROP and MECHANICAL_AUX both sit behind the strip gate; they only
+        # diverge at the OUTPUT (nothing vs a catalogued auxiliary row).
+        assert HARD_DROP <= LIGAND_EXCLUDE_LIST
+        assert MECHANICAL_AUX <= LIGAND_EXCLUDE_LIST
+
+    def test_every_mechanical_code_has_an_aux_type(self) -> None:
+        # A mechanical molecule is catalogued deterministically, so it must carry
+        # a fixed auxiliary type.
+        missing = sorted(code for code in MECHANICAL_AUX if code not in AUX_TYPE_MAP)
+        assert not missing, f"mechanical codes with no aux type: {missing}"
+
+    def test_aux_type_map_values_are_valid(self) -> None:
+        assert set(AUX_TYPE_MAP.values()) <= {"Ion", "Lipid", "Detergent", "Other"}
+
+    def test_aux_type_for_fixed_codes(self) -> None:
+        assert gpcrdb_aux_type_for("NA") == "Ion"
+        assert gpcrdb_aux_type_for("LMT") == "Detergent"
+        assert gpcrdb_aux_type_for("OLC") == "Lipid"
+        assert gpcrdb_aux_type_for("NAG") == "Other"
+        assert gpcrdb_aux_type_for("GTP") == "Other"
+
+    def test_aux_type_for_known_lipid_falls_back_to_lipid(self) -> None:
+        # A known lipid not fixed in AUX_TYPE_MAP is still typed Lipid.
+        assert gpcrdb_aux_type_for("CLR") == "Lipid"
+
+    def test_aux_type_for_unknown_defaults_to_other(self) -> None:
+        assert gpcrdb_aux_type_for("ZZZ") == "Other"
+        assert gpcrdb_aux_type_for(None) == "Other"
+        assert gpcrdb_aux_type_for("") == "Other"
 
 
 @pytest.fixture(autouse=True)

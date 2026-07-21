@@ -8,6 +8,7 @@ tests cover the enriched parsing and the per-copy evidence orchestration.
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 
 import gemmi
@@ -82,12 +83,13 @@ class TestEnrichedParsing:
 def stub_pipeline(monkeypatch: pytest.MonkeyPatch):
     """Stub the I/O so detect_site_refs exercises only its orchestration.
 
-    Set the fixture list to ``(enclosure, evidence_or_None)`` per copy: the stub
-    feeds each copy's enclosure through ligand_contact_residues and its evidence
-    dict (or None for a too-sparse copy) through _copy_evidence. membrane_frame is
-    stubbed to None so the facing/depth facts are skipped in these tests.
+    Set the fixture list to ``(auth_chain, auth_seq_id, enclosure, evidence_or_None)``
+    per copy: the stub feeds each copy's identifier + enclosure through
+    ligand_contact_residues and its evidence dict (or None for a too-sparse copy)
+    through _copy_evidence. membrane_frame is stubbed to None so the facing/depth
+    facts are skipped in these tests.
     """
-    copies: list[tuple[float, dict | None]] = []
+    copies: list[tuple[str, int, float, dict | None]] = []
     monkeypatch.setattr(sr, "load_structure", lambda *a, **k: object())
     monkeypatch.setattr(
         sr, "fetch_polymer_alignment", lambda *a, **k: {"R": {"Q9NYV8": [(1, 1, 400)]}}
@@ -109,7 +111,7 @@ _VEST = {"generic_numbers": ["45x52"], "segments": ["ECL2"], "core_hits": 0, "ma
 
 class TestDetectSiteRefs:
     def test_single_copy_signal(self, stub_pipeline, tmp_path: Path) -> None:
-        stub_pipeline[:] = [(0.92, dict(_ORTH))]
+        stub_pipeline[:] = [("R", 602, 0.92, dict(_ORTH))]
         signals = sr.detect_site_refs("X", _entry("LIG"), tmp_path)
         assert len(signals) == 1
         copies = signals[0].payload["copies"]
@@ -117,32 +119,50 @@ class TestDetectSiteRefs:
         assert copies[0]["generic_numbers"] == ["3x33", "6x51"]
         assert copies[0]["core_hits"] == 2
         assert copies[0]["enclosure"] == 0.92  # the burial is recorded as an enclosure fact
+        assert copies[0]["copy_id"] == "R:602"  # the copy's own identifier
 
     def test_multi_copy_facts_not_collapsed(self, stub_pipeline, tmp_path: Path) -> None:
         # Both copies' facts are emitted (distinct sites); the model decides whether
         # to emit one entry per site -- the detector no longer makes that call.
-        stub_pipeline[:] = [(0.95, dict(_ORTH)), (0.9, dict(_VEST))]
+        stub_pipeline[:] = [("R", 601, 0.95, dict(_ORTH)), ("R", 602, 0.9, dict(_VEST))]
         signals = sr.detect_site_refs("X", _entry("LIG"), tmp_path)
         assert len(signals) == 1
         copies = signals[0].payload["copies"]
         assert len(copies) == 2
         assert {c["segments"][0] for c in copies} == {"TM3", "ECL2"}
+        # Each copy carries its own identifier, keyed to the copy that produced it.
+        assert {c["copy_id"] for c in copies} == {"R:601", "R:602"}
 
     def test_shallow_copy_still_emitted_as_fact(self, stub_pipeline, tmp_path: Path) -> None:
         # A low-enclosure copy is no longer gated out; its enclosure is just a fact
         # (the model reads low enclosure + lipid-facing as a structural-lipid hint).
-        stub_pipeline[:] = [(0.40, dict(_VEST))]
+        stub_pipeline[:] = [("R", 601, 0.40, dict(_VEST))]
         signals = sr.detect_site_refs("X", _entry("CLR"), tmp_path)
         assert signals[0].payload["copies"][0]["enclosure"] == 0.40
 
     def test_sparse_copy_skipped(self, stub_pipeline, tmp_path: Path) -> None:
         # A copy with too few mapped contacts (_copy_evidence -> None) is dropped.
-        stub_pipeline[:] = [(0.9, dict(_ORTH)), (0.5, None)]
+        stub_pipeline[:] = [("R", 601, 0.9, dict(_ORTH)), ("R", 602, 0.5, None)]
         signals = sr.detect_site_refs("X", _entry("LIG"), tmp_path)
         assert len(signals[0].payload["copies"]) == 1
 
+    def test_sparse_drop_does_not_misalign_copy_ids(self, stub_pipeline, tmp_path: Path) -> None:
+        # A middle copy dropped for sparse contacts must NOT shift the copy identifiers of
+        # the copies that survive: each copy identifier stays bound to the copy that
+        # produced it (a key relationship, never a positional one).
+        stub_pipeline[:] = [
+            ("R", 601, 0.9, dict(_ORTH)),
+            ("R", 602, 0.5, None),  # sparse -> dropped
+            ("R", 603, 0.9, dict(_VEST)),
+        ]
+        signals = sr.detect_site_refs("X", _entry("LIG"), tmp_path)
+        copies = signals[0].payload["copies"]
+        assert len(copies) == 2
+        # The survivors keep THEIR own copy identifiers; the dropped R:602 appears nowhere.
+        assert [c["copy_id"] for c in copies] == ["R:601", "R:603"]
+
     def test_all_sparse_emits_no_signal(self, stub_pipeline, tmp_path: Path) -> None:
-        stub_pipeline[:] = [(0.9, None), (0.8, None)]
+        stub_pipeline[:] = [("R", 601, 0.9, None), ("R", 602, 0.8, None)]
         assert sr.detect_site_refs("X", _entry("LIG"), tmp_path) == []
 
     def test_no_gpcr_chain_short_circuits(self, tmp_path: Path) -> None:
@@ -246,7 +266,7 @@ class TestResolveOrientation:
         monkeypatch.setattr(sr, "_galpha_centroid", lambda *a, **k: galpha)
 
     def test_landmarks_orient_without_g_protein(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Apo / no-G-protein: the receptor's own landmarks at z=-30 orient it.
+        # Apo / no-G protein: the receptor's own landmarks at z=-30 orient it.
         self._patch_references(monkeypatch, gemmi.Position(0.0, 0.0, -30.0), None)
         sign, note = sr._resolve_orientation(object(), _FRAME, {}, {}, set())
         assert sign == -1
@@ -321,7 +341,7 @@ class TestSidePropagation:
         )
         monkeypatch.setattr(sr, "membrane_frame", lambda *a, **k: _FRAME)
         monkeypatch.setattr(sr, "ligand_facing_fractions", lambda *a, **k: [0.9])
-        monkeypatch.setattr(sr, "ligand_contact_residues", lambda *a, **k: [(0.85, [])])
+        monkeypatch.setattr(sr, "ligand_contact_residues", lambda *a, **k: [("B", 1, 0.85, [])])
         monkeypatch.setattr(sr, "_copy_evidence", lambda *a, **k: dict(_ORTH))
         monkeypatch.setattr(sr, "galpha_auth_chains", lambda *a, **k: set())
         monkeypatch.setattr(sr, "ligand_membrane_depth", lambda *a, **k: (-24.0, False))
@@ -360,7 +380,143 @@ class TestSidePropagation:
     ) -> None:
         # A soft orientation note (e.g. G-alpha vs landmark disagreement) surfaces
         # in the debug log so the cross-check caveat is observable.
-        note = "the G-protein position disagrees with the receptor intracellular landmarks"
+        note = "the G protein position disagrees with the receptor intracellular landmarks"
         with caplog.at_level(logging.DEBUG, logger="gpcr_tools.detector.site_ref"):
             self._run(monkeypatch, tmp_path, ic_sign=-1, note=note)
         assert note in caplog.text
+
+
+def _tm_bundle_chain(name: str) -> gemmi.Chain:
+    """A receptor chain whose Cα form rings around the z-axis at three depths.
+
+    The rings sit inside the bilayer band, so ``_bundle_center`` resolves the
+    bundle axis (near the z-axis) and the ring residues are the contact partners
+    for the ligand copies. Radial position relative to the axis is what decides
+    pocket-facing (inner) vs lipid-facing (outer).
+    """
+    chain = gemmi.Chain(name)
+    seq = 1
+    radius = 8.0
+    for z in (-10.0, 8.0, 0.0):
+        for i in range(12):
+            angle = 2.0 * math.pi * i / 12
+            x, y = radius * math.cos(angle), radius * math.sin(angle)
+            res = gemmi.Residue()
+            res.name = "ALA"
+            res.seqid = gemmi.SeqId(seq, " ")
+            res.het_flag = "A"
+            seq += 1
+            for atom_name, element in (("N", "N"), ("CA", "C"), ("C", "C"), ("O", "O")):
+                atom = gemmi.Atom()
+                atom.name = atom_name
+                atom.pos = gemmi.Position(x, y, z)
+                atom.element = gemmi.Element(element)
+                res.add_atom(atom)
+            chain.add_residue(res)
+    return chain
+
+
+def _residue(name: str, seq_id: int, het_flag: str, x: float, y: float, z: float) -> gemmi.Residue:
+    """A backbone residue (N, CA, C, O) named *name* centred near (x, y, z)."""
+    res = gemmi.Residue()
+    res.name = name
+    res.seqid = gemmi.SeqId(seq_id, " ")
+    res.het_flag = het_flag
+    for atom_name, dx, element in (
+        ("N", 0.0, "N"),
+        ("CA", 0.3, "C"),
+        ("C", 0.6, "C"),
+        ("O", 0.9, "O"),
+    ):
+        atom = gemmi.Atom()
+        atom.name = atom_name
+        atom.pos = gemmi.Position(x + dx, y, z)
+        atom.element = gemmi.Element(element)
+        res.add_atom(atom)
+    return res
+
+
+def _backbone_glu_decoy_chain(name: str, x: float, y: float, z: float) -> gemmi.Chain:
+    """A polymer chain whose only glutamate is a decoy backbone GLU near (x, y, z).
+
+    The chain is padded with a few distant alanines so ``setup_entities`` classifies
+    it as a polymer (making the GLU ``is_protein_atom`` True). The decoy GLU has no
+    other glutamate within contact range, so if the facing loop ever treated it as a
+    ligand copy its primary contact chain is the receptor bundle -- and, placed
+    radially OUTSIDE that bundle, it reads lipid-facing (0.0), distinct from the true
+    ligand's pocket-facing (1.0). This makes a facing desync observable.
+    """
+    chain = gemmi.Chain(name)
+    for i in range(3):  # distant alanines so the chain is a polymer
+        chain.add_residue(_residue("ALA", i + 1, "A", 50.0 + i * 3.0, 50.0, 0.0))
+    chain.add_residue(_residue("GLU", 4, "A", x, y, z))
+    return chain
+
+
+def _free_glu_residue(seq_id: int, x: float, y: float, z: float) -> gemmi.Residue:
+    """A free glutamate ligand (HETATM, non-polymer) at (x, y, z)."""
+    res = gemmi.Residue()
+    res.name = "GLU"
+    res.seqid = gemmi.SeqId(seq_id, " ")
+    res.het_flag = "H"
+    for i, element in enumerate(("N", "C", "C", "O")):
+        atom = gemmi.Atom()
+        atom.name = f"{element}{i}"
+        atom.pos = gemmi.Position(x + i * 0.4, y, z)
+        atom.element = gemmi.Element(element)
+        res.add_atom(atom)
+    return res
+
+
+class TestNameCollisionCopyAlignment:
+    """A ligand comp_id can collide with a standard amino-acid name (free GLU vs
+    backbone glutamate). The three per-copy fact lists -- contacts (geometry.py),
+    facing (membrane.py), and the atom lists for depth (site_ref.py) -- are consumed
+    by shared index, so all three must select the same copies in the same order.
+    Otherwise the real ligand's facing/depth/side would be sourced from a backbone
+    residue. This locks all three gates: reverting ANY one makes the test fail."""
+
+    def test_facts_come_from_the_ligand_not_backbone(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # A receptor bundle (chain R); a decoy backbone GLU (chain D) inside the band,
+        # radially OUTSIDE the bundle (lipid-facing) at z=-10; and one free-ligand GLU
+        # inside the band, radially INSIDE the bundle (pocket-facing) at z=+8. Both are
+        # in-band so an ungated facing loop still yields a value -- a WRONG one for the
+        # decoy -- and the depths differ so a desynced atom list gives itself away. The
+        # decoy sorts before the ligand in model order, so any desync surfaces at index 0.
+        st = _structure([_tm_bundle_chain("R"), _backbone_glu_decoy_chain("D", 10.8, 0.0, -10.0)])
+        st[0].add_chain(gemmi.Chain("B"))
+        st[0]["B"].add_residue(_free_glu_residue(501, 5.5, 0.0, 8.0))
+        st.setup_entities()
+
+        monkeypatch.setattr(sr, "load_structure", lambda *a, **k: st)
+        monkeypatch.setattr(
+            sr, "fetch_polymer_alignment", lambda *a, **k: {"R": {"Q9NYV8": [(1, 1, 400)]}}
+        )
+        monkeypatch.setattr(sr, "membrane_frame", lambda *a, **k: _FRAME)
+        # Real ligand_contact_residues / ligand_facing_fractions / atom_lists run;
+        # only the contact->number mapping and orientation are stubbed.
+        monkeypatch.setattr(sr, "_copy_evidence", lambda *a, **k: dict(_ORTH))
+        monkeypatch.setattr(sr, "galpha_auth_chains", lambda *a, **k: set())
+        monkeypatch.setattr(sr, "_resolve_orientation", lambda *a, **k: (-1, None))
+
+        signals = sr.detect_site_refs("X", _entry("GLU"), tmp_path)
+        assert len(signals) == 1
+        copies = signals[0].payload["copies"]
+        # Exactly one copy: the free ligand, never the backbone GLU. A revert of the
+        # ligand_contact_residues gate would sweep the decoy in and inflate this.
+        assert len(copies) == 1
+        copy = copies[0]
+        # The copy identifier is the free ligand's own author identity (chain B, seq 501),
+        # read from the coordinate residue -- never the backbone decoy's.
+        assert copy["copy_id"] == "B:501"
+        # Facing must come from the free ligand (pocket-facing = 1.0), NOT the decoy
+        # (lipid-facing = 0.0). A revert of the ligand_facing_fractions gate would
+        # desync facings and read 0.0 here.
+        assert copy["facing"] == 1.0
+        # Depth/in-band/side must come from the ligand at z=+8, NOT the decoy at
+        # z=-10. A revert of the atom_lists gate would read -10.0 here.
+        assert copy["depth"] == 8.0
+        assert copy["in_band"] is True
+        assert copy["side"] == "mid-membrane"

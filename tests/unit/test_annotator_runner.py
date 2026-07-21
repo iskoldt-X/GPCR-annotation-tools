@@ -629,13 +629,17 @@ def test_build_and_submit_batch_shards_into_multiple_jobs(tmp_path, monkeypatch)
 
 def test_build_and_submit_batch_chunk_failure_isolated(tmp_path, monkeypatch):
     """If one chunk fails to submit, earlier chunks stay registered and the
-    call does not crash."""
+    call does not crash. The second chunk fails with a fatal 4xx (re-raised
+    immediately, no retry) so exactly one create attempt isolates it -- a
+    transient failure would instead be retried before giving up."""
+    from google.genai.errors import ClientError
+
     config, client = _setup_multi_pdb_batch(tmp_path, monkeypatch, ["1ABC", "2DEF", "3GHI"])
     monkeypatch.setattr("gpcr_tools.annotator.runner.GEMINI_BATCH_MAX_REQUESTS", 2)
     monkeypatch.setattr("gpcr_tools.annotator.runner.GEMINI_BATCH_PACK_REQUESTS", 2)
     job0 = MagicMock()
     job0.name = "batchJobs/j0"
-    client.batches.create.side_effect = [job0, RuntimeError("boom")]
+    client.batches.create.side_effect = [job0, ClientError(400, {"error": {"message": "boom"}})]
 
     runner.build_and_submit_batch(["1ABC", "2DEF", "3GHI"], "Prompt", num_runs=1)  # no raise
 
@@ -1298,6 +1302,355 @@ def test_packing_keeps_same_paper_pdbs_together(tmp_path, monkeypatch):
     assert keys.index("CCC") - keys.index("AAA") == 1 or keys.index("AAA") - keys.index("CCC") == 1
 
 
+# ---------------------------------------------------------------------------
+# Bounded retry around the Files-API PDF upload (transient vs fatal split)
+# ---------------------------------------------------------------------------
+
+
+def test_upload_retries_transient_then_succeeds(tmp_path, monkeypatch):
+    """A transient upload failure (5xx) is retried; once it succeeds the PDB is
+    still submitted, so a hiccup no longer silently drops a structure."""
+    from google.genai.errors import ServerError
+
+    config, client = _setup_multi_pdb_batch(tmp_path, monkeypatch, ["7W55"])
+    client.batches.create.return_value.name = "batchJobs/j0"
+    # Don't actually sleep through the backoff.
+    monkeypatch.setattr("gpcr_tools.annotator.runner.time.sleep", lambda *_: None)
+
+    good = MagicMock()
+    good.uri, good.name = "u", "files/pdf-7w55"
+    jsonl = MagicMock()
+    jsonl.uri, jsonl.name = "src", "files/jsonl"
+
+    calls = {"pdf": 0}
+
+    def _upload(*, file, **kwargs):
+        if str(file).endswith(".jsonl"):
+            return jsonl
+        calls["pdf"] += 1
+        if calls["pdf"] == 1:
+            raise ServerError(503, {"error": {"message": "unavailable"}})
+        return good
+
+    client.files.upload.side_effect = _upload
+
+    runner.build_and_submit_batch(["7W55"], "Prompt", num_runs=1)
+
+    # The PDF upload was attempted at least twice (one transient failure + retry),
+    # and the job was submitted with the recovered upload.
+    assert calls["pdf"] >= 2
+    assert client.batches.create.call_count == 1
+    registry = json.loads(config.uploaded_files_registry_file.read_text())
+    assert registry["7W55"]["uri"] == "u"
+
+
+def test_upload_retries_429_then_succeeds(tmp_path, monkeypatch):
+    """A 429 rate-limit surfaces as a ClientError, but ``e.code != 429`` is False,
+    so it must fall through to RETRY (not abstain like a fatal 4xx). Once it
+    succeeds the PDB is still submitted."""
+    from google.genai.errors import ClientError
+
+    config, client = _setup_multi_pdb_batch(tmp_path, monkeypatch, ["7W55"])
+    client.batches.create.return_value.name = "batchJobs/j0"
+    # Don't actually sleep through the backoff.
+    monkeypatch.setattr("gpcr_tools.annotator.runner.time.sleep", lambda *_: None)
+
+    good = MagicMock()
+    good.uri, good.name = "u", "files/pdf-7w55"
+    jsonl = MagicMock()
+    jsonl.uri, jsonl.name = "src", "files/jsonl"
+
+    calls = {"pdf": 0}
+
+    def _upload(*, file, **kwargs):
+        if str(file).endswith(".jsonl"):
+            return jsonl
+        calls["pdf"] += 1
+        if calls["pdf"] == 1:
+            raise ClientError(429, {"error": {"message": "rate limited"}})
+        return good
+
+    client.files.upload.side_effect = _upload
+
+    runner.build_and_submit_batch(["7W55"], "Prompt", num_runs=1)
+
+    # The 429 was RETRIED (not treated as a fatal 4xx abstain): the PDF upload
+    # was attempted at least twice and the job was created.
+    assert calls["pdf"] >= 2
+    assert client.batches.create.call_count == 1
+    registry = json.loads(config.uploaded_files_registry_file.read_text())
+    assert registry["7W55"]["uri"] == "u"
+
+
+def test_upload_exhaustion_drops_pdb_and_warns(tmp_path, monkeypatch, caplog):
+    """When every upload attempt fails transiently, the PDB is dropped, NO job is
+    created, NO generation request is sent, and the drop is logged as a warning
+    naming the consequence."""
+    import logging
+
+    from google.genai.errors import ServerError
+
+    config, client = _setup_multi_pdb_batch(tmp_path, monkeypatch, ["7W55"])
+    monkeypatch.setattr("gpcr_tools.annotator.runner.time.sleep", lambda *_: None)
+
+    def _upload(*, file, **kwargs):
+        raise ServerError(503, {"error": {"message": "still unavailable"}})
+
+    client.files.upload.side_effect = _upload
+
+    with caplog.at_level(logging.WARNING, logger="gpcr_tools.annotator.runner"):
+        runner.build_and_submit_batch(["7W55"], "Prompt", num_runs=1)
+
+    # No batch job: nothing was submitted, so no billed generation requests.
+    assert client.batches.create.call_count == 0
+    assert not config.batch_jobs_registry_file.exists()
+    # The drop is surfaced as a warning naming the consequence.
+    drop_warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "dropped from this batch" in r.getMessage()
+    ]
+    assert drop_warnings, "the silent drop must be logged as a warning"
+
+
+def test_upload_fatal_4xx_aborts_without_retry(tmp_path, monkeypatch):
+    """A fatal 4xx (ClientError, code != 429) won't change on retry: exactly ONE
+    upload attempt is made, then the PDB is skipped (no job)."""
+    from google.genai.errors import ClientError
+
+    config, client = _setup_multi_pdb_batch(tmp_path, monkeypatch, ["7W55"])
+    monkeypatch.setattr("gpcr_tools.annotator.runner.time.sleep", lambda *_: None)
+
+    calls = {"pdf": 0}
+
+    def _upload(*, file, **kwargs):
+        calls["pdf"] += 1
+        raise ClientError(400, {"error": {"message": "bad request"}})
+
+    client.files.upload.side_effect = _upload
+
+    runner.build_and_submit_batch(["7W55"], "Prompt", num_runs=1)
+
+    # A fatal 4xx is not retried -- exactly one upload attempt, and the PDB is
+    # skipped so no job is created.
+    assert calls["pdf"] == 1
+    assert client.batches.create.call_count == 0
+    assert not config.batch_jobs_registry_file.exists()
+
+
+# ---------------------------------------------------------------------------
+# Ligand copy coverage validation (single retry->degrade; batch drop)
+# ---------------------------------------------------------------------------
+
+
+def test_run_single_pdb_retries_then_degrades_on_coverage_mismatch(tmp_path, monkeypatch, caplog):
+    """A per-copy coverage mismatch is retried like any generation trigger; once
+    the retry budget is exhausted the best-effort result is KEPT (the PDB is not
+    lost) and the mismatch is surfaced as a warning naming what was missing."""
+    import logging
+
+    monkeypatch.setenv("GPCR_AI_RESULTS_PATH", str(tmp_path / "ai_results"))
+    reset_config()
+    config = get_config()
+
+    # Roster of two copies; the model only ever returns one (R:602 missing).
+    monkeypatch.setattr(
+        "gpcr_tools.annotator.runner.ligand_copy_identifiers",
+        lambda enriched: [("LIG", "R:601"), ("LIG", "R:602")],
+    )
+
+    mock_client = MagicMock()
+    mock_client.files.upload.return_value = MagicMock(uri="u", name="f")
+    fc = MagicMock()
+    fc.name = runner.ANNOTATOR_FUNCTION_NAME
+    fc.args = {"receptor_info": {}, "ligand_copies": [{"copy_id": "R:601"}]}
+    mock_response = MagicMock()
+    mock_response.function_calls = [fc]
+    mock_response.model_version = "m-1"
+    mock_client.models.generate_content.return_value = mock_response
+
+    monkeypatch.setattr("gpcr_tools.annotator.runner.get_client", lambda: mock_client)
+    monkeypatch.setattr("gpcr_tools.annotator.runner.compress_pdf_if_needed", lambda a, b: a)
+    monkeypatch.setattr("gpcr_tools.annotator.runner.build_prompt_parts", lambda *a, **k: ["ctx"])
+    monkeypatch.setattr("gpcr_tools.annotator.runner.load_detect_signals", lambda pdb_id: [])
+    monkeypatch.setattr(
+        "gpcr_tools.annotator.runner.post_process_annotation", lambda args: dict(args)
+    )
+    # Small retry budget + no real sleeping so the test is fast.
+    monkeypatch.setattr("gpcr_tools.annotator.runner.GEMINI_MAX_RETRIES", 3)
+    monkeypatch.setattr("gpcr_tools.annotator.runner.time.sleep", lambda *_: None)
+
+    with caplog.at_level(logging.WARNING, logger="gpcr_tools.annotator.runner"):
+        runner.run_single_pdb("7W55", {}, "Prompt", Path("dummy.pdf"), num_runs=1, model_name="m")
+
+    # Every attempt mismatched, so all 3 attempts were spent.
+    assert mock_client.models.generate_content.call_count == 3
+
+    # The run was NOT lost: the best-effort annotation is persisted, and the
+    # single path keeps whatever was returned (it does not drop ligand_copies).
+    out_file = config.ai_results_dir / "7W55" / model_run_subdir("m") / "run_1.json"
+    assert out_file.exists()
+    data = json.loads(out_file.read_text())
+    assert data["ligand_copies"] == [{"copy_id": "R:601"}]
+
+    degrade = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING
+        and "coverage mismatch after" in r.getMessage()
+        and "R:602" in r.getMessage()
+    ]
+    assert degrade, "exhausted coverage retries must be surfaced as a warning naming the miss"
+
+
+def test_recover_batch_drops_ligand_copies_on_coverage_mismatch(tmp_path, monkeypatch, caplog):
+    """Batch has no per-run retry: a coverage mismatch drops that run's
+    ligand_copies (so bad per-copy data never reaches voting) and warns, while
+    the rest of the annotation is kept; an exact-coverage run is untouched."""
+    import logging
+
+    monkeypatch.setenv("GPCR_STATE_PATH", str(tmp_path / "state"))
+    monkeypatch.setenv("GPCR_AI_RESULTS_PATH", str(tmp_path / "ai_results"))
+    monkeypatch.setenv("GPCR_ENRICHED_PATH", str(tmp_path / "enriched"))
+    reset_config()
+    config = get_config()
+    config.pipeline_runs_dir.mkdir(parents=True)
+    config.enriched_dir.mkdir(parents=True)
+    (config.enriched_dir / "7W55.json").write_text("{}")
+
+    # Expected roster of two copies (source used to build the per-PDB schema).
+    monkeypatch.setattr(
+        "gpcr_tools.annotator.runner.ligand_copy_identifiers",
+        lambda enriched: [("LIG", "R:601"), ("LIG", "R:602")],
+    )
+
+    def _line(key, copy_ids):
+        return json.dumps(
+            {
+                "key": key,
+                "response": {
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [
+                                    {
+                                        "functionCall": {
+                                            "name": "annotate_gpcr_db_structure",
+                                            "args": {
+                                                "receptor_info": {"uniprot_entry_name": "X"},
+                                                "ligand_copies": [{"copy_id": c} for c in copy_ids],
+                                            },
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                },
+            }
+        )
+
+    raw = config.pipeline_runs_dir / "raw_output_testjob.jsonl"
+    raw.write_text(
+        # run 1: an out-of-set id (R:999) -> mismatch -> drop.
+        _line("7W55__run_01", ["R:601", "R:602", "R:999"])
+        + "\n"
+        # run 2: exact coverage -> kept.
+        + _line("7W55__run_02", ["R:601", "R:602"])
+        + "\n"
+    )
+
+    monkeypatch.setattr(
+        "gpcr_tools.annotator.runner.post_process_annotation", lambda args: dict(args)
+    )
+
+    with caplog.at_level(logging.WARNING, logger="gpcr_tools.annotator.runner"):
+        runner.recover_batch()
+
+    out_dir = config.ai_results_dir / "7W55" / model_run_subdir(None)
+    run1 = json.loads((out_dir / "run_1.json").read_text())
+    run2 = json.loads((out_dir / "run_2.json").read_text())
+
+    # Mismatched run: ligand_copies dropped, the rest of the annotation kept.
+    assert "ligand_copies" not in run1
+    assert run1["receptor_info"]["uniprot_entry_name"] == "X"
+    # Exact-coverage run: ligand_copies preserved (no over-dropping).
+    assert [c["copy_id"] for c in run2["ligand_copies"]] == ["R:601", "R:602"]
+
+    drops = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "dropping ligand_copies" in r.getMessage()
+    ]
+    assert drops and "R:999" in drops[0].getMessage()
+
+
+def test_recover_batch_warns_when_ligand_copies_fully_omitted(tmp_path, monkeypatch, caplog):
+    """A run that omits ligand_copies ENTIRELY against a non-empty expected roster
+    is a coverage mismatch too: the batch check is unconditional (not gated on the
+    field being present), so it is warned consistently with the single-run path
+    rather than skipped."""
+    import logging
+
+    monkeypatch.setenv("GPCR_STATE_PATH", str(tmp_path / "state"))
+    monkeypatch.setenv("GPCR_AI_RESULTS_PATH", str(tmp_path / "ai_results"))
+    monkeypatch.setenv("GPCR_ENRICHED_PATH", str(tmp_path / "enriched"))
+    reset_config()
+    config = get_config()
+    config.pipeline_runs_dir.mkdir(parents=True)
+    config.enriched_dir.mkdir(parents=True)
+    (config.enriched_dir / "7W55.json").write_text("{}")
+
+    monkeypatch.setattr(
+        "gpcr_tools.annotator.runner.ligand_copy_identifiers",
+        lambda enriched: [("LIG", "R:601"), ("LIG", "R:602")],
+    )
+
+    # A response that carries NO ligand_copies field at all.
+    line = json.dumps(
+        {
+            "key": "7W55__run_01",
+            "response": {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "functionCall": {
+                                        "name": "annotate_gpcr_db_structure",
+                                        "args": {"receptor_info": {"uniprot_entry_name": "X"}},
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+        }
+    )
+    (config.pipeline_runs_dir / "raw_output_testjob.jsonl").write_text(line + "\n")
+
+    monkeypatch.setattr(
+        "gpcr_tools.annotator.runner.post_process_annotation", lambda args: dict(args)
+    )
+
+    with caplog.at_level(logging.WARNING, logger="gpcr_tools.annotator.runner"):
+        runner.recover_batch()
+
+    out_dir = config.ai_results_dir / "7W55" / model_run_subdir(None)
+    run1 = json.loads((out_dir / "run_1.json").read_text())
+    # The rest of the annotation is kept; the field stays absent.
+    assert "ligand_copies" not in run1
+    assert run1["receptor_info"]["uniprot_entry_name"] == "X"
+
+    warned = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "coverage mismatch" in r.getMessage()
+    ]
+    assert warned, "an omitted array must be warned consistently, not skipped"
+
+
 def test_storage_helpers(tmp_path, monkeypatch):
     """resolve_doi / canonical_pdf_name / sanitize_doi behave as documented."""
     from gpcr_tools.config import sanitize_doi
@@ -1321,3 +1674,324 @@ def test_storage_helpers(tmp_path, monkeypatch):
     assert storage.canonical_pdf_name("7W55", "10.1/AbC") == "10.1_abc.pdf"
     # No DOI -> per-PDB name.
     assert storage.canonical_pdf_name("7W55", "") == "7W55.pdf"
+
+
+def _write_registry(config, jobs):
+    config.state_dir.mkdir(parents=True, exist_ok=True)
+    config.batch_jobs_registry_file.write_text(json.dumps({"version": 1, "jobs": jobs}))
+
+
+def test_submit_next_sequential_shard_noop_when_job_in_flight(tmp_path, monkeypatch):
+    """A downloaded-but-not-recovered job still counts as in flight and blocks the
+    next shard (concurrency=1); a recovered job alongside it does not. No shard is
+    submitted and remaining-target discovery is never even reached."""
+    monkeypatch.setenv("GPCR_STATE_PATH", str(tmp_path / "state"))
+    monkeypatch.setenv("GPCR_AI_RESULTS_PATH", str(tmp_path / "ai_results"))
+    reset_config()
+    config = get_config()
+    _write_registry(
+        config,
+        {
+            "batchJobs/done": {"job_name": "batchJobs/done", "status": "recovered"},
+            "batchJobs/live": {"job_name": "batchJobs/live", "status": "downloaded"},
+        },
+    )
+
+    submitted = MagicMock()
+    monkeypatch.setattr("gpcr_tools.annotator.runner.build_and_submit_batch", submitted)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("target discovery ran despite an in-flight job")
+
+    monkeypatch.setattr("gpcr_tools.annotator.runner.discover_annotation_targets", _boom)
+
+    runner.submit_next_sequential_shard("Prompt", num_runs=1, model_name="m")
+
+    submitted.assert_not_called()
+
+
+def test_submit_next_sequential_shard_noop_when_no_targets(tmp_path, monkeypatch, caplog):
+    """With nothing in flight and no PDBs left to annotate, the submitter logs
+    completion and does not submit a shard."""
+    import logging
+
+    monkeypatch.setenv("GPCR_STATE_PATH", str(tmp_path / "state"))
+    monkeypatch.setenv("GPCR_AI_RESULTS_PATH", str(tmp_path / "ai_results"))
+    reset_config()
+    config = get_config()
+    _write_registry(config, {})
+
+    submitted = MagicMock()
+    monkeypatch.setattr("gpcr_tools.annotator.runner.build_and_submit_batch", submitted)
+    monkeypatch.setattr(
+        "gpcr_tools.annotator.runner.discover_annotation_targets", lambda *a, **k: []
+    )
+
+    with caplog.at_level(logging.INFO, logger="gpcr_tools.annotator.runner"):
+        runner.submit_next_sequential_shard("Prompt", num_runs=1, model_name="m")
+
+    submitted.assert_not_called()
+    assert any("complete" in r.getMessage().lower() for r in caplog.records)
+
+
+def test_submit_next_sequential_shard_submits_first_shard_only(tmp_path, monkeypatch):
+    """With nothing in flight, exactly the first GEMINI_BATCH_SHARD_PDBS remaining
+    PDBs are submitted as one shard (via the sequential per-job cap), and no more;
+    an already-recovered job in the registry is terminal and does not block."""
+    from gpcr_tools.config import GEMINI_BATCH_SEQUENTIAL_MAX_REQUESTS
+
+    monkeypatch.setenv("GPCR_STATE_PATH", str(tmp_path / "state"))
+    monkeypatch.setenv("GPCR_AI_RESULTS_PATH", str(tmp_path / "ai_results"))
+    reset_config()
+    config = get_config()
+    _write_registry(
+        config, {"batchJobs/done": {"job_name": "batchJobs/done", "status": "recovered"}}
+    )
+
+    monkeypatch.setattr("gpcr_tools.annotator.runner.GEMINI_BATCH_SHARD_PDBS", 2)
+    monkeypatch.setattr(
+        "gpcr_tools.annotator.runner.discover_annotation_targets",
+        lambda num_runs, model_name: ["AAA", "BBB", "CCC", "DDD"],
+    )
+    submitted = MagicMock()
+    monkeypatch.setattr("gpcr_tools.annotator.runner.build_and_submit_batch", submitted)
+
+    runner.submit_next_sequential_shard("Prompt", num_runs=1, model_name="m")
+
+    submitted.assert_called_once()
+    args, kwargs = submitted.call_args
+    assert args[0] == ["AAA", "BBB"]  # only the first shard, not all four
+    assert kwargs["pack_cap_override"] == GEMINI_BATCH_SEQUENTIAL_MAX_REQUESTS
+
+
+def test_submit_next_sequential_shard_restricts_to_targets(tmp_path, monkeypatch):
+    """An explicit target list restricts the shard to (targets ∩ remaining), in
+    discovery order and case-insensitively, so a smoke test never submits the whole
+    corpus; requested PDBs that are not remaining are dropped."""
+    monkeypatch.setenv("GPCR_STATE_PATH", str(tmp_path / "state"))
+    monkeypatch.setenv("GPCR_AI_RESULTS_PATH", str(tmp_path / "ai_results"))
+    reset_config()
+    config = get_config()
+    _write_registry(config, {})
+    monkeypatch.setattr(
+        "gpcr_tools.annotator.runner.discover_annotation_targets",
+        lambda num_runs, model_name: ["AAA", "BBB", "CCC", "DDD"],
+    )
+    submitted = MagicMock()
+    monkeypatch.setattr("gpcr_tools.annotator.runner.build_and_submit_batch", submitted)
+
+    runner.submit_next_sequential_shard(
+        "Prompt", num_runs=1, model_name="m", targets=["bbb", "DDD", "ZZZ"]
+    )
+
+    submitted.assert_called_once()
+    args, _ = submitted.call_args
+    # "bbb" matches "BBB" (case-insensitive); "ZZZ" is not remaining and dropped;
+    # "AAA"/"CCC" were not requested. Order follows discovery.
+    assert args[0] == ["BBB", "DDD"]
+
+
+def test_submit_next_sequential_shard_logs_error_on_no_progress(tmp_path, monkeypatch, caplog):
+    """PDBs remain but the shard registers ZERO new jobs (nothing submittable):
+    surfaced at ERROR, distinct from the 'complete' / 'in flight' info messages, so
+    an unattended loop does not spin silently."""
+    import logging
+
+    monkeypatch.setenv("GPCR_STATE_PATH", str(tmp_path / "state"))
+    monkeypatch.setenv("GPCR_AI_RESULTS_PATH", str(tmp_path / "ai_results"))
+    reset_config()
+    config = get_config()
+    _write_registry(config, {})
+    monkeypatch.setattr(
+        "gpcr_tools.annotator.runner.discover_annotation_targets", lambda *a, **k: ["AAA", "BBB"]
+    )
+    # A submit that registers no job (e.g. every PDB un-uploadable) is a stall.
+    monkeypatch.setattr("gpcr_tools.annotator.runner.build_and_submit_batch", lambda *a, **k: None)
+
+    with caplog.at_level(logging.ERROR, logger="gpcr_tools.annotator.runner"):
+        runner.submit_next_sequential_shard("Prompt", num_runs=1, model_name="m")
+
+    assert any(
+        r.levelno == logging.ERROR and "no progress" in r.getMessage().lower()
+        for r in caplog.records
+    ), "a no-progress shard must be surfaced at ERROR"
+
+
+def test_submit_next_sequential_shard_noops_when_lock_held(tmp_path, monkeypatch):
+    """A second concurrent invocation no-ops while the sequential-submit lock is
+    held (cross-process TOCTOU guard against a double-submit)."""
+    import fcntl
+
+    monkeypatch.setenv("GPCR_STATE_PATH", str(tmp_path / "state"))
+    monkeypatch.setenv("GPCR_AI_RESULTS_PATH", str(tmp_path / "ai_results"))
+    reset_config()
+    config = get_config()
+    config.state_dir.mkdir(parents=True, exist_ok=True)
+
+    submitted = MagicMock()
+    monkeypatch.setattr("gpcr_tools.annotator.runner.build_and_submit_batch", submitted)
+
+    def _boom(*a, **k):
+        raise AssertionError("discovery ran while the lock was held")
+
+    monkeypatch.setattr("gpcr_tools.annotator.runner.discover_annotation_targets", _boom)
+
+    # Hold the lock from a separate fd (a concurrent invocation still in progress).
+    with open(config.state_dir / "sequential_submit.lock", "w") as holder:
+        fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        runner.submit_next_sequential_shard("Prompt", num_runs=1, model_name="m")
+
+    submitted.assert_not_called()
+
+
+def test_submit_next_sequential_shard_raises_when_cap_too_small(tmp_path, monkeypatch):
+    """One full shard's requests must fit in one job; a cap smaller than
+    GEMINI_BATCH_SHARD_PDBS * num_runs would split it into concurrent jobs and
+    defeat concurrency=1, so it is rejected with a clear error (e.g. --runs 20)."""
+    import pytest
+
+    monkeypatch.setenv("GPCR_STATE_PATH", str(tmp_path / "state"))
+    reset_config()
+    monkeypatch.setattr("gpcr_tools.annotator.runner.GEMINI_BATCH_SHARD_PDBS", 1000)
+    monkeypatch.setattr("gpcr_tools.annotator.runner.GEMINI_BATCH_SEQUENTIAL_MAX_REQUESTS", 15000)
+
+    with pytest.raises(ValueError, match="concurrency=1"):
+        runner.submit_next_sequential_shard("Prompt", num_runs=20, model_name="m")
+
+
+def test_cleanup_purges_stale_upload_cache_entry(tmp_path, monkeypatch):
+    """When terminal cleanup deletes a remote upload, the paper-upload cache entry
+    pointing at it (reused by TTL alone, with no remote-existence check) is purged
+    too, so the next resolve re-uploads instead of embedding a dead fileUri."""
+    monkeypatch.setenv("GPCR_STATE_PATH", str(tmp_path / "state"))
+    reset_config()
+    config = get_config()
+    config.state_dir.mkdir(parents=True, exist_ok=True)
+    _seed_job(
+        config, "batchJobs/j0", status="recovered", file_names=["files/pdf-a"], src="files/src"
+    )
+    # The upload cache still points at files/pdf-a and is fresh by TTL.
+    config.uploaded_files_registry_file.write_text(
+        json.dumps(
+            {
+                "doi:paper-x": {
+                    "uri": "u",
+                    "name": "files/pdf-a",
+                    "uploaded_at": datetime.now(UTC).isoformat(),
+                    "doi": "10.1/x",
+                    "content_hash": "h",
+                }
+            }
+        )
+    )
+    client = MagicMock()
+
+    runner._cleanup_terminal_job_uploads(config, client, "batchJobs/j0")
+
+    deleted = {c.kwargs["name"] for c in client.files.delete.call_args_list}
+    assert "files/pdf-a" in deleted
+    cache = json.loads(config.uploaded_files_registry_file.read_text())
+    assert "doi:paper-x" not in cache  # the stale entry is gone
+
+    # Next resolve re-uploads (the purged cache no longer serves the dead URI).
+    fresh = MagicMock()
+    fresh.uri, fresh.name = "u2", "files/pdf-a2"
+    resolve_client = MagicMock()
+    resolve_client.files.upload.return_value = fresh
+    monkeypatch.setattr("gpcr_tools.annotator.runner.compress_pdf_if_needed", lambda a, b: a)
+    pdf = tmp_path / "a.pdf"
+    pdf.write_text("%PDF")
+    uri, _ = runner._resolve_upload(
+        resolve_client, config, cache, "doi:paper-x", "7W55", pdf, "10.1/x", datetime.now(UTC)
+    )
+    resolve_client.files.upload.assert_called_once()
+    assert uri == "u2"
+
+
+def test_batches_create_retries_transient_then_succeeds(tmp_path, monkeypatch):
+    """A transient 5xx on batches.create is retried; once it succeeds the job is
+    registered, so a hiccup no longer fails the whole chunk."""
+    from google.genai.errors import ServerError
+
+    config, client = _setup_multi_pdb_batch(tmp_path, monkeypatch, ["7W55"])
+    monkeypatch.setattr("gpcr_tools.annotator.runner.time.sleep", lambda *_: None)
+    job = MagicMock()
+    job.name = "batchJobs/j0"
+    client.batches.create.side_effect = [
+        ServerError(503, {"error": {"message": "unavailable"}}),
+        job,
+    ]
+
+    runner.build_and_submit_batch(["7W55"], "Prompt", num_runs=1)
+
+    assert client.batches.create.call_count == 2
+    registry = json.loads(config.batch_jobs_registry_file.read_text())
+    assert "batchJobs/j0" in registry["jobs"]
+
+
+def test_batches_create_retries_generic_timeout_then_succeeds(tmp_path, monkeypatch):
+    """A bare TimeoutError (network) is neither ClientError nor ServerError; the
+    generic fallback must still retry it (mirroring _resolve_upload) rather than
+    failing the chunk with zero retries."""
+    config, client = _setup_multi_pdb_batch(tmp_path, monkeypatch, ["7W55"])
+    monkeypatch.setattr("gpcr_tools.annotator.runner.time.sleep", lambda *_: None)
+    job = MagicMock()
+    job.name = "batchJobs/j0"
+    client.batches.create.side_effect = [TimeoutError("connection timed out"), job]
+
+    runner.build_and_submit_batch(["7W55"], "Prompt", num_runs=1)
+
+    assert client.batches.create.call_count == 2
+    registry = json.loads(config.batch_jobs_registry_file.read_text())
+    assert "batchJobs/j0" in registry["jobs"]
+
+
+def test_batches_create_fatal_4xx_aborts_without_retry(tmp_path, monkeypatch):
+    """A fatal 4xx (ClientError, code != 429) on batches.create won't change on
+    retry: it is re-raised at once (one attempt), the chunk is isolated (no crash),
+    and no job is registered."""
+    from google.genai.errors import ClientError
+
+    config, client = _setup_multi_pdb_batch(tmp_path, monkeypatch, ["7W55"])
+    monkeypatch.setattr("gpcr_tools.annotator.runner.time.sleep", lambda *_: None)
+    client.batches.create.side_effect = ClientError(400, {"error": {"message": "bad request"}})
+
+    runner.build_and_submit_batch(["7W55"], "Prompt", num_runs=1)  # no raise
+
+    assert client.batches.create.call_count == 1
+    assert not config.batch_jobs_registry_file.exists()
+
+
+def test_check_batch_status_recovers_stranded_downloaded_job(tmp_path, monkeypatch):
+    """A downloaded-but-not-recovered job with NO submitted job present is healed by
+    check_batch_status (recovery runs) instead of dead-locking the sequential guard;
+    the early-return previously skipped the heal."""
+    monkeypatch.setenv("GPCR_STATE_PATH", str(tmp_path / "state"))
+    monkeypatch.setenv("GPCR_AI_RESULTS_PATH", str(tmp_path / "ai_results"))
+    reset_config()
+    config = get_config()
+    _write_registry(config, {"batchJobs/dl": {"job_name": "batchJobs/dl", "status": "downloaded"}})
+    client = MagicMock()
+    monkeypatch.setattr("gpcr_tools.annotator.runner.get_client", lambda: client)
+    recovered = MagicMock()
+    monkeypatch.setattr("gpcr_tools.annotator.runner.recover_batch", recovered)
+
+    runner.check_batch_status()
+
+    recovered.assert_called_once()
+    # No provider polling: there was no submitted job to get.
+    client.batches.get.assert_not_called()
+
+
+def test_annotate_sequential_requires_batch(monkeypatch, capsys):
+    """`--sequential` without `--batch` is a clear CLI error (exit 2), not a silent
+    full live non-batch run."""
+    import pytest
+
+    from gpcr_tools import __main__ as main_mod
+
+    monkeypatch.setattr("sys.argv", ["gpcr-tools", "annotate", "--sequential"])
+    with pytest.raises(SystemExit) as exc:
+        main_mod.cli()
+    assert exc.value.code == 2
+    assert "--sequential requires --batch" in capsys.readouterr().err

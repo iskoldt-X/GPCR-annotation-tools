@@ -261,7 +261,10 @@ def ligand_facing_fractions(
     results: list[float | None] = []
     for chain in model:
         for residue in chain:
-            if residue.name != comp_id:
+            # Skip polymer residues sharing the ligand name (a free GLU ligand vs
+            # backbone glutamate); only a non-polymer residue is a ligand copy. This
+            # keeps the per-copy order in lockstep with ligand_contact_residues.
+            if residue.name != comp_id or is_protein_atom(residue):
                 continue
             ligand_atoms = list(residue)
             if not ligand_atoms:

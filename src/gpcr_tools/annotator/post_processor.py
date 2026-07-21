@@ -11,7 +11,7 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from gpcr_tools.config import EMPTY_VALUES
+from gpcr_tools.config import BRIL_CYTOCHROME_TOKEN, EMPTY_VALUES
 
 # ---------------------------------------------------------------------------
 # Auxiliary protein name normalisation
@@ -67,11 +67,18 @@ def _is_signaling_partners_empty(sp: dict[str, Any]) -> bool:
     return True
 
 
-def _standardize_auxiliary_name(name: str | None) -> str | None:
+def _standardize_auxiliary_name(name: str | None, type_value: str | None = None) -> str | None:
     """Standardise common auxiliary protein names.
 
     The explicit :data:`AUX_PROTEIN_NAME_MAPPING` is checked first; only if no
-    match is found do we fall through to the BRIL and nanobody regex patterns.
+    match is found do we fall through to the BRIL and nanobody patterns.
+
+    The BRIL collapse is **gated on the entry being a fusion** (*type_value*
+    contains "fusion"). BRIL is a crystallization fusion; only a fusion-typed
+    entry should be folded to the house name. This is deliberately fail-closed:
+    when the type is missing or is not a fusion we leave the name untouched, so
+    an antibody binder named for its target ("anti-BRIL Fab") is never flattened
+    to "BRIL".
     """
     if not name:
         return name
@@ -81,8 +88,14 @@ def _standardize_auxiliary_name(name: str | None) -> str | None:
     if mapped is not None:
         return mapped
 
-    # 2. Standardize BRIL variants
-    if re.search(r"\bbril\b", name, flags=re.IGNORECASE) or name.lower() == "cytochrome b562 ril":
+    # 2. Standardize BRIL variants — fusion-typed entries only.
+    # The "cytochrome b562" literal substring matches the short RCSB spellings
+    # ("Cytochrome b562", "Soluble cytochrome b562") while excluding the distinct
+    # Pfam term "Cytochrome c/b562" (the "c/" breaks the substring).
+    is_fusion = isinstance(type_value, str) and "fusion" in type_value.lower()
+    if is_fusion and (
+        BRIL_CYTOCHROME_TOKEN in name.lower() or re.search(r"\bbril\b", name, flags=re.IGNORECASE)
+    ):
         return "BRIL"
 
     # 3. Standardize Nb / Nanobody
@@ -135,7 +148,9 @@ def post_process_annotation(raw_data: Any) -> dict[str, Any]:
             if isinstance(entry, dict):
                 name = entry.get("name")
                 if isinstance(name, str):
-                    entry["name"] = _standardize_auxiliary_name(name)
+                    raw_type = entry.get("type")
+                    type_value = raw_type.get("value") if isinstance(raw_type, dict) else None
+                    entry["name"] = _standardize_auxiliary_name(name, type_value)
 
     # 4. Recursive lowercase of all uniprot_entry_name values
     result: dict[str, Any] = _recursive_lowercase_uniprot(data)
