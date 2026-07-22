@@ -265,6 +265,82 @@ class TestApoHandling:
         assert not any("coexist" in w.lower() for w in warnings)
 
 
+class TestApoWithLigandsSeverity:
+    """The apo/ligand contradiction is advisory when every coexisting molecule is a
+    structural cofactor / ion / lipid, but stays gating when any is a functional or
+    allosteric ligand, a ghost, or carries an unknown/blank role.
+    """
+
+    def _run(self, ligands: list[dict[str, Any]], enriched: dict[str, Any]) -> tuple:
+        warnings: list[str] = []
+        advisory: list[str] = []
+        warnings = validate_and_enrich_ligands(
+            "TEST", {"ligands": ligands}, enriched, advisory_notes=advisory
+        )
+        return warnings, advisory
+
+    def test_apo_with_only_cofactor_lipid_is_advisory(self) -> None:
+        # A matched lipid the model typed Cofactor routes to the auxiliary catalogue,
+        # so an apo placeholder beside it is a benign, common configuration -> advisory.
+        ligands = [
+            {"name": "apo", "chem_comp_id": ""},
+            {
+                "name": "CHOLESTEROL",
+                "chem_comp_id": "CLR",
+                "type": "lipid",
+                "role": {"value": "Cofactor"},
+            },
+        ]
+        enriched = _make_enriched(nonpolymer=[_np_entity("CLR", name="Cholesterol")])
+        warnings, advisory = self._run(ligands, enriched)
+        assert not any("APO_WITH_LIGANDS" in w for w in warnings)
+        assert any("APO_WITH_LIGANDS" in w for w in advisory)
+
+    def test_apo_with_functional_ligand_stays_gating(self) -> None:
+        # A matched small molecule the model gave a real pharmacological modality
+        # (Agonist) is a functional ligand row, so the contradiction is genuine.
+        ligands = [
+            {"name": "apo", "chem_comp_id": ""},
+            {
+                "name": "DRUG",
+                "chem_comp_id": "DRG",
+                "type": "small-molecule",
+                "role": {"value": "Agonist"},
+            },
+        ]
+        enriched = _make_enriched(nonpolymer=[_np_entity("DRG", name="Drug")])
+        warnings, advisory = self._run(ligands, enriched)
+        assert any("APO_WITH_LIGANDS" in w for w in warnings)
+        assert not any("APO_WITH_LIGANDS" in w for w in advisory)
+
+    def test_apo_with_ghost_ligand_stays_gating(self) -> None:
+        # A ghost the validator could not place is not a benign structural molecule.
+        ligands = [
+            {"name": "apo", "chem_comp_id": ""},
+            {
+                "name": "MYSTERY",
+                "chem_comp_id": "ZZZ",
+                "type": "small-molecule",
+                "role": {"value": "Cofactor"},
+            },
+        ]
+        warnings, advisory = self._run(ligands, _make_enriched())  # ZZZ absent -> ghost
+        assert any("APO_WITH_LIGANDS" in w for w in warnings)
+        assert not any("APO_WITH_LIGANDS" in w for w in advisory)
+
+    def test_apo_with_unknown_role_stays_gating(self) -> None:
+        # A matched small molecule with no assessed role classifies as a real ligand
+        # row (unknown/blank role is not benign), so the finding stays gating.
+        ligands = [
+            {"name": "apo", "chem_comp_id": ""},
+            {"name": "SOMETHING", "chem_comp_id": "SMT", "type": "small-molecule"},
+        ]
+        enriched = _make_enriched(nonpolymer=[_np_entity("SMT", name="Something")])
+        warnings, advisory = self._run(ligands, enriched)
+        assert any("APO_WITH_LIGANDS" in w for w in warnings)
+        assert not any("APO_WITH_LIGANDS" in w for w in advisory)
+
+
 class TestNoneSafety:
     def test_null_chem_comp_id(self) -> None:
         """Blood Lesson 1: explicit null chem_comp_id must not crash."""
@@ -916,3 +992,52 @@ class TestKeylessPubChemGate:
             mock_get.assert_not_called()
         assert lig["pubchem_id"] == "222"  # untouched
         assert not any("Mismatch" in w or "API_UNAVAILABLE" in w for w in warnings)
+
+    def test_cleared_cid_is_advisory_not_gating(self) -> None:
+        # A wrong CID is blanked, so the shipped record is already correct. When an
+        # advisory channel is supplied, the "has been cleared" message routes there
+        # (a detector note) instead of the gating warnings list.
+        cache = _FakeSynonymCache({"222": ["Unrelated compound"]})
+        lig = {
+            "name": "ExampleDrug",
+            "chem_comp_id": "None",
+            "type": "peptide",
+            "pubchem_id": "222",
+        }
+        advisory: list[str] = []
+        warnings = validate_and_enrich_ligands(
+            "TEST",
+            {"ligands": [lig]},
+            _make_enriched(),
+            synonym_cache=cache,
+            advisory_notes=advisory,
+        )
+        assert lig["pubchem_id"] is None  # still blanked
+        assert not any("Mismatch" in w for w in warnings)  # not a gating warning
+        assert any("Mismatch" in w and "cleared" in w for w in advisory)
+
+    def test_network_abstention_stays_gating_not_advisory(self) -> None:
+        # An [API_UNAVAILABLE] abstention is a genuine unresolved check and must
+        # stay in the gating warnings list even when an advisory channel exists.
+        cache = _FakeSynonymCache()
+        lig = {
+            "name": "ExampleDrug",
+            "chem_comp_id": "None",
+            "type": "peptide",
+            "pubchem_id": "111",
+        }
+        advisory: list[str] = []
+        with patch.object(
+            api_clients.requests,
+            "get",
+            side_effect=api_clients.requests.RequestException("offline"),
+        ):
+            warnings = validate_and_enrich_ligands(
+                "TEST",
+                {"ligands": [lig]},
+                _make_enriched(),
+                synonym_cache=cache,
+                advisory_notes=advisory,
+            )
+        assert any("API_UNAVAILABLE" in w for w in warnings)
+        assert not any("API_UNAVAILABLE" in w for w in advisory)

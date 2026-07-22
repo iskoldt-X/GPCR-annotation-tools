@@ -106,6 +106,60 @@ class TestOligomerGatingWarnings:
         assert "ligands[CA]" in out[0]
         assert "receptor_info" not in out[0]
 
+    def test_multi_copy_ligand_advisory_flag_does_not_gate(self):
+        """A MULTI_COPY_LIGAND alert whose copies share one site is stamped
+        ``gating=False`` by the aggregator and is not surfaced as a gating warning."""
+        oligo = {
+            "chain_id_override": {"applied": False},
+            "alerts": [
+                {
+                    "type": ALERT_MULTI_COPY_LIGAND,
+                    "message": "[MULTI_COPY_LIGAND] at 'ligands[CLR]': modelled in 3 copies",
+                    "gating": False,
+                }
+            ],
+            "all_gpcr_chains": [],
+        }
+        assert oligomer_gating_warnings(oligo) == []
+
+    def test_multi_copy_ligand_gating_flag_true_surfaces(self):
+        msg = "[MULTI_COPY_LIGAND] at 'ligands[BU1]': modelled in 2 copies"
+        oligo = {
+            "chain_id_override": {"applied": False},
+            "alerts": [{"type": ALERT_MULTI_COPY_LIGAND, "message": msg, "gating": True}],
+            "all_gpcr_chains": [],
+        }
+        assert oligomer_gating_warnings(oligo) == [msg]
+
+    def test_multi_copy_ligand_absent_flag_defaults_to_gating(self):
+        """A back-catalogue alert recorded before the flag existed still gates
+        (the flag defaults to True)."""
+        msg = "[MULTI_COPY_LIGAND] at 'ligands[PLM]'"
+        oligo = {
+            "chain_id_override": {"applied": False},
+            "alerts": [{"type": ALERT_MULTI_COPY_LIGAND, "message": msg}],
+            "all_gpcr_chains": [],
+        }
+        assert oligomer_gating_warnings(oligo) == [msg]
+
+    def test_multi_copy_mixed_only_gating_one_surfaces(self):
+        """One advisory + one gating multi-copy alert: only the gating one is
+        surfaced; the advisory one is dropped."""
+        gating_msg = "[MULTI_COPY_LIGAND] at 'ligands[BU1]': divergent"
+        oligo = {
+            "chain_id_override": {"applied": False},
+            "alerts": [
+                {
+                    "type": ALERT_MULTI_COPY_LIGAND,
+                    "message": "[MULTI_COPY_LIGAND] at 'ligands[CLR]': shared",
+                    "gating": False,
+                },
+                {"type": ALERT_MULTI_COPY_LIGAND, "message": gating_msg, "gating": True},
+            ],
+            "all_gpcr_chains": [],
+        }
+        assert oligomer_gating_warnings(oligo) == [gating_msg]
+
     def test_incomplete_7tm_chain(self):
         oligo = {
             "chain_id_override": {"applied": False},

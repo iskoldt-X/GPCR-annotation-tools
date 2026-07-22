@@ -8,10 +8,17 @@ import json
 import pytest
 
 from gpcr_tools.aggregator.runner import (
+    _assert_boundary_matcher_sound,
     _build_validation_report,
     _coupling_protomer,
+    _mark_multi_copy_ligand_gating,
+    _multi_copy_alert_component,
+    _multi_copy_site_divergence,
+    _path_covered,
     _prune_excluded_buffer_ligands,
     _rebuild_small_molecule_rows_from_per_copy,
+    _reconcile_source_discrepancies,
+    _shipped_base_prefixes,
     _write_outputs,
 )
 from gpcr_tools.aggregator.voting import find_discrepancies
@@ -604,6 +611,111 @@ class TestFunctionalCouplingAndBackboneFields:
         assert any(
             "TIE-BREAKER OVERRIDE" in c and "gnal_human" in c for c in report["algo_conflicts"]
         )
+
+
+def _report_native(chimera_result, ai_uniprot, monkeypatch, *, is_chimeric=None):
+    """Run the report with a G protein whose alpha subunit carries the model's
+    slug (and optionally the model's is_chimeric flag), returning the report."""
+    monkeypatch.setattr("gpcr_tools.aggregator.runner.validate_all", lambda *a, **k: [])
+    _no_detect_signals(monkeypatch)
+    g_protein: dict = {"alpha_subunit": {"uniprot_entry_name": ai_uniprot}}
+    if is_chimeric is not None:
+        g_protein["is_chimeric"] = is_chimeric
+    best = {"signaling_partners": {"g_protein": g_protein}}
+    return _build_validation_report("X", best, {}, [], chimera_result, None)
+
+
+class TestGAlphaSubtypeDowngrade:
+    """A native, family-consistent G protein whose subtype is structurally
+    inseparable (identical alpha5) is advisory, not a gating chimera review.
+    The downgrade is keyed on deterministic signals only."""
+
+    def _native_gi(self, **overrides):
+        base = dict(
+            family="Gi/o",
+            family_confident=True,
+            subtype_resolution=CHIMERA_SUBTYPE_INSEPARABLE_SET,
+            candidate_set=["gnai1_human", "gnai2_human"],
+            score=11,
+            a5_tail="IKNNLKDCGLF",
+            backbone_slug="gnai1_human",
+            backbone_family="Gi/o",
+            is_alpha5_graft=False,
+        )
+        base.update(overrides)
+        return _success(**base)
+
+    def test_native_family_verified_downgrades_to_advisory_note(self, monkeypatch):
+        from gpcr_tools.config import ALERT_PREFIX_GALPHA_SUBTYPE_UNRESOLVED
+
+        chim = self._native_gi()
+        report = _report_native(chim, "gnai1_human", monkeypatch)
+        # Advisory note, never a gating critical warning.
+        assert any(ALERT_PREFIX_GALPHA_SUBTYPE_UNRESOLVED in n for n in report["detector_notes"])
+        assert not any("[CHIMERIC G PROTEIN]" in w for w in report["critical_warnings"])
+        # The path anchor is preserved for downstream routing.
+        note = next(n for n in report["detector_notes"] if "SUBTYPE UNRESOLVED" in n)
+        assert "signaling_partners.g_protein.alpha_subunit" in note
+        # Nothing else gates this fixture.
+        assert report["critical_warnings"] == []
+        assert report["algo_conflicts"] == []
+
+    def test_downgrade_blocked_by_model_chimera_flag(self, monkeypatch):
+        # A model-declared chimera stays a gating review even when family-verified
+        # and backbone-consistent: the downgrade is never keyed on the AI flag alone.
+        chim = self._native_gi()
+        report = _report_native(chim, "gnai1_human", monkeypatch, is_chimeric=True)
+        assert any(
+            "[CHIMERIC G PROTEIN]" in w and "cannot distinguish the subtype" in w
+            for w in report["critical_warnings"]
+        )
+        assert not any("SUBTYPE UNRESOLVED" in n for n in report["detector_notes"])
+
+    def test_downgrade_blocked_when_no_deposited_backbone_slug(self, monkeypatch):
+        # No attached G-alpha slug on the entity -> no single family-consistent
+        # deposited backbone -> stays gating.
+        chim = self._native_gi(backbone_slug=None, backbone_family=None)
+        report = _report_native(chim, "gnai1_human", monkeypatch)
+        assert any("[CHIMERIC G PROTEIN]" in w for w in report["critical_warnings"])
+        assert not any("SUBTYPE UNRESOLVED" in n for n in report["detector_notes"])
+
+    def test_downgrade_blocked_when_backbone_family_differs(self, monkeypatch):
+        # The deposited scaffold is a different family (alpha5-graft) -> stays
+        # gating; the functional identity still follows the alpha5.
+        chim = self._native_gi(
+            backbone_slug="gnas2_human", backbone_family="Gs", is_alpha5_graft=True
+        )
+        report = _report_native(chim, "gnai1_human", monkeypatch)
+        assert any("[CHIMERIC G PROTEIN]" in w for w in report["critical_warnings"])
+        assert not any("SUBTYPE UNRESOLVED" in n for n in report["detector_notes"])
+
+    def test_construct_name_only_stays_gated(self, monkeypatch):
+        # Family is NOT verified (no model slug to confirm it) -> the family
+        # review stays gating regardless of a consistent backbone.
+        chim = self._native_gi()
+        report = _report_native(chim, None, monkeypatch)
+        assert any(
+            "[CHIMERIC G PROTEIN]" in w and "cannot distinguish the subtype" in w
+            for w in report["critical_warnings"]
+        )
+        assert not any("SUBTYPE UNRESOLVED" in n for n in report["detector_notes"])
+
+    def test_non_human_ortholog_uses_species_prefix_and_gates(self, monkeypatch):
+        from gpcr_tools.config import ALERT_PREFIX_GALPHA_SPECIES_UNVERIFIED
+
+        chim = self._native_gi(
+            subtype_resolution=CHIMERA_SUBTYPE_FAMILY_ONLY,
+            candidate_set=["gnai1_human", "gnai1_rat"],
+        )
+        report = _report_native(chim, "gnai1_human", monkeypatch)
+        # Renamed prefix, still a gating critical warning; anchor preserved.
+        assert any(
+            ALERT_PREFIX_GALPHA_SPECIES_UNVERIFIED in w
+            and "signaling_partners.g_protein.alpha_subunit" in w
+            for w in report["critical_warnings"]
+        )
+        assert not any("[CHIMERIC G PROTEIN]" in w for w in report["critical_warnings"])
+        assert not any("SUBTYPE UNRESOLVED" in n for n in report["detector_notes"])
 
 
 class TestDetectReviewSignalsRouted:
@@ -1762,3 +1874,333 @@ class TestRebuildSmallMoleculeRowsFromPerCopy:
         # The gate is unchanged: the disagreement the curator must see is still there.
         assert discrepancies == discrepancies_snapshot
         assert [d for d in discrepancies if d["path"].endswith("is_functional_ligand")]
+
+
+class TestSourceSideReconcile:
+    """A gating controversy no shipped entity owns is downgraded to advisory; a
+    controversy a shipped entity does cover keeps gating (reconciled at the
+    base-compound level so a still-shipping compound whose site changed keeps its
+    gate), and the bracket-safe prefix test never mis-slices a peptide name that
+    contains brackets.
+    """
+
+    def test_unreachable_gating_controversy_downgraded(self) -> None:
+        best = {"ligands": [{"chem_comp_id": "ATP", "role": {"value": "agonist"}}]}
+        discrepancies = [
+            {"path": "ligands[ATP].role.value", "gating": True},
+            {"path": "ligands[GONE].role.value", "gating": True},
+        ]
+        _reconcile_source_discrepancies(best, discrepancies)
+        by_path = {d["path"]: d for d in discrepancies}
+        # The shipped ATP row keeps its gate; the vanished GONE row has nothing to gate.
+        assert by_path["ligands[ATP].role.value"].get("gating", True) is True
+        assert by_path["ligands[GONE].role.value"]["gating"] is False
+
+    def test_same_compound_new_site_keeps_gating(self) -> None:
+        # The must-fix scenario: a step-10c rebuild rewrote a still-shipping
+        # compound's site_ref (HEM shipped now at 'allosteric'), while the gating
+        # site_ref controversy was recorded PRE-rebuild against the old site
+        # (HEM:orthosteric). The compound still ships at a site, so the contested
+        # site is a genuine shipped error and MUST keep gating -- reconciling on the
+        # full site-qualified identity would wrongly read HEM as "dropped".
+        best = {"ligands": [{"chem_comp_id": "HEM", "site_ref": "allosteric"}]}
+        discrepancies = [{"path": "ligands[HEM:orthosteric].site_ref", "gating": True}]
+        _reconcile_source_discrepancies(best, discrepancies)
+        assert discrepancies[0].get("gating", True) is True
+
+    def test_compound_dropped_entirely_downgraded(self) -> None:
+        # A controversy on a compound that no longer ships at ANY site is downgraded.
+        best = {"ligands": [{"chem_comp_id": "HEM", "site_ref": "allosteric"}]}
+        discrepancies = [{"path": "ligands[ATP:orthosteric].site_ref", "gating": True}]
+        _reconcile_source_discrepancies(best, discrepancies)
+        assert discrepancies[0]["gating"] is False
+
+    def test_substring_compound_id_not_confused(self) -> None:
+        # HEM shipped must not cover a controversy on the longer id HEME (the base
+        # id is a strict prefix but the boundary char after it is a name char).
+        best = {"ligands": [{"chem_comp_id": "HEM", "site_ref": "orthosteric"}]}
+        discrepancies = [{"path": "ligands[HEME:orthosteric].site_ref", "gating": True}]
+        _reconcile_source_discrepancies(best, discrepancies)
+        assert discrepancies[0]["gating"] is False
+
+    def test_bracketed_peptide_name_prefix_not_downgraded(self) -> None:
+        # A peptide whose name contains brackets ([Sar1,Ile8]-Angiotensin II) is a
+        # keyless ligand; its identity carries those brackets. A gating controversy
+        # on it must NOT be downgraded (a naive bracket-strip would wrongly clear it).
+        name = "[Sar1,Ile8]-Angiotensin II"
+        best = {"ligands": [{"chem_comp_id": "None", "name": name, "type": "peptide"}]}
+        (open_prefix,) = _shipped_base_prefixes(best)  # exactly one shipped ligand
+        path = f"{open_prefix}].pubchem_id"
+        discrepancies = [{"path": path, "gating": True}]
+        _reconcile_source_discrepancies(best, discrepancies)
+        assert discrepancies[0].get("gating", True) is True
+
+    def test_bracketed_peptide_sibling_downgraded(self) -> None:
+        # The lookalike sibling (Angiotensin III) does not ship, so a controversy
+        # on it is downgraded -- proving II and III are told apart despite the
+        # shared bracketed prefix.
+        best = {
+            "ligands": [
+                {"chem_comp_id": "None", "name": "[Sar1,Ile8]-Angiotensin II", "type": "peptide"}
+            ]
+        }
+        (open_prefix,) = _shipped_base_prefixes(best)
+        sibling_path = open_prefix.replace("angiotensin ii", "angiotensin iii") + "].pubchem_id"
+        discrepancies = [{"path": sibling_path, "gating": True}]
+        _reconcile_source_discrepancies(best, discrepancies)
+        assert discrepancies[0]["gating"] is False
+
+    def test_path_covered_boundary_semantics(self) -> None:
+        prefixes = {"ligands[HEM"}
+        # Site suffix (':') and identity close (']') are boundaries; a name char is not.
+        assert _path_covered("ligands[HEM:allosteric].site_ref", prefixes) is True
+        assert _path_covered("ligands[HEM].site_ref", prefixes) is True
+        assert _path_covered("ligands[HEME:allosteric].site_ref", prefixes) is False
+
+    def test_fail_closed_self_check_catches_broken_matcher(self) -> None:
+        # The self-check must be able to FAIL: a matcher that ignores the boundary
+        # (matches on bare startswith) would clear a real gate, so the guard trips.
+        prefixes = {"ligands[HEM"}
+        # A sound matcher passes the guard.
+        _assert_boundary_matcher_sound(prefixes)
+        import gpcr_tools.aggregator.runner as runner_mod
+
+        original = runner_mod._path_covered
+        runner_mod._path_covered = lambda path, ps: any(path.startswith(p) for p in ps)  # type: ignore[assignment]
+        try:
+            with pytest.raises(AssertionError):
+                _assert_boundary_matcher_sound(prefixes)
+        finally:
+            runner_mod._path_covered = original  # type: ignore[assignment]
+
+    def test_self_check_non_vacuous_when_nothing_shipped(self) -> None:
+        # The guard must not go vacuous when the shipped set is empty -- that is
+        # exactly when every list-path controversy is downgraded, so a broken
+        # matcher there would silently clear real gates. With no shipped prefixes,
+        # a sound matcher still passes and a bare-startswith matcher still trips.
+        _assert_boundary_matcher_sound(set())  # sound matcher, empty set: passes
+        import gpcr_tools.aggregator.runner as runner_mod
+
+        original = runner_mod._path_covered
+        runner_mod._path_covered = lambda path, ps: any(path.startswith(p) for p in ps)  # type: ignore[assignment]
+        try:
+            with pytest.raises(AssertionError):
+                _assert_boundary_matcher_sound(set())
+        finally:
+            runner_mod._path_covered = original  # type: ignore[assignment]
+
+    def test_self_check_catches_site_boundary_blind_matcher(self) -> None:
+        # The load-bearing case: a matcher that accepts the closing ']' boundary but
+        # is BLIND to the ':' (site-qualified) boundary. It would pass a self-check
+        # that never probes ':', yet it would read a still-shipping compound whose
+        # site was rewritten by the step-10c rebuild (HEM:orthosteric under a
+        # shipped HEM) as "dropped" and clear a genuine site conflict. The guard
+        # must trip on it -- for the empty set and for a shipped prefix alike.
+        import gpcr_tools.aggregator.runner as runner_mod
+
+        def _site_blind(path: str, ps) -> bool:
+            # Accepts only the ']' boundary; drops the ':' continuation.
+            return any(path.startswith(p) and path[len(p) : len(p) + 1] == "]" for p in ps)
+
+        original = runner_mod._path_covered
+        runner_mod._path_covered = _site_blind  # type: ignore[assignment]
+        try:
+            with pytest.raises(AssertionError):
+                _assert_boundary_matcher_sound(set())
+            with pytest.raises(AssertionError):
+                _assert_boundary_matcher_sound({"ligands[HEM"})
+        finally:
+            runner_mod._path_covered = original  # type: ignore[assignment]
+
+    def test_pre_vs_post_rebuild_site_conflict_kept_gating_end_to_end(self) -> None:
+        # The scenario the ':' guard protects, exercised through the public entry
+        # point: HEM ships at 'allosteric' (rewritten by the rebuild) while the
+        # gating site_ref controversy was recorded PRE-rebuild against the old site
+        # (HEM:orthosteric). The compound still ships, so the contested site is a
+        # genuine shipped error and must KEEP gating.
+        best = {"ligands": [{"chem_comp_id": "HEM", "site_ref": "allosteric"}]}
+        discrepancies = [{"path": "ligands[HEM:orthosteric].site_ref", "gating": True}]
+        _reconcile_source_discrepancies(best, discrepancies)
+        assert discrepancies[0].get("gating", True) is True
+
+    def test_advisory_controversy_left_untouched(self) -> None:
+        # A record already advisory (gating=False) is not re-examined.
+        best: dict = {"ligands": []}
+        discrepancies = [{"path": "ligands[GONE].role.value", "gating": False}]
+        _reconcile_source_discrepancies(best, discrepancies)
+        assert discrepancies[0]["gating"] is False
+
+    def test_non_list_paths_untouched(self) -> None:
+        # A scalar/top-level controversy is out of scope and keeps its verdict.
+        best: dict = {"ligands": []}
+        discrepancies = [{"path": "structure_info.state.value", "gating": True}]
+        _reconcile_source_discrepancies(best, discrepancies)
+        assert discrepancies[0].get("gating", True) is True
+
+
+def _mc_alert(comp):
+    """A MULTI_COPY_LIGAND oligomer alert carrying the ligands[<comp>] anchor path."""
+    return {
+        "type": ALERT_MULTI_COPY_LIGAND,
+        "message": (
+            f"[MULTI_COPY_LIGAND] at 'ligands[{comp}]': modelled in 2 copies "
+            f"(instances D, E); one annotation row may hide copies at distinct "
+            f"sites or with distinct roles. Human review recommended."
+        ),
+    }
+
+
+class TestMultiCopySiteDivergence:
+    """The pure per-component decision: a multi-copy ligand gates only when its
+    joined copies sit at more than one distinct binding site. Fail-closed on thin
+    or unattributable evidence."""
+
+    def test_same_site_across_copies_is_advisory(self):
+        assert (
+            _multi_copy_site_divergence([SITE_REF_MEMBRANE_FACING, SITE_REF_MEMBRANE_FACING])
+            is False
+        )
+
+    def test_distinct_sites_gate(self):
+        assert _multi_copy_site_divergence([SITE_REF_ORTHOSTERIC, SITE_REF_INTRACELLULAR]) is True
+
+    def test_known_versus_empty_gates(self):
+        # Fail-closed: an absent/blank site is its own distinct value, so a
+        # known-vs-blank pair is treated as divergent.
+        assert _multi_copy_site_divergence([SITE_REF_ORTHOSTERIC, None]) is True
+        assert _multi_copy_site_divergence([SITE_REF_ORTHOSTERIC, ""]) is True
+
+    def test_all_empty_is_one_value_advisory(self):
+        # Every copy blank -> a single distinct value -> advisory (None and "" fold
+        # to the same blank token).
+        assert _multi_copy_site_divergence([None, ""]) is False
+        assert _multi_copy_site_divergence([None, None]) is False
+
+    def test_fewer_than_two_copies_fail_closed(self):
+        assert _multi_copy_site_divergence([SITE_REF_ORTHOSTERIC]) is True
+        assert _multi_copy_site_divergence([]) is True
+        assert _multi_copy_site_divergence(None) is True
+
+    def test_three_copies_one_outlier_gate(self):
+        assert (
+            _multi_copy_site_divergence(
+                [SITE_REF_MEMBRANE_FACING, SITE_REF_MEMBRANE_FACING, SITE_REF_ORTHOSTERIC]
+            )
+            is True
+        )
+
+
+class TestMultiCopyAlertComponent:
+    """The component id is recovered from the alert's ligands[<comp>] path."""
+
+    def test_extracts_component(self):
+        assert _multi_copy_alert_component(_mc_alert("CLR")) == "CLR"
+        assert _multi_copy_alert_component(_mc_alert("A1AEI")) == "A1AEI"
+
+    def test_no_path_returns_none(self):
+        assert _multi_copy_alert_component({"type": ALERT_MULTI_COPY_LIGAND, "message": ""}) is None
+        assert _multi_copy_alert_component({"message": "no path here"}) is None
+
+
+class TestMarkMultiCopyLigandGating:
+    """The marker stamps each MULTI_COPY_LIGAND alert's ``gating`` flag from the
+    aggregated per-copy site attribution, joined through the oligomer roster. It
+    runs after the per-copy rebuild, so it reads the final ``ligand_copies``."""
+
+    def _best(self, comp, insts, copies, extra_alerts=None):
+        alerts = [_mc_alert(comp)]
+        if extra_alerts:
+            alerts.extend(extra_alerts)
+        return {
+            "oligomer_analysis": {
+                "alerts": alerts,
+                "nonpolymer_instance_index": {comp: insts},
+            },
+            "ligand_copies": copies,
+        }
+
+    def _flag(self, best, comp="CLR"):
+        for a in best["oligomer_analysis"]["alerts"]:
+            if a.get("type") == ALERT_MULTI_COPY_LIGAND and _multi_copy_alert_component(a) == comp:
+                return a.get("gating")
+        raise AssertionError("alert not found")
+
+    def test_same_site_marked_advisory(self):
+        best = self._best(
+            "CLR",
+            [_inst("A", "1201", "D"), _inst("A", "1202", "E")],
+            [
+                _pc("A:1201", SITE_REF_MEMBRANE_FACING),
+                _pc("A:1202", SITE_REF_MEMBRANE_FACING),
+            ],
+        )
+        _mark_multi_copy_ligand_gating(best)
+        assert self._flag(best) is False
+
+    def test_distinct_sites_marked_gating(self):
+        best = self._best(
+            "BU1",
+            [_inst("A", "409", "J"), _inst("A", "410", "K")],
+            [
+                _pc("A:409", SITE_REF_INTRACELLULAR),
+                _pc("A:410", SITE_REF_MEMBRANE_FACING),
+            ],
+        )
+        _mark_multi_copy_ligand_gating(best)
+        assert self._flag(best, "BU1") is True
+
+    def test_only_one_joinable_copy_fail_closed(self):
+        # The alert saw two copies, but only one per-copy row joins back -> gate.
+        best = self._best(
+            "CLR",
+            [_inst("A", "1201", "D"), _inst("A", "1202", "E")],
+            [_pc("A:1201", SITE_REF_MEMBRANE_FACING)],
+        )
+        _mark_multi_copy_ligand_gating(best)
+        assert self._flag(best) is True
+
+    def test_unmappable_component_fail_closed(self):
+        # No instance-index entry maps to the ligand copies -> no joinable copies.
+        best = {
+            "oligomer_analysis": {
+                "alerts": [_mc_alert("CLR")],
+                "nonpolymer_instance_index": {},
+            },
+            "ligand_copies": [
+                _pc("A:1201", SITE_REF_MEMBRANE_FACING),
+                _pc("A:1202", SITE_REF_MEMBRANE_FACING),
+            ],
+        }
+        _mark_multi_copy_ligand_gating(best)
+        assert self._flag(best) is True
+
+    def test_known_versus_unattributed_site_gates(self):
+        best = self._best(
+            "CLR",
+            [_inst("A", "1201", "D"), _inst("A", "1202", "E")],
+            [
+                _pc("A:1201", SITE_REF_ORTHOSTERIC),
+                _pc("A:1202", None),
+            ],
+        )
+        _mark_multi_copy_ligand_gating(best)
+        assert self._flag(best) is True
+
+    def test_non_multi_copy_alerts_untouched(self):
+        other = {"type": "HALLUCINATION", "message": "[HALLUCINATION] at 'receptor_info': x"}
+        best = self._best(
+            "CLR",
+            [_inst("A", "1201", "D"), _inst("A", "1202", "E")],
+            [
+                _pc("A:1201", SITE_REF_MEMBRANE_FACING),
+                _pc("A:1202", SITE_REF_MEMBRANE_FACING),
+            ],
+            extra_alerts=[other],
+        )
+        _mark_multi_copy_ligand_gating(best)
+        assert "gating" not in other
+
+    def test_no_oligomer_analysis_is_noop(self):
+        best = {"ligand_copies": []}
+        _mark_multi_copy_ligand_gating(best)  # must not raise
+        assert "oligomer_analysis" not in best

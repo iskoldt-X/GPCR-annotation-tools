@@ -74,7 +74,12 @@ def oligomer_gating_warnings(oligo: dict | None) -> list[str]:
             # duplicate it), while older recorded data needs it added.
             message = ensure_alert_prefix(atype, alert.get("message"))
             warnings.append(f"OLIGOMER ALERT at 'receptor_info': {message}")
-        elif atype == ALERT_MULTI_COPY_LIGAND:
+        elif atype == ALERT_MULTI_COPY_LIGAND and alert.get("gating", True):
+            # A multi-copy ligand gates only when its copies sit at distinct binding
+            # sites; the aggregator stamps that decision on the alert's ``gating``
+            # flag (copies sharing one site are advisory, still surfaced elsewhere).
+            # The flag defaults to True so a back-catalogue alert recorded before the
+            # flag existed still gates rather than being silently waved through.
             # Already carries its own 'ligands[...]' path, so it buckets with the
             # ligand block during review rather than under receptor_info.
             warnings.append(alert.get("message") or "")

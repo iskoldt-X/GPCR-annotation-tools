@@ -11,9 +11,11 @@ from collections import Counter, defaultdict
 from typing import Any
 
 from gpcr_tools.config import (
+    APO_SENTINEL,
     CASE_FOLD_NAME_FIELDS,
     GROUND_TRUTH_PATHS,
     LIST_ITEM_KEY_FIELDS,
+    SITE_REF_UNKNOWN,
     SOFT_FIELD_KEYS,
     VOTE_NEAR_TIE_MARGIN,
     is_empty_key,
@@ -21,6 +23,33 @@ from gpcr_tools.config import (
 from gpcr_tools.config import (
     list_item_identity as _list_item_identity,
 )
+
+# The keyless grouping identity of an apo (no-ligand) placeholder, as it appears
+# inside a discrepancy path: ``ligands[__keyless__:apo].site_ref``. The closing
+# bracket is part of the match so a real component whose normalized name merely
+# starts with "apo" (e.g. an "apocynin" ligand) is never mistaken for it.
+_APO_PLACEHOLDER_SEGMENT = f"[__keyless__:{APO_SENTINEL}]"
+
+
+def _site_ref_controversy_is_non_gating(path: str, shipped_value: Any) -> bool:
+    """Whether a ``site_ref`` vote controversy should be advisory, not gating.
+
+    A binding-site disagreement stops encoding a shipped error in exactly two
+    cases, and no others:
+
+    * the controversy is on the apo (no-ligand) placeholder, whose ``site_ref``
+      is meaningless and never reaches ligands.csv; or
+    * the shipped value is literally ``unknown`` -- the record committed to no
+      site, so there is no wrong site to review.
+
+    A near-tie between two REAL sites (orthosteric vs allosteric), or the mere
+    presence of ``unknown`` among the votes while a real site was shipped, is a
+    genuine site conflict and keeps gating.
+    """
+    if _APO_PLACEHOLDER_SEGMENT in path:
+        return True
+    return str(shipped_value).strip().lower() == SITE_REF_UNKNOWN
+
 
 # ---------------------------------------------------------------------------
 # Utility helpers
@@ -435,6 +464,14 @@ def find_discrepancies(
             # also keeps gating.
             if current_key == "role" and path.startswith("ligand_copies["):
                 record["gating"] = False
+            # A site_ref controversy is advisory when it is on the apo placeholder
+            # or the shipped value is 'unknown' (no committed site to be wrong).
+            # Real site conflicts (a shipped orthosteric/allosteric value) keep
+            # gating.
+            if current_key == "site_ref" and _site_ref_controversy_is_non_gating(
+                path, best_run_data
+            ):
+                record["gating"] = False
             discrepancies.append(record)
         else:
             margin = _vote_margin(all_votes_data)
@@ -457,6 +494,14 @@ def find_discrepancies(
                 # value (the CSV role comes from the compound-level ligand), so
                 # surface it for review without gating accept-all.
                 if current_key == "role" and path.startswith("ligand_copies["):
+                    record["gating"] = False
+                # Same site_ref carve-out as the differing-value branch: an apo
+                # placeholder or a shipped 'unknown' cannot encode a wrong site,
+                # so a near-tie there is advisory; a near-tie between two real
+                # sites keeps gating.
+                if current_key == "site_ref" and _site_ref_controversy_is_non_gating(
+                    path, best_run_data
+                ):
                     record["gating"] = False
                 discrepancies.append(record)
         return discrepancies
@@ -527,15 +572,22 @@ def flag_low_confidence_consensus(
             confidence = copy_row.get("confidence")
             for field in ("site_ref", "role"):
                 value = copy_row.get(field)
-                flags.append(
-                    {
-                        "path": f"ligand_copies[{key}].{field}",
-                        "best_run_value": value,
-                        "majority_vote_value": value,
-                        "all_votes": {},
-                        "needs_review": True,
-                        "low_confidence": confidence,
-                    }
-                )
+                flag: dict[str, Any] = {
+                    "path": f"ligand_copies[{key}].{field}",
+                    "best_run_value": value,
+                    "majority_vote_value": value,
+                    "all_votes": {},
+                    "needs_review": True,
+                    "low_confidence": confidence,
+                }
+                # A per-copy ROLE cannot encode a shipped error: the CSV Role
+                # column is taken from the compound-level ligand, never a
+                # ligand_copies row (mirrors the near-tie carve-out in
+                # find_discrepancies). It stays visible for review but is
+                # advisory. The per-copy site_ref does drive residue partitioning,
+                # so it keeps gating here.
+                if field == "role":
+                    flag["gating"] = False
+                flags.append(flag)
 
     return flags

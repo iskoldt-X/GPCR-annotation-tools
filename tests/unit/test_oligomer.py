@@ -116,6 +116,117 @@ class TestIsGpcrSlug:
 
 
 # ===================================================================
+# Non-receptor roster prefixes (peptide / chemokine / toxin / fusion)
+# ===================================================================
+
+
+class TestNonReceptorPrefixes:
+    """Non-7TM chains that carry a GPCRdb slug are kept out of the receptor roster.
+
+    Peptide agonists, chemokine ligands, toxins, crystallization / expression
+    partners, and signalling-pathway proteins have their own GPCRdb entry-name
+    slugs but no transmembrane span. Denylisting their slug prefixes keeps them
+    out of the receptor roster (and off the SUSPICIOUS_7TM tripwire) without
+    filtering any real receptor.
+    """
+
+    def test_peptide_hormone_ligand_filtered(self) -> None:
+        assert is_gpcr_slug("edn1_human") is False
+        assert is_gpcr_slug("pthy_human") is False
+        assert is_gpcr_slug("gast_human") is False
+        assert is_gpcr_slug("secr_human") is False
+
+    def test_chemokine_ligand_filtered(self) -> None:
+        assert is_gpcr_slug("sdf1_human") is False
+        assert is_gpcr_slug("ccl5_human") is False
+        assert is_gpcr_slug("cxcl2_human") is False
+        assert is_gpcr_slug("il8_human") is False
+
+    def test_toxin_and_fusion_partner_filtered(self) -> None:
+        assert is_gpcr_slug("3sim3_denan") is False
+        assert is_gpcr_slug("thio_ecoli") is False
+        assert is_gpcr_slug("luci_oplgr") is False
+        assert is_gpcr_slug("gpa1_yeast") is False
+
+    def test_accession_named_non_receptor_filtered(self) -> None:
+        assert is_gpcr_slug("b5xgr7_salsa") is False
+
+    def test_stem_underscore_filters_ligand_but_keeps_receptor(self) -> None:
+        # A ligand stem that is also a prefix of its own receptor family uses the
+        # trailing-underscore safe form: the ligand slug is filtered, the
+        # receptor slugs are preserved.
+        assert is_gpcr_slug("npy_human") is False
+        assert is_gpcr_slug("npy1r_human") is True
+        assert is_gpcr_slug("npy2r_human") is True
+
+        assert is_gpcr_slug("vip_human") is False
+        assert is_gpcr_slug("vipr1_human") is True
+        assert is_gpcr_slug("vipr2_human") is True
+
+        assert is_gpcr_slug("calc_human") is False
+        assert is_gpcr_slug("calcr_human") is True
+        assert is_gpcr_slug("calcrl_human") is True
+
+        assert is_gpcr_slug("gip_human") is False
+        assert is_gpcr_slug("gipr_human") is True
+
+        assert is_gpcr_slug("grp_human") is False
+        assert is_gpcr_slug("grpr_human") is True
+
+        assert is_gpcr_slug("nmu_human") is False
+        assert is_gpcr_slug("nmur1_human") is True
+
+        assert is_gpcr_slug("nmb_human") is False
+        assert is_gpcr_slug("nmbr_human") is True
+
+        assert is_gpcr_slug("mch_human") is False
+        assert is_gpcr_slug("mchr1_human") is True
+
+        assert is_gpcr_slug("npff_human") is False
+        assert is_gpcr_slug("npff1_human") is True
+
+    def test_undisambiguable_stems_stay_in_roster(self) -> None:
+        # Adhesion receptors and the V2 receptor share their slug stem with the
+        # non-receptor chain, so they cannot be denylisted safely -- they must
+        # remain real receptors (kept on the SUSPICIOUS_7TM alert instead).
+        assert is_gpcr_slug("v2r_human") is True
+        assert is_gpcr_slug("agre1_mouse") is True
+        assert is_gpcr_slug("agrg2_mouse") is True
+        assert is_gpcr_slug("agrl3_human") is True
+
+    def test_real_receptors_unaffected(self) -> None:
+        for slug in (
+            "drd2_human",
+            "5ht2a_human",
+            "adrb2_human",
+            "oprm_human",
+            "cnr1_human",
+            "crfr1_human",
+            "sctr_human",
+            "gp139_human",
+        ):
+            assert is_gpcr_slug(slug) is True, slug
+
+    def test_negative_prefixes_have_no_duplicates(self) -> None:
+        from gpcr_tools.config import GPCR_SLUG_NEGATIVE_PREFIXES
+
+        # No exact duplicates.
+        assert len(GPCR_SLUG_NEGATIVE_PREFIXES) == len(set(GPCR_SLUG_NEGATIVE_PREFIXES))
+        # And no prefix is subsumed by a shorter one. Matching is startswith
+        # (is_gpcr_slug), so a prefix that itself starts with another listed prefix
+        # filters nothing the shorter prefix does not already filter -- it is dead
+        # weight (e.g. "ccl20"/"ccl21" under "ccl2"). Rejecting subsumption keeps
+        # the denylist minimal and forces every entry to earn its place.
+        subsumed = sorted(
+            (longer, shorter)
+            for longer in GPCR_SLUG_NEGATIVE_PREFIXES
+            for shorter in GPCR_SLUG_NEGATIVE_PREFIXES
+            if longer != shorter and longer.startswith(shorter)
+        )
+        assert subsumed == [], f"redundant startswith-subsumed prefixes: {subsumed}"
+
+
+# ===================================================================
 # get_sequence_length
 # ===================================================================
 
@@ -291,9 +402,12 @@ class TestRosterTmGating:
         return data["oligomer_analysis"]
 
     def test_zero_tm_peptide_ligand_chain_excluded(self) -> None:
-        # 8XGR-shape: endothelin-1 peptide (0 TM) sharing the roster with EDNRB.
+        # A short peptide agonist (0 TM) sharing the roster with a 7TM receptor.
+        # The peptide slug is deliberately NOT on the negative-prefix denylist, so
+        # it enters the roster and must be dropped by the transmembrane gate (0 TM)
+        # rather than being filtered upstream -- this exercises the TM gate itself.
         o = self._analyze(
-            [_make_entity("ednrb_human", "R"), _make_entity("edn1_human", "L")],
+            [_make_entity("ednrb_human", "R"), _make_entity("pep1_human", "L")],
             {
                 "R": {"resolved_tms": 7, "total_tms": 7, "status": TM_STATUS_COMPLETE},
                 "L": {"resolved_tms": 0, "total_tms": 0, "status": TM_STATUS_UNKNOWN},
@@ -2015,10 +2129,14 @@ class TestTmFetchReliability:
     def _enriched_receptor_plus_peptide(self) -> dict[str, Any]:
         # Both chains carry a GPCR slug in the roster; only the real receptor is a
         # 7TM bundle. The peptide (a short agonist) must NOT count as a receptor.
+        # The peptide slug is deliberately one NOT on the negative-prefix denylist,
+        # so it reaches the transmembrane gate rather than being filtered upstream --
+        # this class exercises the TM-gate fallback (the tripwire for an
+        # un-catalogued peptide prefix), not the denylist itself.
         return _make_enriched_with_entities(
             [
                 _make_entity("pth1r_human", "A", length=420),
-                _make_entity("pthy_human", "P", length=34),
+                _make_entity("pep1_human", "P", length=34),
             ]
         )
 
@@ -2370,10 +2488,14 @@ class TestAnalyzeOligomerAiCrossCheck:
         # classifier count is the unfiltered 2. The AI says 'monomer'. The count
         # is untrustworthy and already routes via TM_DATA_UNAVAILABLE, so the
         # cross-check must NOT add a second (spurious) disagreement.
+        # The peptide slug is deliberately NOT on the negative-prefix denylist, so
+        # both chains enter the roster and the unfiltered count is 2 (the point of
+        # this case). A denylisted peptide would be pruned upstream, dropping the
+        # count to 1 and making the assertion vacuous.
         enriched = _make_enriched_with_entities(
             [
                 _make_entity("pth1r_human", "A", length=420),
-                _make_entity("pthy_human", "P", length=34),
+                _make_entity("pep1_human", "P", length=34),
             ]
         )
         cache = _FakePolymerFeaturesCache()  # empty -> miss

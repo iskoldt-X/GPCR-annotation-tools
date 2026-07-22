@@ -49,6 +49,8 @@ from gpcr_tools.config import (
     ALERT_PREFIX_ALPHA5_GRAFT,
     ALERT_PREFIX_API_UNAVAILABLE,
     ALERT_PREFIX_CHIMERIC_REVIEW,
+    ALERT_PREFIX_GALPHA_SPECIES_UNVERIFIED,
+    ALERT_PREFIX_GALPHA_SUBTYPE_UNRESOLVED,
     ALERT_PREFIX_HALLUCINATION,
     ALERT_PREFIX_TIE_BREAKER_ALIGNED,
     ALERT_PREFIX_TIE_BREAKER_OVERRIDE,
@@ -60,6 +62,7 @@ from gpcr_tools.config import (
     CHIMERA_SUBTYPE_LOW_CONFIDENCE,
     EMPTY_VALUES,
     FULL_G_ALPHA_CANDIDATES,
+    LIST_ITEM_KEY_FIELDS,
     LOW_CONFIDENCE_LEVELS,
     POLYMER_FEATURES_CACHE_NAME,
     SITE_REF_UNKNOWN,
@@ -611,6 +614,263 @@ def _rebuild_small_molecule_rows_from_per_copy(
     best_run_data["ligand_copies"] = copy.deepcopy(voted_copies)
 
 
+def _multi_copy_alert_component(alert: dict[str, Any]) -> str | None:
+    """Component id a ``MULTI_COPY_LIGAND`` alert refers to, from its message path.
+
+    The alert message carries the component in a ``ligands[<comp_id>]`` path (the
+    same anchor the excluded-buffer prune keys on). Returns the component id, or
+    ``None`` when no such path is present.
+    """
+    message = str(alert.get("message", ""))
+    marker = "ligands["
+    start = message.find(marker)
+    if start == -1:
+        return None
+    start += len(marker)
+    end = message.find("]", start)
+    if end == -1:
+        return None
+    return message[start:end]
+
+
+def _multi_copy_site_divergence(sites: list[Any] | None) -> bool:
+    """Whether a component's per-copy binding sites diverge enough to gate review.
+
+    Gates (returns ``True``) iff the joined copies place the component at more than
+    one distinct binding site. Fail-closed: an absent / unattributable site is
+    treated as its own distinct value (so a known-vs-blank split gates), and fewer
+    than two joinable copies also gates -- a copy count the alert saw but the
+    per-copy attribution cannot corroborate is left for a curator, not waved
+    through. Same site across every copy is advisory (returns ``False``).
+    """
+    if not sites or len(sites) < 2:
+        return True
+    return len({_copy_token(s) for s in sites}) > 1
+
+
+def _mark_multi_copy_ligand_gating(best_run_data: dict[str, Any]) -> None:
+    """Stamp each ``MULTI_COPY_LIGAND`` oligomer alert with a ``gating`` flag.
+
+    A component modelled in several copies only warrants a curator's stop when those
+    copies sit at DISTINCT binding sites; copies that all share one site are an
+    advisory the curator still sees but that does not gate acceptance. The per-copy
+    binding sites come from the aggregated ``ligand_copies`` list, joined to each
+    component through the oligomer roster's ``nonpolymer_instance_index``. The flag
+    the read-time gate reads (:func:`gpcr_tools.validator.gating.oligomer_gating_warnings`)
+    is written here, in place, per :func:`_multi_copy_site_divergence`.
+
+    Must run AFTER :func:`_rebuild_small_molecule_rows_from_per_copy`, which sets the
+    final aggregated ``ligand_copies`` this join reads. Alerts of any other type are
+    untouched; a record with no oligomer analysis or no such alerts is a no-op.
+    """
+    oligomer = best_run_data.get("oligomer_analysis")
+    if not isinstance(oligomer, dict):
+        return
+    alerts = oligomer.get("alerts")
+    if not isinstance(alerts, list):
+        return
+
+    # Reverse index: per-copy identifier ("<auth_asym_id>:<auth_seq_id>") -> component
+    # id, from the oligomer roster -- the same token the aggregated ``ligand_copies``
+    # rows carry in ``copy_id`` (see _rebuild_small_molecule_rows_from_per_copy).
+    instance_index = oligomer.get("nonpolymer_instance_index")
+    token_to_comp: dict[str, str] = {}
+    if isinstance(instance_index, dict):
+        for comp_id, instances in instance_index.items():
+            if not isinstance(comp_id, str) or not isinstance(instances, list):
+                continue
+            for inst in instances:
+                if not isinstance(inst, dict):
+                    continue
+                token = f"{_copy_token(inst.get('auth_asym_id'))}:{_copy_token(inst.get('auth_seq_id'))}"
+                token_to_comp[token] = comp_id
+
+    # Per-component list of the binding sites its joined copies were attributed to.
+    sites_by_comp: dict[str, list[Any]] = {}
+    for copy_row in best_run_data.get("ligand_copies") or []:
+        if not isinstance(copy_row, dict):
+            continue
+        comp_id = token_to_comp.get(_copy_token(copy_row.get("copy_id")))
+        if comp_id is None:
+            continue
+        sites_by_comp.setdefault(comp_id, []).append(copy_row.get("site_ref"))
+
+    for alert in alerts:
+        if not isinstance(alert, dict) or alert.get("type") != ALERT_MULTI_COPY_LIGAND:
+            continue
+        comp_id = _multi_copy_alert_component(alert)
+        sites = sites_by_comp.get(comp_id) if comp_id is not None else None
+        alert["gating"] = _multi_copy_site_divergence(sites)
+
+
+def _shipped_base_prefixes(best_run_data: dict[str, Any]) -> set[str]:
+    """Open (unclosed-bracket) path prefixes of every shipped entity's BASE identity.
+
+    Each prefix is ``field[<base-identity>`` -- deliberately WITHOUT the closing
+    ``]`` -- so a boundary test can tell where the identity ends. The base identity
+    is built through the shared config helper (:func:`list_item_identity`) so it is
+    byte-identical to the one a discrepancy path is built from; for the ligands
+    list any ``site_ref`` is removed from the item BEFORE the helper runs, because
+    the ligand identity embeds ``site_ref`` (``comp:site``) and we must reconcile
+    at the base-compound level: a compound that still ships at a NEW site is not a
+    dropped entity. ``site_ref`` is dropped via a filtered copy through the shared
+    helper -- never a regex strip -- so a bracketed peptide name is left intact.
+    Auxiliary-protein and per-copy identities carry no ``site_ref`` suffix and pass
+    through unchanged.
+    """
+    prefixes: set[str] = set()
+    for list_field, key_field in LIST_ITEM_KEY_FIELDS.items():
+        items = best_run_data.get(list_field)
+        if not isinstance(items, list):
+            continue
+        for idx, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            base_item = item
+            if key_field == "chem_comp_id" and "site_ref" in item:
+                # Base-compound identity: strip site_ref so the same compound at a
+                # different site is not treated as a different (dropped) entity.
+                base_item = {k: v for k, v in item.items() if k != "site_ref"}
+            base = list_item_identity(base_item, key_field, idx)
+            prefixes.add(f"{list_field}[{base}")
+    return prefixes
+
+
+def _path_covered(path: str, open_prefixes: set[str]) -> bool:
+    """Whether some shipped BASE prefix covers *path* at a structural boundary.
+
+    *open_prefixes* are ``field[<base-identity>`` strings with no closing bracket
+    (see :func:`_shipped_base_prefixes`). A prefix covers *path* only when *path*
+    continues with a boundary character immediately after the base identity:
+
+    * ``:`` -- a ``site_ref`` suffix follows in the ligand identity
+      (``ligands[HEM:allosteric]...``); or
+    * ``]`` -- the identity closes (no site, or an aux / per-copy identity).
+
+    BRACKET-SAFE: the prefix is built from shipped data and the path is matched
+    against it -- the path is NEVER split on ``[`` / ``]``. So a compound id that
+    is a strict substring of a longer id (``HEM`` vs ``HEME``), and a peptide name
+    containing brackets whose lookalike sibling differs only in a trailing token
+    (``[Sar1,Ile8]-Angiotensin II`` vs ``... III``), both FAIL the boundary test
+    instead of matching. Reconciling at the base-compound level means a controversy
+    on a compound that still ships at ANY site stays covered (keeps gating); only a
+    compound dropped from the record entirely goes uncovered.
+    """
+    for prefix in open_prefixes:
+        if path.startswith(prefix) and path[len(prefix) : len(prefix) + 1] in (":", "]"):
+            return True
+    return False
+
+
+def _assert_boundary_matcher_sound(open_prefixes: set[str]) -> None:
+    """Fail-closed self-check that the bracket-safe boundary matcher actually works.
+
+    A vacuous guard proves nothing. Two ways this check could have been vacuous,
+    both closed here:
+
+    1. A guard that only runs its discriminating probes inside a
+       ``for prefix in open_prefixes`` loop proves NOTHING when nothing shipped
+       (empty set) -- yet that is exactly the case where every list-path
+       controversy gets downgraded, so the matcher must be sound there too. So the
+       discriminating probes below are FIXED and run UNCONDITIONALLY, independent of
+       what shipped.
+    2. The one boundary that actually protects a real gate is ``:`` -- the
+       pre-vs-post-rebuild path mismatch. A step-10c rebuild can move a still-
+       shipping compound to a new site, so a controversy recorded PRE-rebuild reads
+       ``ligands[HEM:orthosteric].site_ref`` while the shipped base prefix is
+       ``ligands[HEM`` (site stripped). Reconcile must KEEP gating that genuine
+       site conflict, which requires the matcher to cover the ``:`` continuation.
+       A matcher that handled only ``]`` (identity closes immediately) would pass a
+       self-check that never probes ``:`` yet silently clear that real gate. So we
+       assert BOTH boundaries positively.
+
+    A regression in any direction (bare ``startswith`` that ignores the boundary; a
+    matcher that accepts only ``]`` and drops ``:``; or one that accepts only ``:``
+    and drops ``]``) trips an assertion here and routes the PDB to human review
+    rather than clearing a gate.
+    """
+    # Fixed probes -- ALWAYS run, so the guard is non-vacuous even when nothing
+    # shipped. ``base`` stands in for any shipped base identity ``field[<id>``.
+    base = "ligands[HEM"
+    # Positive, ``]`` boundary: the base identity closes immediately (no site).
+    assert _path_covered(f"{base}].pubchem_id", {base}), (
+        "boundary matcher failed to cover a base identity at its closing bracket"
+    )
+    # Positive, ``:`` boundary: the site-qualified descendant -- the exact
+    # pre-vs-post-rebuild path (HEM:orthosteric under a shipped HEM) whose genuine
+    # site conflict reconcile must keep gating. A matcher blind to ``:`` fails HERE.
+    assert _path_covered(f"{base}:orthosteric].site_ref", {base}), (
+        "boundary matcher failed to cover a site-qualified descendant (':' boundary)"
+    )
+    # Negative, name-char continuation: a longer id sharing the base as a strict
+    # prefix (HEME under HEM) MUST NOT match. A bare-startswith matcher fails HERE.
+    assert not _path_covered(f"{base}E:orthosteric].site_ref", {base}), (
+        "boundary matcher matched a longer id (HEME) under a shorter one (HEM)"
+    )
+    # Bracketed peptide identity: the path is never naively split on ``[`` / ``]``.
+    canary = "ligands[__keyless__:[sar1,ile8] angiotensin ii"
+    sibling = "ligands[__keyless__:[sar1,ile8] angiotensin iii"
+    assert _path_covered(f"{canary}].site_ref", {canary}), (
+        "boundary matcher failed on a bracketed peptide identity"
+    )
+    # The lookalike sibling (III) shares the shipped II identity as a strict prefix
+    # followed by a name char; a bare-startswith matcher would match it HERE.
+    assert not _path_covered(f"{sibling}].site_ref", {canary}), (
+        "boundary matcher matched a lookalike bracketed sibling (III under II)"
+    )
+
+    # Every real shipped prefix must behave the same as the fixed probes.
+    for prefix in open_prefixes:
+        assert _path_covered(f"{prefix}].site_ref", open_prefixes), (
+            f"boundary matcher failed to cover shipped prefix {prefix!r}"
+        )
+        assert _path_covered(f"{prefix}:orthosteric].site_ref", open_prefixes), (
+            f"boundary matcher failed to cover site-qualified descendant of {prefix!r}"
+        )
+        assert not _path_covered(f"{prefix}X].site_ref", {prefix}), (
+            f"boundary matcher matched a longer id for prefix {prefix!r}"
+        )
+
+
+def _reconcile_source_discrepancies(
+    best_run_data: dict[str, Any],
+    discrepancies: list[dict[str, Any]],
+) -> None:
+    """Downgrade (in place) gating controversies no shipped entity can own.
+
+    A vote controversy on a ``ligands[...]`` / ``auxiliary_proteins[...]`` /
+    ``ligand_copies[...]`` path can only encode a shipped error if some shipped
+    entity actually lives under that path. When aggregation rebuilds or drops the
+    list, a controversy can be left pointing at an entity the final record no
+    longer carries; that controversy has nothing to gate, so it becomes advisory.
+
+    Reconciliation is at the BASE-COMPOUND level (see :func:`_shipped_base_prefixes`):
+    a ligand identity embeds ``site_ref``, and a step-10c rebuild can rewrite a
+    still-shipping compound's site. Matching on the full site-qualified identity
+    would then read that compound as "dropped" and clear a GENUINE site conflict on
+    a compound that still ships -- exactly the confidently-wrong-released class the
+    gate exists to catch. So a controversy stays gating whenever its base compound
+    still ships at ANY site; only an entity dropped from the record entirely is
+    downgraded.
+
+    Fail-closed: the bracket-safe boundary matcher is validated first
+    (:func:`_assert_boundary_matcher_sound`); if it is ever untrustworthy we assert
+    rather than risk clearing a real gate -- the raised error routes the PDB to
+    human review.
+    """
+    prefixes = _shipped_base_prefixes(best_run_data)
+    _assert_boundary_matcher_sound(prefixes)
+
+    for record in discrepancies:
+        path = record.get("path")
+        if not isinstance(path, str) or not record.get("gating", True):
+            continue
+        if not any(path.startswith(f"{list_field}[") for list_field in LIST_ITEM_KEY_FIELDS):
+            continue
+        if not _path_covered(path, prefixes):
+            record["gating"] = False
+
+
 def _build_validation_report(
     pdb_id: str,
     best_run_data: dict[str, Any],
@@ -618,6 +878,7 @@ def _build_validation_report(
     all_warnings: list[str],
     chimera_result: dict[str, Any],
     validation_cache: ValidationCache | None,
+    ligand_advisories: list[str] | None = None,
 ) -> dict[str, Any]:
     """Assemble the validation report from all warning sources.
 
@@ -625,11 +886,15 @@ def _build_validation_report(
     status comparisons go through the shared constants. The G-alpha sequence
     finding is classified against the model's claim: family agreement, subtype
     resolution, and routing of an indistinguishable subtype to human review.
+
+    ``ligand_advisories`` are non-gating ligand findings (see
+    :func:`validate_and_enrich_ligands`); they are recorded as detector notes so
+    the curator sees them without the PDB being held for review.
     """
     report: dict[str, Any] = {
         "critical_warnings": list(all_warnings),
         "algo_conflicts": [],
-        "detector_notes": [],
+        "detector_notes": list(ligand_advisories or []),
         "chimera_score": chimera_result.get("score") or 0,
         "chimera_status": chimera_result.get("status") or CHIMERA_STATUS_SKIPPED,
         "timestamp": datetime.now(tz=UTC).isoformat(),
@@ -784,14 +1049,52 @@ def _build_validation_report(
                 subtype_basis = SUBTYPE_BASIS_CONSTRUCT_NAME
             members = ", ".join(candidate_set) or "indistinguishable subtypes"
             off_roster = [s for s in candidate_set if s not in _RECOGNISED_G_ALPHA_SLUGS]
+            # Whether this is a native, family-consistent G protein whose only
+            # residual ambiguity is the structurally-inseparable subtype. The
+            # downgrade to an advisory note is keyed on DETERMINISTIC signals
+            # only -- never on the model's is_chimeric flag alone, which the
+            # model can silently omit. All four must hold:
+            #   - the family is verified (model family == alpha5 family);
+            #   - the model did not itself declare a chimera;
+            #   - the deposited backbone is a single family-consistent slug
+            #     (backbone family == alpha5 family), i.e. not a construct built
+            #     on a foreign scaffold and not an entity with no attached slug;
+            #   - there is no alpha5-graft signature (a grafted foreign alpha5).
+            # A native inseparable-subtype call (gnai1/gnai2, gnaq/gna11, the
+            # transducins) is then advisory: the specific member simply cannot be
+            # read from structure, so forcing a curator to pick one is noise.
+            backbone_family = chimera_result.get("backbone_family")
+            backbone_slug = chimera_result.get("backbone_slug")
+            native_family_consistent = (
+                subtype_basis == SUBTYPE_BASIS_FAMILY_VERIFIED
+                and g_protein.get("is_chimeric") is not True
+                and backbone_slug is not None
+                and backbone_family == family
+                and not chimera_result.get("is_alpha5_graft")
+            )
             if off_roster:
+                # Non-human ortholog of a verified family: a species / GPCRdb
+                # mapping question, still gating.
                 report["critical_warnings"].append(
-                    f"{ALERT_PREFIX_CHIMERIC_REVIEW} at "
+                    f"{ALERT_PREFIX_GALPHA_SPECIES_UNVERIFIED} at "
                     f"'signaling_partners.g_protein.alpha_subunit': alpha5 indicates a "
                     f"non-human ortholog of the {family} family ({members}); confirm "
                     f"the species / GPCRdb mapping."
                 )
+            elif native_family_consistent:
+                # Native, family-consistent G protein whose subtype is
+                # structurally inseparable: advisory note, does not gate.
+                report["detector_notes"].append(
+                    f"{ALERT_PREFIX_GALPHA_SUBTYPE_UNRESOLVED} at "
+                    f"'signaling_partners.g_protein.alpha_subunit': alpha5 confirms the "
+                    f"{family} family; the specific subtype ({members}) has an identical "
+                    f"alpha5 and cannot be resolved from structure. Native {family} G "
+                    f"protein -- advisory."
+                )
             else:
+                # Family verified only by construct name, or some other reason
+                # the family-consistent-native test did not hold: keep the
+                # gating chimera review so a curator confirms the subtype.
                 report["critical_warnings"].append(
                     f"{ALERT_PREFIX_CHIMERIC_REVIEW} at "
                     f"'signaling_partners.g_protein.alpha_subunit': alpha5 confirms the "
@@ -1099,11 +1402,17 @@ def aggregate_pdb(
 
         # 6. Ligand validation (mutates best_run_data, returns warnings)
         all_warnings: list[str] = []
+        # Advisory ligand findings (an already-blanked PubChem CID, an apo
+        # placeholder whose only companions are structural cofactors/ions/lipids)
+        # are collected separately so the report records them as detector notes
+        # rather than gating warnings.
+        ligand_advisories: list[str] = []
         ligand_warnings = validate_and_enrich_ligands(
             pdb_id,
             best_run_data,
             enriched,
             synonym_cache=synonym_cache if not skip_api_checks else None,
+            advisory_notes=ligand_advisories,
         )
         all_warnings.extend(ligand_warnings)
 
@@ -1173,6 +1482,22 @@ def aggregate_pdb(
         # before those paths are produced.
         _rebuild_small_molecule_rows_from_per_copy(best_run_data, majority_votes)
 
+        # 10d. Decide, per multi-copy-ligand alert, whether it gates. A component
+        # modelled in several copies only stops the curator when those copies sit at
+        # DISTINCT binding sites; copies that all share one site stay advisory. Runs
+        # AFTER the per-copy rebuild (step 10c) so it reads the final aggregated
+        # ``ligand_copies`` the join depends on, and BEFORE the validation report /
+        # write so the flag is persisted for the read-time gate.
+        _mark_multi_copy_ligand_gating(best_run_data)
+
+        # 10e. Source-side reconcile: now that the ligand list is in its final
+        # shape, downgrade any gating controversy whose path no shipped entity
+        # covers (a rebuilt/dropped row can leave a controversy pointing at an
+        # identity the record no longer carries). Runs after the rebuild so
+        # reachability is checked against the shipped identities, and before the
+        # report so the gate reflects the reconciled controversies.
+        _reconcile_source_discrepancies(best_run_data, discrepancies)
+
         # 11. Assemble validation report
         v_cache = validation_cache if not skip_api_checks else None
         report = _build_validation_report(
@@ -1182,6 +1507,7 @@ def aggregate_pdb(
             all_warnings,
             chimera_result,
             v_cache,
+            ligand_advisories=ligand_advisories,
         )
 
         # 12. Atomic write block
