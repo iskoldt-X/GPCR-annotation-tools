@@ -184,6 +184,45 @@ class TestOligomerGatingWarnings:
         }
         assert oligomer_gating_warnings(oligo) == []
 
+    def test_oligomer_disagreement_advisory_flag_does_not_gate(self):
+        """An OLIGOMER_DISAGREEMENT stamped gating=False by the aggregator (AI
+        undercounts the receptor and RCSB's assembly shows no homo-oligomer) is
+        surfaced elsewhere but is not a gating warning."""
+        oligo = {
+            "chain_id_override": {"applied": False},
+            "alerts": [
+                {
+                    "type": ALERT_OLIGOMER_DISAGREEMENT,
+                    "message": "[OLIGOMER_DISAGREEMENT] at 'receptor_info': confirm",
+                    "gating": False,
+                }
+            ],
+            "all_gpcr_chains": [],
+        }
+        assert oligomer_gating_warnings(oligo) == []
+
+    def test_oligomer_disagreement_gating_flag_true_surfaces(self):
+        msg = "[OLIGOMER_DISAGREEMENT] at 'receptor_info': confirm"
+        oligo = {
+            "chain_id_override": {"applied": False},
+            "alerts": [{"type": ALERT_OLIGOMER_DISAGREEMENT, "message": msg, "gating": True}],
+            "all_gpcr_chains": [],
+        }
+        out = oligomer_gating_warnings(oligo)
+        assert out == [f"OLIGOMER ALERT at 'receptor_info': {msg}"]
+
+    def test_oligomer_disagreement_absent_flag_defaults_to_gating(self):
+        """A back-catalogue OD alert recorded before the gating flag existed still
+        gates -- the flag defaults to True."""
+        msg = "[OLIGOMER_DISAGREEMENT] at 'receptor_info': confirm"
+        oligo = {
+            "chain_id_override": {"applied": False},
+            "alerts": [{"type": ALERT_OLIGOMER_DISAGREEMENT, "message": msg}],
+            "all_gpcr_chains": [],
+        }
+        out = oligomer_gating_warnings(oligo)
+        assert out == [f"OLIGOMER ALERT at 'receptor_info': {msg}"]
+
     def test_order_is_override_then_alerts_then_7tm(self):
         oligo = {
             "chain_id_override": {

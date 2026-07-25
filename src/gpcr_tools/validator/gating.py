@@ -67,6 +67,18 @@ def oligomer_gating_warnings(oligo: dict | None) -> list[str]:
     for alert in oligo.get("alerts") or []:
         atype = alert.get("type") or ""
         if atype in _GATING_OLIGOMER_ALERTS:
+            if atype == ALERT_OLIGOMER_DISAGREEMENT and not alert.get("gating", True):
+                # An OD alert the aggregator downgraded to advisory: the AI released
+                # monomer while the classifier counted >=2 same-slug chains, but
+                # RCSB's own global biological assembly records the receptor as a
+                # single copy (a Monomer assembly, or an all-single stoichiometry),
+                # so the released monomer agrees with both the AI and RCSB. Still
+                # surfaced to the curator via the alert list, but not gating -- the
+                # same non-gating policy the parallel ASSEMBLY_MISMATCH advisory
+                # already carries. The flag defaults to True so a back-catalogue OD
+                # alert recorded before the flag existed still gates rather than
+                # being silently waved through.
+                continue
             # The "at 'receptor_info'" prefix is a routing anchor so this alert
             # buckets under the receptor block during review. ensure_alert_prefix
             # keeps the message's own "[TYPE]" label present exactly once --

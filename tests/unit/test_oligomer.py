@@ -47,8 +47,10 @@ from gpcr_tools.config import (
 from gpcr_tools.csv_generator.logic import resolve_partner_protomer
 from gpcr_tools.csv_generator.validation_display import inject_oligomer_alerts
 from gpcr_tools.validator.oligomer import (
+    _ai_state_lacks_independent_evidence,
     _analyze_tm_for_entity_instance,
     _apply_chain_override,
+    _assembly_receptor_is_single,
     _build_gpcr_roster,
     _build_label_asym_id_map,
     _generate_alerts,
@@ -56,6 +58,7 @@ from gpcr_tools.validator.oligomer import (
     _parse_oligomeric_count,
     _reconcile_ai_oligomer,
     _reconcile_assembly_consistency,
+    _stoich_copy_count,
     _suggest_primary_protomer,
     analyze_oligomer,
     build_nonpolymer_instance_index,
@@ -1604,6 +1607,72 @@ class TestAssemblyCrossCheckCandidatePreference:
         assert result["rcsb_candidate_assembly"] == "Y"
         assert result["modeled_polymer_monomer_count"] == 600
 
+    def test_homo_in_a_sibling_candidate_is_reported_separately(self) -> None:
+        # An entry can deposit several candidate assemblies that disagree. The
+        # chosen-assembly flag stays False (its own blocks record no Homo) while the
+        # wider scan sees the sibling's Homo block, so a caller can tell "the
+        # assembly we display says no homo-oligomer" from "no deposited assembly
+        # says one".
+        enriched: dict[str, Any] = {
+            "assemblies": [
+                {
+                    "pdbx_struct_assembly": {"rcsb_candidate_assembly": "Y"},
+                    "rcsb_struct_symmetry": [
+                        {"oligomeric_state": "Monomer", "stoichiometry": ["A1"]}
+                    ],
+                },
+                {
+                    "pdbx_struct_assembly": {"rcsb_candidate_assembly": "Y"},
+                    "rcsb_struct_symmetry": [
+                        {"oligomeric_state": "Homo 2-mer", "stoichiometry": ["A2"]}
+                    ],
+                },
+            ]
+        }
+        result = _get_assembly_cross_check(enriched)
+        assert result["has_homo_symmetry"] is False
+        assert result["homo_symmetry_in_any_candidate"] is True
+
+    def test_non_candidate_sibling_homo_is_not_counted(self) -> None:
+        # The scan is scoped to candidate assemblies: a Homo block on an assembly
+        # RCSB did not flag as a biological candidate does not withhold a downgrade.
+        enriched: dict[str, Any] = {
+            "assemblies": [
+                {
+                    "pdbx_struct_assembly": {"rcsb_candidate_assembly": "Y"},
+                    "rcsb_struct_symmetry": [
+                        {"oligomeric_state": "Monomer", "stoichiometry": ["A1"]}
+                    ],
+                },
+                {
+                    "pdbx_struct_assembly": {"rcsb_candidate_assembly": "N"},
+                    "rcsb_struct_symmetry": [
+                        {"oligomeric_state": "Homo 2-mer", "stoichiometry": ["A2"]}
+                    ],
+                },
+            ]
+        }
+        result = _get_assembly_cross_check(enriched)
+        assert result["homo_symmetry_in_any_candidate"] is False
+
+    def test_homo_in_the_chosen_assembly_also_sets_the_wider_flag(self) -> None:
+        # The wider flag is a superset: whatever the chosen assembly records, the
+        # scan must also report, so no caller can read the two as contradictory.
+        enriched: dict[str, Any] = {
+            "assemblies": [
+                {
+                    "pdbx_struct_assembly": {"rcsb_candidate_assembly": "Y"},
+                    "rcsb_struct_symmetry": [
+                        {"oligomeric_state": "Hetero 3-mer", "stoichiometry": ["A1", "B1", "C1"]},
+                        {"oligomeric_state": "Homo 2-mer", "stoichiometry": ["A2"]},
+                    ],
+                }
+            ]
+        }
+        result = _get_assembly_cross_check(enriched)
+        assert result["has_homo_symmetry"] is True
+        assert result["homo_symmetry_in_any_candidate"] is True
+
     def test_falls_back_to_first_when_none_flagged(self) -> None:
         enriched: dict[str, Any] = {
             "assemblies": [
@@ -2386,16 +2455,334 @@ class TestReconcileAiOligomer:
             _reconcile_ai_oligomer("garbage", OLIGOMER_HOMOMER, 2, tm_data_available=True) is None
         )
 
+    # --- Advisory downgrade: undercount + RCSB records a single receptor copy ---
+
+    def test_undercount_rcsb_single_receptor_is_advisory(self) -> None:
+        # AI 'monomer' (1) vs classifier HOMOMER (2); no symmetry block records a
+        # receptor Homo N-mer AND RCSB's global biological assembly records the
+        # receptor as a single copy. The two same-slug chains are crystallographic
+        # copies, the released monomer agrees with RCSB, so the alert is stamped
+        # advisory (gating=False) yet still emitted.
+        alert = _reconcile_ai_oligomer(
+            AI_OLIGOMER_MONOMER,
+            OLIGOMER_HOMOMER,
+            2,
+            tm_data_available=True,
+            has_homo_symmetry=False,
+            assembly_receptor_single=True,
+            ai_evidence_is_independent=True,
+        )
+        assert alert is not None
+        assert alert["type"] == ALERT_OLIGOMER_DISAGREEMENT
+        assert alert["gating"] is False
+
+    def test_undercount_stays_gating_when_ai_only_echoed_the_assembly(self) -> None:
+        # The assembly corroborates a single receptor, but the model's cited evidence
+        # is the assembly record read back -- one witness counted twice, while the
+        # only independent signal (the chain-counting classifier) is the one being
+        # overruled. Keep gating.
+        alert = _reconcile_ai_oligomer(
+            AI_OLIGOMER_MONOMER,
+            OLIGOMER_HOMOMER,
+            2,
+            tm_data_available=True,
+            has_homo_symmetry=False,
+            assembly_receptor_single=True,
+            ai_evidence_is_independent=False,
+        )
+        assert alert is not None
+        assert "gating" not in alert
+
+    def test_undercount_hetero_doubled_receptor_stays_gating(self) -> None:
+        # The corner the receptor-single guard closes: the global symmetry TYPE is
+        # Hetero (so has_homo_symmetry is False) but RCSB records the RECEPTOR
+        # doubled in the biological assembly, so assembly_receptor_single is False.
+        # Releasing 'monomer' here would rest on AI-only trust -- keep gating.
+        alert = _reconcile_ai_oligomer(
+            AI_OLIGOMER_MONOMER,
+            OLIGOMER_HOMOMER,
+            2,
+            tm_data_available=True,
+            has_homo_symmetry=False,
+            assembly_receptor_single=False,
+        )
+        assert alert is not None
+        assert alert["type"] == ALERT_OLIGOMER_DISAGREEMENT
+        assert "gating" not in alert
+
+    def test_undercount_with_homo_symmetry_stays_gating(self) -> None:
+        # Same undercount direction, but RCSB DOES record a receptor homo-oligomer
+        # (e.g. a Homo N-mer in a Local/Pseudo block): the AI is genuinely at odds
+        # with the biological assembly, so keep gating even if a stoichiometry read
+        # looked single (no flag -> defaults True).
+        alert = _reconcile_ai_oligomer(
+            AI_OLIGOMER_MONOMER,
+            OLIGOMER_HOMOMER,
+            2,
+            tm_data_available=True,
+            has_homo_symmetry=True,
+            assembly_receptor_single=True,
+        )
+        assert alert is not None
+        assert alert["type"] == ALERT_OLIGOMER_DISAGREEMENT
+        assert "gating" not in alert
+
+    def test_overcount_stays_gating(self) -> None:
+        # Hallucination direction: AI 'homo-dimer' (2) vs classifier MONOMER (1).
+        # The AI claims MORE receptor copies than resolved; never downgraded even
+        # when the assembly corroborates a single receptor.
+        alert = _reconcile_ai_oligomer(
+            AI_OLIGOMER_HOMO_DIMER,
+            OLIGOMER_MONOMER,
+            1,
+            tm_data_available=True,
+            has_homo_symmetry=False,
+            assembly_receptor_single=True,
+        )
+        assert alert is not None
+        assert alert["type"] == ALERT_OLIGOMER_DISAGREEMENT
+        assert "gating" not in alert
+
+    def test_homomer_undercount_to_dimer_stays_gating(self) -> None:
+        # A lower-but-still-oligomer release: AI 'homo-dimer' (2) vs classifier
+        # HOMOMER 4. The AI still asserts a homo-oligomer, so only a MONOMER release
+        # (ai_count == 1) is ever downgraded -- this keeps gating.
+        alert = _reconcile_ai_oligomer(
+            AI_OLIGOMER_HOMO_DIMER,
+            OLIGOMER_HOMOMER,
+            4,
+            tm_data_available=True,
+            has_homo_symmetry=False,
+            assembly_receptor_single=True,
+        )
+        assert alert is not None
+        assert alert["type"] == ALERT_OLIGOMER_DISAGREEMENT
+        assert "gating" not in alert
+
+    def test_heteromer_undercount_stays_gating(self) -> None:
+        # A HETEROMER undercount (AI 'monomer' vs 3 distinct receptor chains) is a
+        # missed-partner claim; the homo-oligomer assembly signals do not vouch for
+        # it, so the downgrade is scoped out -- it keeps gating.
+        alert = _reconcile_ai_oligomer(
+            AI_OLIGOMER_MONOMER,
+            OLIGOMER_HETEROMER,
+            3,
+            tm_data_available=True,
+            has_homo_symmetry=False,
+            assembly_receptor_single=True,
+        )
+        assert alert is not None
+        assert alert["type"] == ALERT_OLIGOMER_DISAGREEMENT
+        assert "gating" not in alert
+
+    def test_kind_mismatch_same_count_stays_gating(self) -> None:
+        # Equal counts, differing kind (AI hetero-dimer vs HOMOMER): not an
+        # undercount, so it keeps gating regardless of the assembly signals.
+        alert = _reconcile_ai_oligomer(
+            AI_OLIGOMER_HETERO_DIMER,
+            OLIGOMER_HOMOMER,
+            2,
+            tm_data_available=True,
+            has_homo_symmetry=False,
+            assembly_receptor_single=True,
+        )
+        assert alert is not None
+        assert "gating" not in alert
+
+    def test_assembly_flags_default_to_gating(self) -> None:
+        # Omitting BOTH biological-assembly flags must not silently downgrade: the
+        # defaults (has_homo_symmetry=True, assembly_receptor_single=False) keep
+        # gating -- absence of evidence never waves an alert through.
+        alert = _reconcile_ai_oligomer(
+            AI_OLIGOMER_MONOMER, OLIGOMER_HOMOMER, 2, tm_data_available=True
+        )
+        assert alert is not None
+        assert alert.get("gating", True) is True
+
+
+class TestAiStateEvidenceRecitation:
+    """The recitation filter on the model's cited oligomeric-state evidence."""
+
+    def test_non_string_quote_degrades_instead_of_raising(self) -> None:
+        # quote_or_path is declared a string by the annotation schema, but a
+        # malformed record must read as "no usable citation", never raise.
+        data = {"receptor_info": {"oligomeric_state": {"evidence": {"quote_or_path": ["x"]}}}}
+        assert _ai_state_lacks_independent_evidence(data, {}) is True
+
+    def test_quote_drawn_only_from_the_assembly_reads_as_recitation(self) -> None:
+        enriched = {
+            "assemblies": [
+                {
+                    "rcsb_struct_symmetry": [
+                        {
+                            "oligomeric_state": "Monomer",
+                            "stoichiometry": ["A1"],
+                            "kind": "Global Symmetry",
+                        }
+                    ]
+                }
+            ]
+        }
+        data = {
+            "receptor_info": {
+                "oligomeric_state": {"evidence": {"quote_or_path": "Monomer, [A1], Global"}}
+            }
+        }
+        assert _ai_state_lacks_independent_evidence(data, enriched) is True
+
+    def test_quote_with_publication_content_reads_as_independent(self) -> None:
+        enriched = {
+            "assemblies": [
+                {
+                    "rcsb_struct_symmetry": [
+                        {
+                            "oligomeric_state": "Monomer",
+                            "stoichiometry": ["A1"],
+                            "kind": "Global Symmetry",
+                        }
+                    ]
+                }
+            ]
+        }
+        data = {
+            "receptor_info": {
+                "oligomeric_state": {
+                    "evidence": {"quote_or_path": "two molecules occupy the asymmetric unit"}
+                }
+            }
+        }
+        assert _ai_state_lacks_independent_evidence(data, enriched) is False
+
+
+class TestAssemblyReceptorIsSingle:
+    """The biological-assembly 'receptor is a single copy' predicate that gates the
+    OLIGOMER_DISAGREEMENT advisory downgrade."""
+
+    def test_stoich_copy_count_parses_trailing_int(self) -> None:
+        assert _stoich_copy_count("A2") == 2
+        assert _stoich_copy_count("B1") == 1
+        assert _stoich_copy_count("AA12") == 12
+
+    def test_stoich_copy_count_no_count_is_none(self) -> None:
+        # No trailing digit -> no signal (never silently treated as 1).
+        assert _stoich_copy_count("A") is None
+        assert _stoich_copy_count("") is None
+        assert _stoich_copy_count(None) is None
+        assert _stoich_copy_count(2) is None
+
+    def test_monomer_assembly_is_single(self) -> None:
+        info = {"kind": "Global Symmetry", "oligomeric_state": "Monomer", "stoichiometry": ["A1"]}
+        assert _assembly_receptor_is_single(info) is True
+
+    def test_all_single_hetero_is_single(self) -> None:
+        # A receptor + partner hetero-complex where every entity is present once:
+        # whichever token is the receptor, it is single.
+        info = {
+            "kind": "Global Symmetry",
+            "oligomeric_state": "Hetero 2-mer",
+            "stoichiometry": ["A1", "B1"],
+        }
+        # Three deposited chains against a two-subunit assembly: the assembly leaves
+        # a chain out, so the all-single reading is about a genuine sub-selection.
+        assert _assembly_receptor_is_single(info, 3) is True
+
+    def test_all_single_rejected_when_assembly_covers_every_chain(self) -> None:
+        # The realized proxy failure: four deposited chains (two receptor copies plus
+        # two partner chains) and a four-subunit assembly listing each as a single
+        # token. The assembly holds BOTH receptor copies, so "every token is single"
+        # is a labelling artefact and cannot corroborate a single receptor.
+        info = {
+            "kind": "Global Symmetry",
+            "oligomeric_state": "Hetero 4-mer",
+            "stoichiometry": ["A1", "B1", "C1", "D1"],
+        }
+        assert _assembly_receptor_is_single(info, 4) is False
+
+    def test_all_single_rejected_without_a_chain_total(self) -> None:
+        # Without the entry's chain total the proxy cannot be validated, so it is not
+        # trusted -- absence of evidence never downgrades.
+        info = {
+            "kind": "Global Symmetry",
+            "oligomeric_state": "Hetero 2-mer",
+            "stoichiometry": ["A1", "B1"],
+        }
+        assert _assembly_receptor_is_single(info, None) is False
+
+    def test_monomer_state_is_single_regardless_of_chain_total(self) -> None:
+        # The Monomer route is a direct statement about the whole biological unit,
+        # not a per-entity inference, so the arithmetic guard does not apply.
+        info = {
+            "kind": "Global Symmetry",
+            "oligomeric_state": "Monomer",
+            "stoichiometry": ["A1"],
+        }
+        assert _assembly_receptor_is_single(info, 4) is True
+
+    def test_doubled_receptor_hetero_is_not_single(self) -> None:
+        # A doubled entity means a receptor homo-oligomer is possible -> not single.
+        info = {
+            "kind": "Global Symmetry",
+            "oligomeric_state": "Hetero 4-mer",
+            "stoichiometry": ["A2", "B2"],
+        }
+        assert _assembly_receptor_is_single(info) is False
+
+    def test_mixed_stoichiometry_is_not_single(self) -> None:
+        # One doubled token is enough to keep gating: we cannot tell which token is
+        # the receptor, so a possibly-doubled receptor is treated conservatively.
+        info = {
+            "kind": "Global Symmetry",
+            "oligomeric_state": "Hetero 3-mer",
+            "stoichiometry": ["A2", "B1"],
+        }
+        assert _assembly_receptor_is_single(info) is False
+
+    def test_homo_dimer_assembly_is_not_single(self) -> None:
+        info = {
+            "kind": "Global Symmetry",
+            "oligomeric_state": "Homo 2-mer",
+            "stoichiometry": ["A2"],
+        }
+        assert _assembly_receptor_is_single(info) is False
+
+    def test_non_global_symmetry_is_not_single(self) -> None:
+        # A Local / Pseudo block describes a sub-component and can read single while
+        # the whole assembly doubles the receptor -> not trusted.
+        info = {
+            "kind": "Local Symmetry",
+            "oligomeric_state": "Monomer",
+            "stoichiometry": ["A1"],
+        }
+        assert _assembly_receptor_is_single(info) is False
+
+    def test_empty_assembly_is_not_single(self) -> None:
+        # Absence of assembly / symmetry data -> conservative False (never
+        # downgrades on absence of evidence).
+        assert _assembly_receptor_is_single({}) is False
+        assert _assembly_receptor_is_single({"kind": "Global Symmetry"}) is False
+        assert _assembly_receptor_is_single(None) is False  # type: ignore[arg-type]
+
 
 class TestAnalyzeOligomerAiCrossCheck:
     """End-to-end: the AI's receptor oligomeric state flows through analyze_oligomer
     and the receptor-level cross-check attaches (or withholds) a routing alert."""
 
-    def _data_with_ai_oligomer(self, chain_id: str, value: str) -> dict[str, Any]:
+    def _data_with_ai_oligomer(
+        self,
+        chain_id: str,
+        value: str,
+        quote: str = "the receptor elutes as a single species by SEC-MALS",
+    ) -> dict[str, Any]:
+        # The default quote is publication language, so the model reads as an
+        # independent witness unless a test deliberately supplies an assembly echo.
         return {
             "receptor_info": {
                 "chain_id": chain_id,
-                "oligomeric_state": {"value": value, "confidence": "High"},
+                "oligomeric_state": {
+                    "value": value,
+                    "confidence": "High",
+                    "evidence": {"quote_or_path": quote},
+                },
             }
         }
 
@@ -2482,6 +2869,152 @@ class TestAnalyzeOligomerAiCrossCheck:
         assert oligo["classification"] == OLIGOMER_HOMOMER
         assert oligo["receptor_count"] == 2
         assert self._has_disagreement(oligo)
+
+    def _two_opsd_chains_with_assembly(
+        self, symmetry_block: dict[str, Any]
+    ) -> tuple[dict[str, Any], _FakePolymerFeaturesCache]:
+        # Two same-slug 7TM receptor chains (classifier HOMOMER count 2) plus a
+        # supplied RCSB biological-assembly symmetry block, so the AI-vs-classifier
+        # cross-check reaches its assembly-corroboration branch.
+        enriched = _make_enriched_with_entities(
+            [
+                _make_entity("opsd_bovin", "A", length=350),
+                _make_entity("opsd_bovin", "B", length=350),
+            ]
+        )
+        enriched["assemblies"] = [
+            {
+                "pdbx_struct_assembly": {"rcsb_candidate_assembly": "Y"},
+                "rcsb_assembly_info": {"modeled_polymer_monomer_count": 350},
+                "rcsb_struct_symmetry": [symmetry_block],
+            }
+        ]
+        cache = _FakePolymerFeaturesCache()
+        cache.preload(
+            "TEST",
+            {
+                "polymer_entities": [
+                    _gql_entity_with_tm("A", tm_count=7),
+                    _gql_entity_with_tm("B", tm_count=7),
+                ]
+            },
+        )
+        return enriched, cache
+
+    def _od_alert(self, oligo: dict[str, Any]) -> dict[str, Any]:
+        return next(a for a in oligo["alerts"] if a["type"] == ALERT_OLIGOMER_DISAGREEMENT)
+
+    def test_monomer_vs_copies_downgraded_when_assembly_single(self) -> None:
+        # Two same-slug chains, AI 'monomer', and RCSB's global biological assembly
+        # is a Monomer: the chains are crystallographic copies, the released monomer
+        # agrees with RCSB -> the disagreement is still emitted but stamped advisory.
+        enriched, cache = self._two_opsd_chains_with_assembly(
+            {"oligomeric_state": "Monomer", "stoichiometry": ["A1"], "kind": "Global Symmetry"}
+        )
+        data = self._data_with_ai_oligomer("A", AI_OLIGOMER_MONOMER)
+        analyze_oligomer("TEST", data, enriched, polymer_features_cache=cache)
+        oligo = data["oligomer_analysis"]
+        assert oligo["classification"] == OLIGOMER_HOMOMER
+        assert self._has_disagreement(oligo)
+        assert self._od_alert(oligo)["gating"] is False
+
+    def test_monomer_vs_copies_stays_gating_when_assembly_covers_every_chain(self) -> None:
+        # Both deposited chains ARE the receptor, and the two-subunit assembly lists
+        # them as two single tokens. "Every token is single" therefore describes how
+        # RCSB labelled two receptor copies, not a single receptor -- keep gating.
+        enriched, cache = self._two_opsd_chains_with_assembly(
+            {
+                "oligomeric_state": "Hetero 2-mer",
+                "stoichiometry": ["A1", "B1"],
+                "kind": "Global Symmetry",
+            }
+        )
+        data = self._data_with_ai_oligomer("A", AI_OLIGOMER_MONOMER)
+        analyze_oligomer("TEST", data, enriched, polymer_features_cache=cache)
+        oligo = data["oligomer_analysis"]
+        assert self._has_disagreement(oligo)
+        assert "gating" not in self._od_alert(oligo)
+
+    def test_monomer_vs_copies_stays_gating_when_a_sibling_assembly_says_homo(self) -> None:
+        # RCSB contradicting itself is not corroboration: the chosen assembly reads
+        # Monomer but another candidate assembly of the same entry records a Homo
+        # 2-mer, so the receptor-count disagreement keeps gating.
+        enriched, cache = self._two_opsd_chains_with_assembly(
+            {"oligomeric_state": "Monomer", "stoichiometry": ["A1"], "kind": "Global Symmetry"}
+        )
+        enriched["assemblies"].append(
+            {
+                "pdbx_struct_assembly": {"rcsb_candidate_assembly": "Y"},
+                "rcsb_struct_symmetry": [
+                    {
+                        "oligomeric_state": "Homo 2-mer",
+                        "stoichiometry": ["A2"],
+                        "kind": "Global Symmetry",
+                    }
+                ],
+            }
+        )
+        data = self._data_with_ai_oligomer("A", AI_OLIGOMER_MONOMER)
+        analyze_oligomer("TEST", data, enriched, polymer_features_cache=cache)
+        oligo = data["oligomer_analysis"]
+        assert self._has_disagreement(oligo)
+        assert "gating" not in self._od_alert(oligo)
+
+    def test_monomer_vs_copies_stays_gating_when_quote_echoes_the_assembly(self) -> None:
+        # The model's cited evidence recites the assembly line it was shown, so the
+        # apparent agreement between model and RCSB is one record read twice.
+        enriched, cache = self._two_opsd_chains_with_assembly(
+            {"oligomeric_state": "Monomer", "stoichiometry": ["A1"], "kind": "Global Symmetry"}
+        )
+        data = self._data_with_ai_oligomer(
+            "A", AI_OLIGOMER_MONOMER, quote="Monomer, [A1], Global Symmetry"
+        )
+        analyze_oligomer("TEST", data, enriched, polymer_features_cache=cache)
+        oligo = data["oligomer_analysis"]
+        assert self._has_disagreement(oligo)
+        assert "gating" not in self._od_alert(oligo)
+
+    def test_monomer_vs_copies_stays_gating_when_receptor_doubled(self) -> None:
+        # The must-fix corner: a Hetero N-mer whose stoichiometry DOUBLES an entity
+        # (a possible receptor homo-oligomer). has_homo_symmetry is False (global
+        # TYPE is Hetero) but the receptor is not corroborated single, so releasing
+        # 'monomer' would rest on AI-only trust -> the disagreement keeps gating.
+        enriched, cache = self._two_opsd_chains_with_assembly(
+            {
+                "oligomeric_state": "Hetero 4-mer",
+                "stoichiometry": ["A2", "B2"],
+                "kind": "Global Symmetry",
+            }
+        )
+        data = self._data_with_ai_oligomer("A", AI_OLIGOMER_MONOMER)
+        analyze_oligomer("TEST", data, enriched, polymer_features_cache=cache)
+        oligo = data["oligomer_analysis"]
+        assert self._has_disagreement(oligo)
+        assert "gating" not in self._od_alert(oligo)
+
+    def test_monomer_vs_copies_stays_gating_without_assembly(self) -> None:
+        # No assembly data at all: absence of evidence must not downgrade.
+        enriched = _make_enriched_with_entities(
+            [
+                _make_entity("opsd_bovin", "A", length=350),
+                _make_entity("opsd_bovin", "B", length=350),
+            ]
+        )
+        cache = _FakePolymerFeaturesCache()
+        cache.preload(
+            "TEST",
+            {
+                "polymer_entities": [
+                    _gql_entity_with_tm("A", tm_count=7),
+                    _gql_entity_with_tm("B", tm_count=7),
+                ]
+            },
+        )
+        data = self._data_with_ai_oligomer("A", AI_OLIGOMER_MONOMER)
+        analyze_oligomer("TEST", data, enriched, polymer_features_cache=cache)
+        oligo = data["oligomer_analysis"]
+        assert self._has_disagreement(oligo)
+        assert "gating" not in self._od_alert(oligo)
 
     def test_tm_data_unavailable_does_not_spuriously_route(self) -> None:
         # receptor + peptide (both slug-bearing); the TM fetch fails so the
