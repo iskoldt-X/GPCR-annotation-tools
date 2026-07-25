@@ -902,16 +902,21 @@ def _build_validation_report(
 
     # G protein subunit fragments the model misfiled under auxiliary_proteins /
     # ligands (a GaCT / alpha5 peptide, or a tag-named beta/gamma subunit). An
-    # unambiguous single-subunit fragment is MOVED into the G protein record (a
-    # gating warning routes the move to a curator); a no-slug or cross-role fragment
-    # is gated in place. This mutates the ligands / auxiliary_proteins lists, so it
-    # must run BEFORE the integrity check's positional list-index recursion
+    # unambiguous single-subunit fragment is MOVED into the G protein record; a
+    # no-slug or cross-role fragment is gated in place. A recovered ALPHA subunit
+    # (Galpha identity axis) and every MISFILED variant GATE for a curator; an
+    # authoritative beta / gamma recovery is an advisory detector note (matching
+    # crystallization fusions, binder renames, and ligand advisories, which all
+    # ship as detector_notes). This mutates the ligands / auxiliary_proteins lists,
+    # so it must run BEFORE the integrity check's positional list-index recursion
     # (validate_all emits 'ligands[N]' paths that curate parses into index cleanups),
     # exactly as the excluded-buffer prune (step 10b) precedes this report for the
     # same reason.
-    report["critical_warnings"].extend(
-        relocate_misfiled_g_protein_fragments(enriched_entry, best_run_data)
+    g_protein_gating, g_protein_advisory = relocate_misfiled_g_protein_fragments(
+        enriched_entry, best_run_data
     )
+    report["critical_warnings"].extend(g_protein_gating)
+    report["detector_notes"].extend(g_protein_advisory)
 
     # Integrity checks (ghost chain, fake UniProt/PubChem, ghost ligand, method)
     integrity_warnings = validate_all(pdb_id, best_run_data, enriched_entry, cache=validation_cache)

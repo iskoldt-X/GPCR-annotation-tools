@@ -3220,7 +3220,7 @@ class TestRelocateMisfiledGProteinFragments:
             "auxiliary_proteins": [{"name": "Gt C-terminal peptide", "chain_id": "B"}],
             "ligands": [],
         }
-        warnings = relocate_misfiled_g_protein_fragments(enriched, data)
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
 
         assert data["auxiliary_proteins"] == []  # removed from origin bucket
         alpha = data["signaling_partners"]["g_protein"]["alpha_subunit"]
@@ -3228,9 +3228,11 @@ class TestRelocateMisfiledGProteinFragments:
         assert alpha["chain_id"] == "B"
         # Alpha C-terminal / alpha5 fragment gets a fragment note.
         assert "fragment" in data["signaling_partners"]["g_protein"]["note"].lower()
-        assert len(warnings) == 1
-        assert ALERT_PREFIX_G_PROTEIN_RELOCATED in warnings[0]
-        assert "alpha_subunit" in warnings[0]
+        # A recovered ALPHA subunit rides the Galpha identity axis -> GATES.
+        assert advisory == []
+        assert len(gating) == 1
+        assert ALERT_PREFIX_G_PROTEIN_RELOCATED in gating[0]
+        assert "alpha_subunit" in gating[0]
 
     def test_full_length_alpha_by_description_gets_no_fragment_note(self) -> None:
         # A FULL-LENGTH G-alpha matched by description only (is_g_alpha_description,
@@ -3251,12 +3253,13 @@ class TestRelocateMisfiledGProteinFragments:
             "auxiliary_proteins": [{"name": "G-alpha", "chain_id": "B"}],
             "ligands": [],
         }
-        warnings = relocate_misfiled_g_protein_fragments(enriched, data)
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
         gp = data["signaling_partners"]["g_protein"]
         assert gp["alpha_subunit"]["chain_id"] == "B"
         assert "note" not in gp or "fragment" not in (gp.get("note") or "").lower()
-        assert len(warnings) == 1
-        assert ALERT_PREFIX_G_PROTEIN_RELOCATED in warnings[0]
+        assert advisory == []
+        assert len(gating) == 1
+        assert ALERT_PREFIX_G_PROTEIN_RELOCATED in gating[0]
 
     def test_beta_subunit_tag_named_routed_by_slug_not_name(self) -> None:
         # 8VHF / 8INR chain B: a G-beta subunit (slug gbb1_human) the model named
@@ -3272,16 +3275,62 @@ class TestRelocateMisfiledGProteinFragments:
                 )
             ]
         )
-        data: dict[str, Any] = {"auxiliary_proteins": [{"name": "HiBiT", "chain_id": "B"}]}
-        warnings = relocate_misfiled_g_protein_fragments(enriched, data)
+        data: dict[str, Any] = {
+            # A G-alpha is present, so the recovered beta completes a heterotrimer.
+            # Without one the recovery is an orphan and stays gating (covered by
+            # test_orphan_beta_without_alpha_stays_gating).
+            "signaling_partners": {
+                "g_protein": {
+                    "alpha_subunit": {"uniprot_entry_name": "gnas2_human", "chain_id": "A"}
+                }
+            },
+            "auxiliary_proteins": [{"name": "HiBiT", "chain_id": "B"}],
+        }
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
 
         gp = data["signaling_partners"]["g_protein"]
         assert "beta_subunit" in gp
         assert gp["beta_subunit"]["uniprot_entry_name"] == "gbb1_human"
-        assert "alpha_subunit" not in gp  # NOT routed to alpha despite unknown name
         assert data["auxiliary_proteins"] == []
-        assert ALERT_PREFIX_G_PROTEIN_RELOCATED in warnings[0]
-        assert "beta_subunit" in warnings[0]
+        # An authoritative beta recovery is off the Galpha identity axis -> ADVISORY,
+        # not gating: the correct subunit still ships, only the review signal downgrades.
+        assert gating == []
+        assert len(advisory) == 1
+        assert ALERT_PREFIX_G_PROTEIN_RELOCATED in advisory[0]
+        assert "beta_subunit" in advisory[0]
+
+    def test_gamma_subunit_relocation_is_advisory_not_gating(self) -> None:
+        # A G-gamma subunit (slug gbg2_bovin) misfiled under auxiliary_proteins is
+        # an authoritative slug fill off the Galpha identity axis -> its relocation
+        # is an ADVISORY note, not a gating warning: the correct subunit still ships
+        # in gamma_subunit, only the review signal is downgraded.
+        enriched = self._enriched(
+            [
+                _gp_poly(
+                    "G",
+                    description="Guanine nucleotide-binding protein G(I)/G(S)/G(O) subunit gamma-2",
+                    slugs=["gbg2_bovin"],
+                )
+            ]
+        )
+        data: dict[str, Any] = {
+            # An alpha is present, so the recovered gamma completes a heterotrimer.
+            "signaling_partners": {
+                "g_protein": {
+                    "alpha_subunit": {"uniprot_entry_name": "gnas2_human", "chain_id": "A"}
+                }
+            },
+            "auxiliary_proteins": [{"name": "gamma fragment", "chain_id": "G"}],
+        }
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
+
+        gp = data["signaling_partners"]["g_protein"]
+        assert gp["gamma_subunit"]["uniprot_entry_name"] == "gbg2_bovin"
+        assert data["auxiliary_proteins"] == []
+        assert gating == []
+        assert len(advisory) == 1
+        assert ALERT_PREFIX_G_PROTEIN_RELOCATED in advisory[0]
+        assert "gamma_subunit" in advisory[0]
 
     def test_no_slug_short_peptide_gated_not_relocated(self) -> None:
         # 6NWE chain B: a short GaCT peptide detected by its alpha5 motif but
@@ -3291,13 +3340,14 @@ class TestRelocateMisfiledGProteinFragments:
         )
         aux_entry = {"name": "CT2 peptide", "chain_id": "B"}
         data: dict[str, Any] = {"auxiliary_proteins": [aux_entry]}
-        warnings = relocate_misfiled_g_protein_fragments(enriched, data)
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
 
         assert data["auxiliary_proteins"] == [aux_entry]  # NOT moved
         assert "g_protein" not in data.get("signaling_partners", {})
-        assert len(warnings) == 1
-        assert ALERT_PREFIX_G_PROTEIN_MISFILED in warnings[0]
-        assert "no subunit slug" in warnings[0]
+        assert advisory == []
+        assert len(gating) == 1
+        assert ALERT_PREFIX_G_PROTEIN_MISFILED in gating[0]
+        assert "no subunit slug" in gating[0]
 
     def test_cross_role_fusion_gated_not_routed(self) -> None:
         # 8XGR chain G: one chain carrying BOTH a gamma (gbg2_bovin) and an alpha
@@ -3314,13 +3364,14 @@ class TestRelocateMisfiledGProteinFragments:
         )
         lig_entry = {"name": "eGt fusion", "chain_id": "G", "type": "protein"}
         data: dict[str, Any] = {"ligands": [lig_entry]}
-        warnings = relocate_misfiled_g_protein_fragments(enriched, data)
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
 
         assert data["ligands"] == [lig_entry]  # NOT moved
         assert "g_protein" not in data.get("signaling_partners", {})
-        assert len(warnings) == 1
-        assert ALERT_PREFIX_G_PROTEIN_MISFILED in warnings[0]
-        assert "two subunit identities" in warnings[0]
+        assert advisory == []
+        assert len(gating) == 1
+        assert ALERT_PREFIX_G_PROTEIN_MISFILED in gating[0]
+        assert "two subunit identities" in gating[0]
 
     def test_no_slug_engineered_mini_g_gated(self) -> None:
         # 7UM5 chain B: an engineered "miniGo protein" detected by description
@@ -3330,11 +3381,12 @@ class TestRelocateMisfiledGProteinFragments:
         )
         lig_entry = {"name": "miniGo", "chain_id": "B", "type": "protein"}
         data: dict[str, Any] = {"ligands": [lig_entry]}
-        warnings = relocate_misfiled_g_protein_fragments(enriched, data)
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
 
         assert data["ligands"] == [lig_entry]
         assert "g_protein" not in data.get("signaling_partners", {})
-        assert ALERT_PREFIX_G_PROTEIN_MISFILED in warnings[0]
+        assert advisory == []
+        assert ALERT_PREFIX_G_PROTEIN_MISFILED in gating[0]
 
     def test_gdp_nonpolymer_not_detected(self) -> None:
         # 5G53: GDP is a small molecule filed as a ligand (chem_comp_id GDP). Its
@@ -3357,11 +3409,12 @@ class TestRelocateMisfiledGProteinFragments:
             "chain_id": "C",
         }
         data: dict[str, Any] = {"ligands": [gdp]}
-        warnings = relocate_misfiled_g_protein_fragments(enriched, data)
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
 
         assert data["ligands"] == [gdp]  # untouched
         assert "g_protein" not in data.get("signaling_partners", {})
-        assert warnings == []
+        assert gating == []
+        assert advisory == []
 
     def test_curated_subunit_not_overwritten(self) -> None:
         # If the model already put a DIFFERENT subunit in the alpha column, this is a
@@ -3381,23 +3434,26 @@ class TestRelocateMisfiledGProteinFragments:
             },
             "auxiliary_proteins": [aux_entry],
         }
-        warnings = relocate_misfiled_g_protein_fragments(enriched, data)
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
         alpha = data["signaling_partners"]["g_protein"]["alpha_subunit"]
         assert alpha["uniprot_entry_name"] == "gnas2_human"  # curated value preserved
         assert alpha["chain_id"] == "A"
         # (i) the recovered entry is NOT removed from its origin bucket -> not lost.
         assert data["auxiliary_proteins"] == [aux_entry]
-        # (ii) a CONFLICT warning fires, not the plain RELOCATED one.
-        assert len(warnings) == 1
-        assert ALERT_PREFIX_G_PROTEIN_MISFILED in warnings[0]
-        assert ALERT_PREFIX_G_PROTEIN_RELOCATED not in warnings[0]
-        assert "gnas2_human" in warnings[0]  # names the existing (conflicting) value
+        # (ii) a CONFLICT warning fires, not the plain RELOCATED one. A conflict is an
+        # unresolved routing question -> GATES, never advisory.
+        assert advisory == []
+        assert len(gating) == 1
+        assert ALERT_PREFIX_G_PROTEIN_MISFILED in gating[0]
+        assert ALERT_PREFIX_G_PROTEIN_RELOCATED not in gating[0]
+        assert "gnas2_human" in gating[0]  # names the existing (conflicting) value
 
     def test_same_subunit_same_chain_is_idempotent_no_duplicate(self) -> None:
         # Not a conflict: the column already holds the SAME slug on the SAME chain
-        # the fragment recovers. The end state already carries the recovered value,
-        # so this is a pure no-op -- the duplicate origin entry is removed, chain_id
-        # is unchanged (no "B, B" double-listing), and a RELOCATED warning fires.
+        # the fragment "recovers". The end state already carried the value before the
+        # call, so nothing is recovered: chain_id is unchanged (no "B, B"
+        # double-listing), the origin entry stays put, and neither channel reports a
+        # move that did not happen.
         enriched = self._enriched(
             [_gp_poly("B", sequence="ILENLKDCGLF", description=_GACT_DESC, slugs=["gnat1_bovin"])]
         )
@@ -3409,13 +3465,14 @@ class TestRelocateMisfiledGProteinFragments:
             },
             "auxiliary_proteins": [{"name": "Gt C-terminal peptide", "chain_id": "B"}],
         }
-        warnings = relocate_misfiled_g_protein_fragments(enriched, data)
-        assert data["auxiliary_proteins"] == []  # duplicate origin entry removed
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
+        # Nothing was recovered, so the entry is left where it is rather than deleted.
+        assert data["auxiliary_proteins"] == [{"name": "Gt C-terminal peptide", "chain_id": "B"}]
         alpha = data["signaling_partners"]["g_protein"]["alpha_subunit"]
         assert alpha["uniprot_entry_name"] == "gnat1_bovin"
         assert alpha["chain_id"] == "B"  # unchanged -- no double-listing
-        assert len(warnings) == 1
-        assert ALERT_PREFIX_G_PROTEIN_RELOCATED in warnings[0]
+        assert gating == []
+        assert advisory == []
 
     def test_same_subunit_different_chain_merges_chain_ids(self) -> None:
         # Same slug, DIFFERENT chain: the column already names this subunit on chain
@@ -3435,19 +3492,22 @@ class TestRelocateMisfiledGProteinFragments:
             },
             "auxiliary_proteins": [{"name": "G-alpha fragment", "chain_id": "B"}],
         }
-        warnings = relocate_misfiled_g_protein_fragments(enriched, data)
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
         assert data["auxiliary_proteins"] == []  # merged out of the bucket
         alpha = data["signaling_partners"]["g_protein"]["alpha_subunit"]
         assert alpha["uniprot_entry_name"] == "gnas2_human"  # unchanged
         assert alpha["chain_id"] == "A, B"  # recovered chain merged in
-        assert len(warnings) == 1
-        assert ALERT_PREFIX_G_PROTEIN_RELOCATED in warnings[0]
-        assert "alpha_subunit" in warnings[0]
+        assert advisory == []
+        assert len(gating) == 1
+        assert ALERT_PREFIX_G_PROTEIN_RELOCATED in gating[0]
+        assert "alpha_subunit" in gating[0]
 
-    def test_same_subunit_chain_already_in_list_is_no_op(self) -> None:
-        # Same slug and the recovered chain is ALREADY one of the listed chains
-        # ("A, B" already, recovered "B"): pure idempotent -- no double-listing, the
-        # duplicate aux entry is removed, and a RELOCATED warning fires.
+    def test_same_subunit_chain_already_in_list_changes_nothing_and_says_nothing(self) -> None:
+        # Same slug AND the chain is already listed ("A, B" already, matched "B").
+        # There is nothing to recover, so the entry is not a misfiled subunit: it is a
+        # separate annotation sharing an author chain. Removing it would delete a
+        # correct record and the warning would describe a move that did not happen.
+        # The record, the bucket and both channels are all left untouched.
         enriched = self._enriched(
             [_gp_poly("B", sequence="ILENLKDCGLF", description=_GACT_DESC, slugs=["gnas2_human"])]
         )
@@ -3459,12 +3519,35 @@ class TestRelocateMisfiledGProteinFragments:
             },
             "auxiliary_proteins": [{"name": "G-alpha fragment", "chain_id": "B"}],
         }
-        warnings = relocate_misfiled_g_protein_fragments(enriched, data)
-        assert data["auxiliary_proteins"] == []
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
+        assert data["auxiliary_proteins"] == [{"name": "G-alpha fragment", "chain_id": "B"}]
         alpha = data["signaling_partners"]["g_protein"]["alpha_subunit"]
         assert alpha["chain_id"] == "A, B"  # unchanged -- B not re-added
-        assert len(warnings) == 1
-        assert ALERT_PREFIX_G_PROTEIN_RELOCATED in warnings[0]
+        assert gating == []
+        assert advisory == []
+
+    def test_orphan_beta_without_alpha_stays_gating(self) -> None:
+        # A receptor can bind a G-beta that is not part of a heterotrimer at all --
+        # a G-beta-5 held by an RGS protein, where the paper states no G protein
+        # couples. Recovering that beta into an empty G protein record asserts a
+        # transducer rather than recovering one, and would emit a G protein row that
+        # would not otherwise exist, so it keeps gating rather than going advisory.
+        enriched = self._enriched(
+            [
+                _gp_poly(
+                    "D",
+                    description="Guanine nucleotide-binding protein subunit beta-5",
+                    slugs=["gnb5_mouse"],
+                )
+            ]
+        )
+        data: dict[str, Any] = {"auxiliary_proteins": [{"name": "G-beta 5", "chain_id": "D"}]}
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
+        gp = data["signaling_partners"]["g_protein"]
+        assert gp["beta_subunit"]["uniprot_entry_name"] == "gnb5_mouse"
+        assert advisory == []
+        assert len(gating) == 1
+        assert "does not complete a heterotrimer" in gating[0]
 
     def test_same_column_two_alpha_slugs_relocated_to_alpha(self) -> None:
         # 8INR-style mini-Gs/i chimera: a single chain carrying TWO alpha slugs
@@ -3485,16 +3568,17 @@ class TestRelocateMisfiledGProteinFragments:
             "auxiliary_proteins": [{"name": "Mini-Gs/i chimera", "chain_id": "A"}],
             "ligands": [],
         }
-        warnings = relocate_misfiled_g_protein_fragments(enriched, data)
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
         assert data["auxiliary_proteins"] == []  # relocated out of the bucket
         alpha = data["signaling_partners"]["g_protein"]["alpha_subunit"]
         assert alpha["chain_id"] == "A"
         assert alpha["uniprot_entry_name"] in ("gnas2_human", "gnai1_human")
-        assert len(warnings) == 1
-        assert ALERT_PREFIX_G_PROTEIN_RELOCATED in warnings[0]
-        assert "alpha_subunit" in warnings[0]
+        assert advisory == []
+        assert len(gating) == 1
+        assert ALERT_PREFIX_G_PROTEIN_RELOCATED in gating[0]
+        assert "alpha_subunit" in gating[0]
         # NOT the cross-role ambiguity path.
-        assert "two subunit identities" not in warnings[0]
+        assert "two subunit identities" not in gating[0]
 
     def test_non_g_protein_aux_left_alone(self) -> None:
         # A genuine auxiliary protein (nanobody, not a G protein chain) is not
@@ -3502,9 +3586,10 @@ class TestRelocateMisfiledGProteinFragments:
         enriched = self._enriched([_gp_poly("N", description="Nanobody35", sequence="QVQLQESGGG")])
         nanobody = {"name": "Nanobody35", "chain_id": "N", "type": {"value": "Nanobody"}}
         data: dict[str, Any] = {"auxiliary_proteins": [nanobody]}
-        warnings = relocate_misfiled_g_protein_fragments(enriched, data)
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
         assert data["auxiliary_proteins"] == [nanobody]
-        assert warnings == []
+        assert gating == []
+        assert advisory == []
 
     def test_relocation_warning_reaches_gating_channel(self) -> None:
         # The relocation warning must land in critical_warnings, the channel that
@@ -3521,6 +3606,37 @@ class TestRelocateMisfiledGProteinFragments:
         assert any(ALERT_PREFIX_G_PROTEIN_RELOCATED in w for w in report["critical_warnings"])
         # And the data was actually relocated in best_run_data.
         assert data["signaling_partners"]["g_protein"]["alpha_subunit"]["chain_id"] == "B"
+
+    def test_beta_relocation_reaches_advisory_channel_not_gating(self) -> None:
+        # A recovered beta subunit lands in detector_notes (advisory), NOT
+        # critical_warnings -- so it does not hold the PDB for review -- while the
+        # correct subunit is still filled into best_run_data.
+        from gpcr_tools.aggregator.runner import _build_validation_report
+
+        enriched = self._enriched(
+            [
+                _gp_poly(
+                    "B",
+                    description="Guanine nucleotide-binding protein G(I)/G(S)/G(T) "
+                    "subunit beta-1, HiBiT",
+                    slugs=["gbb1_human"],
+                )
+            ]
+        )
+        data: dict[str, Any] = {
+            # An alpha is present, so the recovered beta completes a heterotrimer.
+            "signaling_partners": {
+                "g_protein": {
+                    "alpha_subunit": {"uniprot_entry_name": "gnas2_human", "chain_id": "A"}
+                }
+            },
+            "auxiliary_proteins": [{"name": "HiBiT", "chain_id": "B"}],
+        }
+        report = _build_validation_report("TEST", data, enriched, [], {}, None)
+        assert any(ALERT_PREFIX_G_PROTEIN_RELOCATED in n for n in report["detector_notes"])
+        assert not any(ALERT_PREFIX_G_PROTEIN_RELOCATED in w for w in report["critical_warnings"])
+        # The correct subunit still ships.
+        assert data["signaling_partners"]["g_protein"]["beta_subunit"]["chain_id"] == "B"
 
 
 class TestIsGProteinFragmentChain:

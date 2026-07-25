@@ -1989,7 +1989,7 @@ def _fill_subunit_record(subunit_block: dict[str, Any], slug: str, chain_id: str
 def relocate_misfiled_g_protein_fragments(
     enriched_entry: dict[str, Any],
     best_run_data: dict[str, Any],
-) -> list[str]:
+) -> tuple[list[str], list[str]]:
     """Recover G protein subunit fragments the model misfiled in the wrong bucket.
 
     A G protein piece (a GaCT / alpha5 C-terminal peptide, or a beta/gamma
@@ -2019,12 +2019,22 @@ def relocate_misfiled_g_protein_fragments(
       e.g. a gamma-Galpha fusion) -> routing is ambiguous, so it raises a gating
       alert only and is NOT auto-routed.
 
-    Returns one gating warning string per detected fragment (relocated or gated).
-    Mutates *best_run_data* in place for the relocation cases.
+    Returns ``(gating_warnings, advisory_notes)``. A recovered **beta / gamma**
+    subunit is authoritative (an RCSB/UniProt-backed Gbeta / Ggamma slug, filled
+    without overwriting curated data), and it never touches the Galpha family /
+    chimera axis where the confidently-wrong danger lives -- so its relocation is
+    an *advisory* note, surfaced to the curator without holding the PDB for review.
+    A recovered **alpha** subunit rides the Galpha identity axis (family / chimera
+    calls, alpha5 fragments) and therefore stays *gating*. Every MISFILED variant
+    (curated-column conflict, cross-role fusion, no-slug fragment) stays *gating* --
+    those are genuine unresolved routing questions, not confirmed recoveries.
+    The data mutation (filling the subunit record) is identical in every case; only
+    the review signal for beta / gamma is downgraded. Mutates *best_run_data* in
+    place for the relocation cases.
     """
     chain_index = build_chain_identity_index(enriched_entry)
     if not chain_index:
-        return []
+        return [], []
 
     partners = best_run_data.get("signaling_partners")
     if not isinstance(partners, dict):
@@ -2034,7 +2044,11 @@ def relocate_misfiled_g_protein_fragments(
     if not isinstance(g_protein, dict):
         g_protein = {}
 
-    warnings: list[str] = []
+    # Two review channels: unresolved routing questions (conflicts, ambiguous or
+    # no-slug fragments, and recovered ALPHA subunits on the Galpha identity axis)
+    # GATE for a curator; an authoritative beta / gamma recovery is ADVISORY.
+    gating: list[str] = []
+    advisory: list[str] = []
 
     # Bucket name -> the mutable list in best_run_data. A tuple keeps a stable
     # iteration order (auxiliary first, then ligands) for deterministic output.
@@ -2113,7 +2127,7 @@ def relocate_misfiled_g_protein_fragments(
                 # chain_id below (a new chain) or is a pure no-op (already listed).
                 if existing_slug and existing_slug != slug:
                     kept.append(entry)  # keep the entry -- nothing was moved
-                    warnings.append(
+                    gating.append(
                         f"{ALERT_PREFIX_G_PROTEIN_MISFILED} at "
                         f"'signaling_partners.g_protein.{column}': '{name}' (chain "
                         f"{matched_chain}) recovered {slug} but the {column} already "
@@ -2132,7 +2146,19 @@ def relocate_misfiled_g_protein_fragments(
                     if matched_chain not in merged:
                         merged.append(matched_chain)
                         subunit_block["chain_id"] = _format_chain_ids(merged)
-                    # else: recovered chain already present -> chain_id unchanged.
+                    else:
+                        # Nothing to recover: this subunit is already recorded on this
+                        # very chain. The bucket entry is therefore not a misfiled
+                        # subunit at all -- it is a SEPARATE annotation that happens to
+                        # sit on the same author chain, typically the experimental tag
+                        # fused to it (a HiBiT / SmBiT reporter peptide on G-beta). The
+                        # chain index keys on author chain id alone, so it cannot tell
+                        # the two apart. Removing the entry here would delete a correct
+                        # annotation, and reporting a move would describe something that
+                        # did not happen; leave both the record and the entry untouched
+                        # and say nothing.
+                        kept.append(entry)
+                        continue
                 else:
                     _fill_subunit_record(subunit_block, slug, matched_chain)
                 # The "only the alpha5 fragment is modelled" note is accurate ONLY
@@ -2153,13 +2179,21 @@ def relocate_misfiled_g_protein_fragments(
                             g_protein["note"] = f"{existing_note.rstrip()} {fragment_note}"
                     else:
                         g_protein["note"] = fragment_note
-                warnings.append(
+                message = (
                     f"{ALERT_PREFIX_G_PROTEIN_RELOCATED} at "
                     f"'signaling_partners.g_protein.{column}': '{name}' (chain "
                     f"{matched_chain}, slug {slug}) was filed under {bucket_name} but is a "
                     f"G protein {column.split('_')[0]} subunit; moved into the G protein "
                     f"record. Confirm the recovered subunit."
                 )
+                # A recovered ALPHA subunit rides the Galpha identity axis (family /
+                # chimera / alpha5 calls) where a confidently-wrong release can happen,
+                # so it GATES. A recovered beta / gamma is an authoritative slug fill
+                # off that axis -> advisory, surfaced without holding for review.
+                if column == _SUBUNIT_ALPHA:
+                    gating.append(message)
+                else:
+                    advisory.append(message)
                 # Removed from its original bucket (do not re-add to kept).
                 continue
 
@@ -2168,7 +2202,7 @@ def relocate_misfiled_g_protein_fragments(
                 # ambiguous, so surface it and leave it in place.
                 col_names = ", ".join(sorted(columns))
                 kept.append(entry)
-                warnings.append(
+                gating.append(
                     f"{ALERT_PREFIX_G_PROTEIN_MISFILED} at '{bucket_name}': '{name}' (chain "
                     f"{matched_chain}) is a G protein fragment carrying two subunit "
                     f"identities ({col_names}) -- routing is ambiguous. Assign the correct "
@@ -2179,7 +2213,7 @@ def relocate_misfiled_g_protein_fragments(
             # No usable subunit slug: detected by sequence / description only, so
             # the subunit column cannot be determined. Gate, do not move.
             kept.append(entry)
-            warnings.append(
+            gating.append(
                 f"{ALERT_PREFIX_G_PROTEIN_MISFILED} at '{bucket_name}': '{name}' (chain "
                 f"{matched_chain}, '{desc}') is a G protein-derived fragment filed under "
                 f"{bucket_name} but carries no subunit slug, so its subunit column cannot "
@@ -2188,7 +2222,30 @@ def relocate_misfiled_g_protein_fragments(
             )
         best_run_data[bucket_name] = kept
 
-    return warnings
+    # An orphan beta/gamma is not a heterotrimer. A relocation that leaves the G
+    # protein record carrying a beta or gamma but NO alpha has not recovered a
+    # transducer -- it has asserted one. Some receptors constitutively bind a
+    # G-beta that is not part of a heterotrimer at all (a G-beta-5 held by an RGS
+    # protein), and there the released record would claim a G protein the paper
+    # says is absent, and would emit a G protein CSV row that would otherwise not
+    # exist. The beta/gamma advisory route is safe only for a recovery INTO an
+    # existing heterotrimer, so when the alpha is missing the notes are promoted
+    # back to gating and a curator decides.
+    if advisory:
+        alpha_block = g_protein.get(_SUBUNIT_ALPHA)
+        alpha_slug = ""
+        if isinstance(alpha_block, dict):
+            alpha_slug = (alpha_block.get("uniprot_entry_name") or "").strip().lower()
+        if not alpha_slug or alpha_slug in EMPTY_VALUES:
+            gating.extend(
+                f"{note} No G-alpha subunit is recorded for this structure, so the "
+                f"recovered subunit does not complete a heterotrimer; confirm that a "
+                f"G protein is present at all."
+                for note in advisory
+            )
+            advisory = []
+
+    return gating, advisory
 
 
 # ---------------------------------------------------------------------------
