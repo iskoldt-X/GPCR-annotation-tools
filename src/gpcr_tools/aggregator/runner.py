@@ -1025,12 +1025,27 @@ def _build_validation_report(
                     f"alpha5 '{a5_tail}' resolves G-alpha to '{subtype}'."
                 )
         elif resolution == CHIMERA_SUBTYPE_LOW_CONFIDENCE:
+            # The alpha5 window matched too weakly to say anything about the G-alpha.
+            # That is the one branch where the sequence check -- the only independent
+            # evidence about G-alpha identity -- returns nothing, so whatever the
+            # model asserted here ships unverified. Route it by what the model did:
+            # an asserted slug is an identity claim with no evidence behind it and
+            # gates; an honest abstention claims nothing, so it stays a note.
             subtype_basis = SUBTYPE_BASIS_CONSTRUCT_NAME
-            report["detector_notes"].append(
-                f"{ALERT_PREFIX_ALGO_WARNING} at 'chimera_analysis': "
-                f"alpha5 match is weak (best window score "
-                f"{chimera_result.get('score') or 0}); G-alpha identity unverified."
-            )
+            weak_score = chimera_result.get("score") or 0
+            if ai_uniprot:
+                report["algo_conflicts"].append(
+                    f"{ALERT_PREFIX_ALGO_WARNING} at 'chimera_analysis': "
+                    f"alpha5 match is weak (best window score {weak_score}), so the "
+                    f"model's G-alpha '{ai_uniprot}' could not be verified against the "
+                    f"sequence. Confirm the identity."
+                )
+            else:
+                report["detector_notes"].append(
+                    f"{ALERT_PREFIX_ALGO_WARNING} at 'chimera_analysis': "
+                    f"alpha5 match is weak (best window score {weak_score}); no G-alpha "
+                    f"identity was asserted, so there is nothing to verify."
+                )
         elif ai_family and family and ai_family != family:
             # The model's family disagrees with the alpha5 coupling family.
             subtype_basis = SUBTYPE_BASIS_CONSTRUCT_NAME

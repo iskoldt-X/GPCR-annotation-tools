@@ -413,12 +413,27 @@ class TestChimeraAlpha5Routing:
         report = _chimera_report(chim, "gnas2_human", monkeypatch)  # AI says Gs
         assert any("Gi/o" in c and "Gs" in c for c in report["algo_conflicts"])
 
-    def test_low_confidence_is_noted_not_crashed(self, monkeypatch):
+    def test_low_confidence_without_a_model_claim_is_only_noted(self, monkeypatch):
+        # The alpha5 says nothing and the model asserted nothing: an honest
+        # abstention has no identity to verify, so it stays a note.
         chim = _success(subtype_resolution=CHIMERA_SUBTYPE_LOW_CONFIDENCE, score=3)
         report = _chimera_report(chim, None, monkeypatch)
         assert any(
-            "weak" in n.lower() or "unverified" in n.lower() for n in report["detector_notes"]
+            "weak" in n.lower() or "nothing to verify" in n.lower()
+            for n in report["detector_notes"]
         )
+        assert not any("alpha5 match is weak" in c for c in report["algo_conflicts"])
+
+    def test_low_confidence_with_a_model_claim_gates(self, monkeypatch):
+        # The alpha5 window matched too weakly to say anything, yet the model named a
+        # specific G-alpha. That identity ships with no independent evidence behind
+        # it, which is the failure this pipeline exists to catch -- so it gates.
+        chim = _success(subtype_resolution=CHIMERA_SUBTYPE_LOW_CONFIDENCE, score=5)
+        report = _chimera_report(chim, "gnai1_human", monkeypatch)
+        assert any(
+            "could not be verified" in c and "gnai1_human" in c for c in report["algo_conflicts"]
+        )
+        assert not any("alpha5 match is weak" in n for n in report["detector_notes"])
 
     def test_cross_family_tie_is_not_silent(self, monkeypatch):
         # Winners span more than one family -> family is None. This must NOT be
