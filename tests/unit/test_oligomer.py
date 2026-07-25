@@ -755,6 +755,104 @@ class TestAnalyzeTm:
         result = _analyze_tm_for_entity_instance(entity, instance)
         assert result["resolved_tms"] == 0
 
+    def test_five_of_five_fully_resolved_is_complete(self) -> None:
+        """A receptor whose mapping exposed only five TMs, all resolved, is COMPLETE.
+
+        resolved_tms == total_tms means no mapped TM is unmodeled, so the
+        five-not-seven shortfall is a UniProt/RCSB mapping artifact, not missing
+        density -- it must not gate as INCOMPLETE_7TM.
+        """
+        tm_features = [
+            {
+                "type": "TRANSMEMBRANE",
+                "name": "TM",
+                "feature_positions": [
+                    {"beg_seq_id": i * 30, "end_seq_id": i * 30 + 20} for i in range(1, 6)
+                ],
+            }
+        ]
+        entity, instance = self._make_entity_with_tm(entity_features=tm_features)
+        result = _analyze_tm_for_entity_instance(entity, instance)
+        assert result["resolved_tms"] == 5
+        assert result["total_tms"] == 5
+        assert result["status"] == TM_STATUS_COMPLETE
+
+    def test_five_of_six_stays_incomplete(self) -> None:
+        """One unmodeled TM out of six annotated is real missing density -> gate."""
+        tm_features = [
+            {
+                "type": "TRANSMEMBRANE",
+                "name": "TM",
+                "feature_positions": [
+                    {"beg_seq_id": i * 30, "end_seq_id": i * 30 + 20} for i in range(1, 7)
+                ],
+            }
+        ]
+        # Knock out the first TM (10..30) so 5 of 6 resolve.
+        unmodeled = [
+            {
+                "type": "UNOBSERVED_RESIDUE_XYZ",
+                "name": "unmodeled",
+                "feature_positions": [{"beg_seq_id": 30, "end_seq_id": 50}],
+            }
+        ]
+        entity, instance = self._make_entity_with_tm(
+            entity_features=tm_features, instance_features=unmodeled
+        )
+        result = _analyze_tm_for_entity_instance(entity, instance)
+        assert result["resolved_tms"] == 5
+        assert result["total_tms"] == 6
+        assert result["status"] == TM_STATUS_INCOMPLETE
+
+    def test_four_of_four_fully_resolved_stays_incomplete(self) -> None:
+        """Below the substantial-annotation floor: too few TMs to call COMPLETE.
+
+        A single-/few-pass partner slug (or a badly truncated mapping) with all
+        annotated TMs resolved must still gate -- four resolved helices is not a
+        7TM receptor even when nothing is unmodeled.
+        """
+        tm_features = [
+            {
+                "type": "TRANSMEMBRANE",
+                "name": "TM",
+                "feature_positions": [
+                    {"beg_seq_id": i * 30, "end_seq_id": i * 30 + 20} for i in range(1, 5)
+                ],
+            }
+        ]
+        entity, instance = self._make_entity_with_tm(entity_features=tm_features)
+        result = _analyze_tm_for_entity_instance(entity, instance)
+        assert result["resolved_tms"] == 4
+        assert result["total_tms"] == 4
+        assert result["status"] == TM_STATUS_INCOMPLETE
+
+    def test_five_annotated_one_unmodeled_stays_incomplete(self) -> None:
+        """Five annotated TMs but one unmodeled (4/5) is real missing density -> gate."""
+        tm_features = [
+            {
+                "type": "TRANSMEMBRANE",
+                "name": "TM",
+                "feature_positions": [
+                    {"beg_seq_id": i * 30, "end_seq_id": i * 30 + 20} for i in range(1, 6)
+                ],
+            }
+        ]
+        # Knock out the second TM (60..80) so 4 of 5 resolve.
+        unmodeled = [
+            {
+                "type": "UNOBSERVED_RESIDUE_XYZ",
+                "name": "unmodeled",
+                "feature_positions": [{"beg_seq_id": 60, "end_seq_id": 80}],
+            }
+        ]
+        entity, instance = self._make_entity_with_tm(
+            entity_features=tm_features, instance_features=unmodeled
+        )
+        result = _analyze_tm_for_entity_instance(entity, instance)
+        assert result["resolved_tms"] == 4
+        assert result["total_tms"] == 5
+        assert result["status"] == TM_STATUS_INCOMPLETE
+
 
 class TestScanAllChains7tm:
     def test_with_mock_graphql(self) -> None:

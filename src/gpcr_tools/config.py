@@ -1439,6 +1439,15 @@ TM_COVERAGE_THRESHOLD: float = 0.50
 # and are still surfaced by the SUSPICIOUS_7TM alert).
 GPCR_MIN_ANNOTATED_TM: int = 4
 
+# A chain whose every annotated TM helix is resolved counts as COMPLETE even when
+# fewer than six TMs were annotated, provided the annotation is substantial (at
+# least this many TMs). This covers receptors whose UniProt/RCSB mapping only
+# resolved five of the canonical seven helices: with resolved_tms == total_tms
+# no mapped TM is unmodeled, so the "incompleteness" is a mapping artifact, not
+# missing density. Kept above single-/few-pass partner slugs (total_tms small)
+# so those never wave through.
+TM_MIN_RECEPTOR_ANNOTATED: int = 5
+
 TM_ENTITY_FEATURE_TYPES: frozenset[str] = frozenset(
     {
         "TRANSMEMBRANE",

@@ -54,6 +54,7 @@ from gpcr_tools.config import (
     OLIGOMER_NO_GPCR,
     TM_COVERAGE_THRESHOLD,
     TM_ENTITY_FEATURE_TYPES,
+    TM_MIN_RECEPTOR_ANNOTATED,
     TM_STATUS_COMPLETE,
     TM_STATUS_INCOMPLETE,
     TM_STATUS_UNKNOWN,
@@ -221,7 +222,18 @@ def _analyze_tm_for_entity_instance(
             resolved_tms += 1
 
     total_tms = len(tm_regions)
-    status = TM_STATUS_COMPLETE if resolved_tms >= 6 else TM_STATUS_INCOMPLETE
+    # A chain is COMPLETE when at least six TM helices are resolved, OR when every
+    # annotated TM is resolved and the annotation is substantial (>= five helices).
+    # The second clause rescues receptors whose UniProt/RCSB mapping only exposed
+    # five of the canonical seven TMs: resolved_tms == total_tms means no mapped
+    # TM is unmodeled, so the shortfall is a mapping artifact rather than missing
+    # density. Chains with any unmodeled TM (resolved_tms < total_tms) or a small
+    # annotation (single-/few-pass partner slugs) stay INCOMPLETE.
+    fully_resolved_receptor = total_tms >= TM_MIN_RECEPTOR_ANNOTATED and resolved_tms == total_tms
+    if resolved_tms >= 6 or fully_resolved_receptor:
+        status = TM_STATUS_COMPLETE
+    else:
+        status = TM_STATUS_INCOMPLETE
     return {"resolved_tms": resolved_tms, "total_tms": total_tms, "status": status}
 
 
