@@ -3466,11 +3466,43 @@ class TestRelocateMisfiledGProteinFragments:
             "auxiliary_proteins": [{"name": "Gt C-terminal peptide", "chain_id": "B"}],
         }
         gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
-        # Nothing was recovered, so the entry is left where it is rather than deleted.
-        assert data["auxiliary_proteins"] == [{"name": "Gt C-terminal peptide", "chain_id": "B"}]
+        # ALPHA column: behaviour is unchanged -- the duplicate entry is removed and
+        # the review is kept. Only beta/gamma go silent on a no-op.
+        assert data["auxiliary_proteins"] == []
         alpha = data["signaling_partners"]["g_protein"]["alpha_subunit"]
         assert alpha["uniprot_entry_name"] == "gnat1_bovin"
         assert alpha["chain_id"] == "B"  # unchanged -- no double-listing
+        # An entry sharing the G-alpha's chain still gates: on the identity axis a
+        # receptor-Galpha fusion looks exactly like this, so the review is kept.
+        assert advisory == []
+        assert len(gating) == 1
+        assert ALERT_PREFIX_G_PROTEIN_RELOCATED in gating[0]
+
+    def test_beta_no_op_on_same_chain_is_silent(self) -> None:
+        # The beta counterpart of the alpha case above: the subunit is already
+        # recorded on this chain, so the bucket entry is a separate annotation (the
+        # reporter tag fused to G-beta), not a misfiled subunit. Off the identity
+        # axis, silence is right -- keep the entry, report nothing.
+        enriched = self._enriched(
+            [
+                _gp_poly(
+                    "B",
+                    description="Guanine nucleotide-binding protein G(I)/G(S)/G(T) subunit beta-1",
+                    slugs=["gbb1_human"],
+                )
+            ]
+        )
+        data: dict[str, Any] = {
+            "signaling_partners": {
+                "g_protein": {
+                    "alpha_subunit": {"uniprot_entry_name": "gnas2_human", "chain_id": "A"},
+                    "beta_subunit": {"uniprot_entry_name": "gbb1_human", "chain_id": "B"},
+                }
+            },
+            "auxiliary_proteins": [{"name": "HiBiT", "chain_id": "B"}],
+        }
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
+        assert data["auxiliary_proteins"] == [{"name": "HiBiT", "chain_id": "B"}]
         assert gating == []
         assert advisory == []
 
@@ -3502,12 +3534,12 @@ class TestRelocateMisfiledGProteinFragments:
         assert ALERT_PREFIX_G_PROTEIN_RELOCATED in gating[0]
         assert "alpha_subunit" in gating[0]
 
-    def test_same_subunit_chain_already_in_list_changes_nothing_and_says_nothing(self) -> None:
-        # Same slug AND the chain is already listed ("A, B" already, matched "B").
-        # There is nothing to recover, so the entry is not a misfiled subunit: it is a
-        # separate annotation sharing an author chain. Removing it would delete a
-        # correct record and the warning would describe a move that did not happen.
-        # The record, the bucket and both channels are all left untouched.
+    def test_same_subunit_chain_already_in_list_is_no_op(self) -> None:
+        # Same slug AND the chain is already listed ("A, B" already, matched "B"):
+        # chain_id is not double-listed. This is the ALPHA column, where behaviour is
+        # unchanged -- the review is kept, because an entry sharing the G-alpha's
+        # chain is what a receptor-Galpha fusion looks like. See
+        # test_beta_no_op_on_same_chain_is_silent for the off-axis counterpart.
         enriched = self._enriched(
             [_gp_poly("B", sequence="ILENLKDCGLF", description=_GACT_DESC, slugs=["gnas2_human"])]
         )
@@ -3520,11 +3552,11 @@ class TestRelocateMisfiledGProteinFragments:
             "auxiliary_proteins": [{"name": "G-alpha fragment", "chain_id": "B"}],
         }
         gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
-        assert data["auxiliary_proteins"] == [{"name": "G-alpha fragment", "chain_id": "B"}]
+        assert data["auxiliary_proteins"] == []
         alpha = data["signaling_partners"]["g_protein"]["alpha_subunit"]
         assert alpha["chain_id"] == "A, B"  # unchanged -- B not re-added
-        assert gating == []
         assert advisory == []
+        assert len(gating) == 1
 
     def test_orphan_beta_without_alpha_stays_gating(self) -> None:
         # A receptor can bind a G-beta that is not part of a heterotrimer at all --

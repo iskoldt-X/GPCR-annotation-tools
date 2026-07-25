@@ -2146,7 +2146,7 @@ def relocate_misfiled_g_protein_fragments(
                     if matched_chain not in merged:
                         merged.append(matched_chain)
                         subunit_block["chain_id"] = _format_chain_ids(merged)
-                    else:
+                    elif column != _SUBUNIT_ALPHA:
                         # Nothing to recover: this subunit is already recorded on this
                         # very chain. The bucket entry is therefore not a misfiled
                         # subunit at all -- it is a SEPARATE annotation that happens to
@@ -2157,6 +2157,14 @@ def relocate_misfiled_g_protein_fragments(
                         # annotation, and reporting a move would describe something that
                         # did not happen; leave both the record and the entry untouched
                         # and say nothing.
+                        #
+                        # Restricted to beta/gamma on purpose. On the alpha column the
+                        # same silence would drop a real review: an entry sharing the
+                        # G-alpha's chain is what a receptor-Galpha fusion or a
+                        # dominant-negative chimera looks like, and that sits on the
+                        # identity axis where this module never trades a review for
+                        # tidiness. An alpha no-op therefore keeps its gating warning,
+                        # the same split this function already applies everywhere else.
                         kept.append(entry)
                         continue
                 else:
