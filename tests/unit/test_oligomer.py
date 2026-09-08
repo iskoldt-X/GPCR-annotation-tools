@@ -47,8 +47,10 @@ from gpcr_tools.config import (
 from gpcr_tools.csv_generator.logic import resolve_partner_protomer
 from gpcr_tools.csv_generator.validation_display import inject_oligomer_alerts
 from gpcr_tools.validator.oligomer import (
+    _ai_state_lacks_independent_evidence,
     _analyze_tm_for_entity_instance,
     _apply_chain_override,
+    _assembly_receptor_is_single,
     _build_gpcr_roster,
     _build_label_asym_id_map,
     _generate_alerts,
@@ -56,6 +58,7 @@ from gpcr_tools.validator.oligomer import (
     _parse_oligomeric_count,
     _reconcile_ai_oligomer,
     _reconcile_assembly_consistency,
+    _stoich_copy_count,
     _suggest_primary_protomer,
     analyze_oligomer,
     build_nonpolymer_instance_index,
@@ -113,6 +116,117 @@ class TestIsGpcrSlug:
     def test_none_string(self) -> None:
         # Empty string guard
         assert is_gpcr_slug("") is False
+
+
+# ===================================================================
+# Non-receptor roster prefixes (peptide / chemokine / toxin / fusion)
+# ===================================================================
+
+
+class TestNonReceptorPrefixes:
+    """Non-7TM chains that carry a GPCRdb slug are kept out of the receptor roster.
+
+    Peptide agonists, chemokine ligands, toxins, crystallization / expression
+    partners, and signalling-pathway proteins have their own GPCRdb entry-name
+    slugs but no transmembrane span. Denylisting their slug prefixes keeps them
+    out of the receptor roster (and off the SUSPICIOUS_7TM tripwire) without
+    filtering any real receptor.
+    """
+
+    def test_peptide_hormone_ligand_filtered(self) -> None:
+        assert is_gpcr_slug("edn1_human") is False
+        assert is_gpcr_slug("pthy_human") is False
+        assert is_gpcr_slug("gast_human") is False
+        assert is_gpcr_slug("secr_human") is False
+
+    def test_chemokine_ligand_filtered(self) -> None:
+        assert is_gpcr_slug("sdf1_human") is False
+        assert is_gpcr_slug("ccl5_human") is False
+        assert is_gpcr_slug("cxcl2_human") is False
+        assert is_gpcr_slug("il8_human") is False
+
+    def test_toxin_and_fusion_partner_filtered(self) -> None:
+        assert is_gpcr_slug("3sim3_denan") is False
+        assert is_gpcr_slug("thio_ecoli") is False
+        assert is_gpcr_slug("luci_oplgr") is False
+        assert is_gpcr_slug("gpa1_yeast") is False
+
+    def test_accession_named_non_receptor_filtered(self) -> None:
+        assert is_gpcr_slug("b5xgr7_salsa") is False
+
+    def test_stem_underscore_filters_ligand_but_keeps_receptor(self) -> None:
+        # A ligand stem that is also a prefix of its own receptor family uses the
+        # trailing-underscore safe form: the ligand slug is filtered, the
+        # receptor slugs are preserved.
+        assert is_gpcr_slug("npy_human") is False
+        assert is_gpcr_slug("npy1r_human") is True
+        assert is_gpcr_slug("npy2r_human") is True
+
+        assert is_gpcr_slug("vip_human") is False
+        assert is_gpcr_slug("vipr1_human") is True
+        assert is_gpcr_slug("vipr2_human") is True
+
+        assert is_gpcr_slug("calc_human") is False
+        assert is_gpcr_slug("calcr_human") is True
+        assert is_gpcr_slug("calcrl_human") is True
+
+        assert is_gpcr_slug("gip_human") is False
+        assert is_gpcr_slug("gipr_human") is True
+
+        assert is_gpcr_slug("grp_human") is False
+        assert is_gpcr_slug("grpr_human") is True
+
+        assert is_gpcr_slug("nmu_human") is False
+        assert is_gpcr_slug("nmur1_human") is True
+
+        assert is_gpcr_slug("nmb_human") is False
+        assert is_gpcr_slug("nmbr_human") is True
+
+        assert is_gpcr_slug("mch_human") is False
+        assert is_gpcr_slug("mchr1_human") is True
+
+        assert is_gpcr_slug("npff_human") is False
+        assert is_gpcr_slug("npff1_human") is True
+
+    def test_undisambiguable_stems_stay_in_roster(self) -> None:
+        # Adhesion receptors and the V2 receptor share their slug stem with the
+        # non-receptor chain, so they cannot be denylisted safely -- they must
+        # remain real receptors (kept on the SUSPICIOUS_7TM alert instead).
+        assert is_gpcr_slug("v2r_human") is True
+        assert is_gpcr_slug("agre1_mouse") is True
+        assert is_gpcr_slug("agrg2_mouse") is True
+        assert is_gpcr_slug("agrl3_human") is True
+
+    def test_real_receptors_unaffected(self) -> None:
+        for slug in (
+            "drd2_human",
+            "5ht2a_human",
+            "adrb2_human",
+            "oprm_human",
+            "cnr1_human",
+            "crfr1_human",
+            "sctr_human",
+            "gp139_human",
+        ):
+            assert is_gpcr_slug(slug) is True, slug
+
+    def test_negative_prefixes_have_no_duplicates(self) -> None:
+        from gpcr_tools.config import GPCR_SLUG_NEGATIVE_PREFIXES
+
+        # No exact duplicates.
+        assert len(GPCR_SLUG_NEGATIVE_PREFIXES) == len(set(GPCR_SLUG_NEGATIVE_PREFIXES))
+        # And no prefix is subsumed by a shorter one. Matching is startswith
+        # (is_gpcr_slug), so a prefix that itself starts with another listed prefix
+        # filters nothing the shorter prefix does not already filter -- it is dead
+        # weight (e.g. "ccl20"/"ccl21" under "ccl2"). Rejecting subsumption keeps
+        # the denylist minimal and forces every entry to earn its place.
+        subsumed = sorted(
+            (longer, shorter)
+            for longer in GPCR_SLUG_NEGATIVE_PREFIXES
+            for shorter in GPCR_SLUG_NEGATIVE_PREFIXES
+            if longer != shorter and longer.startswith(shorter)
+        )
+        assert subsumed == [], f"redundant startswith-subsumed prefixes: {subsumed}"
 
 
 # ===================================================================
@@ -291,9 +405,12 @@ class TestRosterTmGating:
         return data["oligomer_analysis"]
 
     def test_zero_tm_peptide_ligand_chain_excluded(self) -> None:
-        # 8XGR-shape: endothelin-1 peptide (0 TM) sharing the roster with EDNRB.
+        # A short peptide agonist (0 TM) sharing the roster with a 7TM receptor.
+        # The peptide slug is deliberately NOT on the negative-prefix denylist, so
+        # it enters the roster and must be dropped by the transmembrane gate (0 TM)
+        # rather than being filtered upstream -- this exercises the TM gate itself.
         o = self._analyze(
-            [_make_entity("ednrb_human", "R"), _make_entity("edn1_human", "L")],
+            [_make_entity("ednrb_human", "R"), _make_entity("pep1_human", "L")],
             {
                 "R": {"resolved_tms": 7, "total_tms": 7, "status": TM_STATUS_COMPLETE},
                 "L": {"resolved_tms": 0, "total_tms": 0, "status": TM_STATUS_UNKNOWN},
@@ -637,6 +754,104 @@ class TestAnalyzeTm:
         )
         result = _analyze_tm_for_entity_instance(entity, instance)
         assert result["resolved_tms"] == 0
+
+    def test_five_of_five_fully_resolved_is_complete(self) -> None:
+        """A receptor whose mapping exposed only five TMs, all resolved, is COMPLETE.
+
+        resolved_tms == total_tms means no mapped TM is unmodeled, so the
+        five-not-seven shortfall is a UniProt/RCSB mapping artifact, not missing
+        density -- it must not gate as INCOMPLETE_7TM.
+        """
+        tm_features = [
+            {
+                "type": "TRANSMEMBRANE",
+                "name": "TM",
+                "feature_positions": [
+                    {"beg_seq_id": i * 30, "end_seq_id": i * 30 + 20} for i in range(1, 6)
+                ],
+            }
+        ]
+        entity, instance = self._make_entity_with_tm(entity_features=tm_features)
+        result = _analyze_tm_for_entity_instance(entity, instance)
+        assert result["resolved_tms"] == 5
+        assert result["total_tms"] == 5
+        assert result["status"] == TM_STATUS_COMPLETE
+
+    def test_five_of_six_stays_incomplete(self) -> None:
+        """One unmodeled TM out of six annotated is real missing density -> gate."""
+        tm_features = [
+            {
+                "type": "TRANSMEMBRANE",
+                "name": "TM",
+                "feature_positions": [
+                    {"beg_seq_id": i * 30, "end_seq_id": i * 30 + 20} for i in range(1, 7)
+                ],
+            }
+        ]
+        # Knock out the first TM (10..30) so 5 of 6 resolve.
+        unmodeled = [
+            {
+                "type": "UNOBSERVED_RESIDUE_XYZ",
+                "name": "unmodeled",
+                "feature_positions": [{"beg_seq_id": 30, "end_seq_id": 50}],
+            }
+        ]
+        entity, instance = self._make_entity_with_tm(
+            entity_features=tm_features, instance_features=unmodeled
+        )
+        result = _analyze_tm_for_entity_instance(entity, instance)
+        assert result["resolved_tms"] == 5
+        assert result["total_tms"] == 6
+        assert result["status"] == TM_STATUS_INCOMPLETE
+
+    def test_four_of_four_fully_resolved_stays_incomplete(self) -> None:
+        """Below the substantial-annotation floor: too few TMs to call COMPLETE.
+
+        A single-/few-pass partner slug (or a badly truncated mapping) with all
+        annotated TMs resolved must still gate -- four resolved helices is not a
+        7TM receptor even when nothing is unmodeled.
+        """
+        tm_features = [
+            {
+                "type": "TRANSMEMBRANE",
+                "name": "TM",
+                "feature_positions": [
+                    {"beg_seq_id": i * 30, "end_seq_id": i * 30 + 20} for i in range(1, 5)
+                ],
+            }
+        ]
+        entity, instance = self._make_entity_with_tm(entity_features=tm_features)
+        result = _analyze_tm_for_entity_instance(entity, instance)
+        assert result["resolved_tms"] == 4
+        assert result["total_tms"] == 4
+        assert result["status"] == TM_STATUS_INCOMPLETE
+
+    def test_five_annotated_one_unmodeled_stays_incomplete(self) -> None:
+        """Five annotated TMs but one unmodeled (4/5) is real missing density -> gate."""
+        tm_features = [
+            {
+                "type": "TRANSMEMBRANE",
+                "name": "TM",
+                "feature_positions": [
+                    {"beg_seq_id": i * 30, "end_seq_id": i * 30 + 20} for i in range(1, 6)
+                ],
+            }
+        ]
+        # Knock out the second TM (60..80) so 4 of 5 resolve.
+        unmodeled = [
+            {
+                "type": "UNOBSERVED_RESIDUE_XYZ",
+                "name": "unmodeled",
+                "feature_positions": [{"beg_seq_id": 60, "end_seq_id": 80}],
+            }
+        ]
+        entity, instance = self._make_entity_with_tm(
+            entity_features=tm_features, instance_features=unmodeled
+        )
+        result = _analyze_tm_for_entity_instance(entity, instance)
+        assert result["resolved_tms"] == 4
+        assert result["total_tms"] == 5
+        assert result["status"] == TM_STATUS_INCOMPLETE
 
 
 class TestScanAllChains7tm:
@@ -1490,6 +1705,72 @@ class TestAssemblyCrossCheckCandidatePreference:
         assert result["rcsb_candidate_assembly"] == "Y"
         assert result["modeled_polymer_monomer_count"] == 600
 
+    def test_homo_in_a_sibling_candidate_is_reported_separately(self) -> None:
+        # An entry can deposit several candidate assemblies that disagree. The
+        # chosen-assembly flag stays False (its own blocks record no Homo) while the
+        # wider scan sees the sibling's Homo block, so a caller can tell "the
+        # assembly we display says no homo-oligomer" from "no deposited assembly
+        # says one".
+        enriched: dict[str, Any] = {
+            "assemblies": [
+                {
+                    "pdbx_struct_assembly": {"rcsb_candidate_assembly": "Y"},
+                    "rcsb_struct_symmetry": [
+                        {"oligomeric_state": "Monomer", "stoichiometry": ["A1"]}
+                    ],
+                },
+                {
+                    "pdbx_struct_assembly": {"rcsb_candidate_assembly": "Y"},
+                    "rcsb_struct_symmetry": [
+                        {"oligomeric_state": "Homo 2-mer", "stoichiometry": ["A2"]}
+                    ],
+                },
+            ]
+        }
+        result = _get_assembly_cross_check(enriched)
+        assert result["has_homo_symmetry"] is False
+        assert result["homo_symmetry_in_any_candidate"] is True
+
+    def test_non_candidate_sibling_homo_is_not_counted(self) -> None:
+        # The scan is scoped to candidate assemblies: a Homo block on an assembly
+        # RCSB did not flag as a biological candidate does not withhold a downgrade.
+        enriched: dict[str, Any] = {
+            "assemblies": [
+                {
+                    "pdbx_struct_assembly": {"rcsb_candidate_assembly": "Y"},
+                    "rcsb_struct_symmetry": [
+                        {"oligomeric_state": "Monomer", "stoichiometry": ["A1"]}
+                    ],
+                },
+                {
+                    "pdbx_struct_assembly": {"rcsb_candidate_assembly": "N"},
+                    "rcsb_struct_symmetry": [
+                        {"oligomeric_state": "Homo 2-mer", "stoichiometry": ["A2"]}
+                    ],
+                },
+            ]
+        }
+        result = _get_assembly_cross_check(enriched)
+        assert result["homo_symmetry_in_any_candidate"] is False
+
+    def test_homo_in_the_chosen_assembly_also_sets_the_wider_flag(self) -> None:
+        # The wider flag is a superset: whatever the chosen assembly records, the
+        # scan must also report, so no caller can read the two as contradictory.
+        enriched: dict[str, Any] = {
+            "assemblies": [
+                {
+                    "pdbx_struct_assembly": {"rcsb_candidate_assembly": "Y"},
+                    "rcsb_struct_symmetry": [
+                        {"oligomeric_state": "Hetero 3-mer", "stoichiometry": ["A1", "B1", "C1"]},
+                        {"oligomeric_state": "Homo 2-mer", "stoichiometry": ["A2"]},
+                    ],
+                }
+            ]
+        }
+        result = _get_assembly_cross_check(enriched)
+        assert result["has_homo_symmetry"] is True
+        assert result["homo_symmetry_in_any_candidate"] is True
+
     def test_falls_back_to_first_when_none_flagged(self) -> None:
         enriched: dict[str, Any] = {
             "assemblies": [
@@ -2015,10 +2296,14 @@ class TestTmFetchReliability:
     def _enriched_receptor_plus_peptide(self) -> dict[str, Any]:
         # Both chains carry a GPCR slug in the roster; only the real receptor is a
         # 7TM bundle. The peptide (a short agonist) must NOT count as a receptor.
+        # The peptide slug is deliberately one NOT on the negative-prefix denylist,
+        # so it reaches the transmembrane gate rather than being filtered upstream --
+        # this class exercises the TM-gate fallback (the tripwire for an
+        # un-catalogued peptide prefix), not the denylist itself.
         return _make_enriched_with_entities(
             [
                 _make_entity("pth1r_human", "A", length=420),
-                _make_entity("pthy_human", "P", length=34),
+                _make_entity("pep1_human", "P", length=34),
             ]
         )
 
@@ -2268,16 +2553,334 @@ class TestReconcileAiOligomer:
             _reconcile_ai_oligomer("garbage", OLIGOMER_HOMOMER, 2, tm_data_available=True) is None
         )
 
+    # --- Advisory downgrade: undercount + RCSB records a single receptor copy ---
+
+    def test_undercount_rcsb_single_receptor_is_advisory(self) -> None:
+        # AI 'monomer' (1) vs classifier HOMOMER (2); no symmetry block records a
+        # receptor Homo N-mer AND RCSB's global biological assembly records the
+        # receptor as a single copy. The two same-slug chains are crystallographic
+        # copies, the released monomer agrees with RCSB, so the alert is stamped
+        # advisory (gating=False) yet still emitted.
+        alert = _reconcile_ai_oligomer(
+            AI_OLIGOMER_MONOMER,
+            OLIGOMER_HOMOMER,
+            2,
+            tm_data_available=True,
+            has_homo_symmetry=False,
+            assembly_receptor_single=True,
+            ai_evidence_is_independent=True,
+        )
+        assert alert is not None
+        assert alert["type"] == ALERT_OLIGOMER_DISAGREEMENT
+        assert alert["gating"] is False
+
+    def test_undercount_stays_gating_when_ai_only_echoed_the_assembly(self) -> None:
+        # The assembly corroborates a single receptor, but the model's cited evidence
+        # is the assembly record read back -- one witness counted twice, while the
+        # only independent signal (the chain-counting classifier) is the one being
+        # overruled. Keep gating.
+        alert = _reconcile_ai_oligomer(
+            AI_OLIGOMER_MONOMER,
+            OLIGOMER_HOMOMER,
+            2,
+            tm_data_available=True,
+            has_homo_symmetry=False,
+            assembly_receptor_single=True,
+            ai_evidence_is_independent=False,
+        )
+        assert alert is not None
+        assert "gating" not in alert
+
+    def test_undercount_hetero_doubled_receptor_stays_gating(self) -> None:
+        # The corner the receptor-single guard closes: the global symmetry TYPE is
+        # Hetero (so has_homo_symmetry is False) but RCSB records the RECEPTOR
+        # doubled in the biological assembly, so assembly_receptor_single is False.
+        # Releasing 'monomer' here would rest on AI-only trust -- keep gating.
+        alert = _reconcile_ai_oligomer(
+            AI_OLIGOMER_MONOMER,
+            OLIGOMER_HOMOMER,
+            2,
+            tm_data_available=True,
+            has_homo_symmetry=False,
+            assembly_receptor_single=False,
+        )
+        assert alert is not None
+        assert alert["type"] == ALERT_OLIGOMER_DISAGREEMENT
+        assert "gating" not in alert
+
+    def test_undercount_with_homo_symmetry_stays_gating(self) -> None:
+        # Same undercount direction, but RCSB DOES record a receptor homo-oligomer
+        # (e.g. a Homo N-mer in a Local/Pseudo block): the AI is genuinely at odds
+        # with the biological assembly, so keep gating even if a stoichiometry read
+        # looked single (no flag -> defaults True).
+        alert = _reconcile_ai_oligomer(
+            AI_OLIGOMER_MONOMER,
+            OLIGOMER_HOMOMER,
+            2,
+            tm_data_available=True,
+            has_homo_symmetry=True,
+            assembly_receptor_single=True,
+        )
+        assert alert is not None
+        assert alert["type"] == ALERT_OLIGOMER_DISAGREEMENT
+        assert "gating" not in alert
+
+    def test_overcount_stays_gating(self) -> None:
+        # Hallucination direction: AI 'homo-dimer' (2) vs classifier MONOMER (1).
+        # The AI claims MORE receptor copies than resolved; never downgraded even
+        # when the assembly corroborates a single receptor.
+        alert = _reconcile_ai_oligomer(
+            AI_OLIGOMER_HOMO_DIMER,
+            OLIGOMER_MONOMER,
+            1,
+            tm_data_available=True,
+            has_homo_symmetry=False,
+            assembly_receptor_single=True,
+        )
+        assert alert is not None
+        assert alert["type"] == ALERT_OLIGOMER_DISAGREEMENT
+        assert "gating" not in alert
+
+    def test_homomer_undercount_to_dimer_stays_gating(self) -> None:
+        # A lower-but-still-oligomer release: AI 'homo-dimer' (2) vs classifier
+        # HOMOMER 4. The AI still asserts a homo-oligomer, so only a MONOMER release
+        # (ai_count == 1) is ever downgraded -- this keeps gating.
+        alert = _reconcile_ai_oligomer(
+            AI_OLIGOMER_HOMO_DIMER,
+            OLIGOMER_HOMOMER,
+            4,
+            tm_data_available=True,
+            has_homo_symmetry=False,
+            assembly_receptor_single=True,
+        )
+        assert alert is not None
+        assert alert["type"] == ALERT_OLIGOMER_DISAGREEMENT
+        assert "gating" not in alert
+
+    def test_heteromer_undercount_stays_gating(self) -> None:
+        # A HETEROMER undercount (AI 'monomer' vs 3 distinct receptor chains) is a
+        # missed-partner claim; the homo-oligomer assembly signals do not vouch for
+        # it, so the downgrade is scoped out -- it keeps gating.
+        alert = _reconcile_ai_oligomer(
+            AI_OLIGOMER_MONOMER,
+            OLIGOMER_HETEROMER,
+            3,
+            tm_data_available=True,
+            has_homo_symmetry=False,
+            assembly_receptor_single=True,
+        )
+        assert alert is not None
+        assert alert["type"] == ALERT_OLIGOMER_DISAGREEMENT
+        assert "gating" not in alert
+
+    def test_kind_mismatch_same_count_stays_gating(self) -> None:
+        # Equal counts, differing kind (AI hetero-dimer vs HOMOMER): not an
+        # undercount, so it keeps gating regardless of the assembly signals.
+        alert = _reconcile_ai_oligomer(
+            AI_OLIGOMER_HETERO_DIMER,
+            OLIGOMER_HOMOMER,
+            2,
+            tm_data_available=True,
+            has_homo_symmetry=False,
+            assembly_receptor_single=True,
+        )
+        assert alert is not None
+        assert "gating" not in alert
+
+    def test_assembly_flags_default_to_gating(self) -> None:
+        # Omitting BOTH biological-assembly flags must not silently downgrade: the
+        # defaults (has_homo_symmetry=True, assembly_receptor_single=False) keep
+        # gating -- absence of evidence never waves an alert through.
+        alert = _reconcile_ai_oligomer(
+            AI_OLIGOMER_MONOMER, OLIGOMER_HOMOMER, 2, tm_data_available=True
+        )
+        assert alert is not None
+        assert alert.get("gating", True) is True
+
+
+class TestAiStateEvidenceRecitation:
+    """The recitation filter on the model's cited oligomeric-state evidence."""
+
+    def test_non_string_quote_degrades_instead_of_raising(self) -> None:
+        # quote_or_path is declared a string by the annotation schema, but a
+        # malformed record must read as "no usable citation", never raise.
+        data = {"receptor_info": {"oligomeric_state": {"evidence": {"quote_or_path": ["x"]}}}}
+        assert _ai_state_lacks_independent_evidence(data, {}) is True
+
+    def test_quote_drawn_only_from_the_assembly_reads_as_recitation(self) -> None:
+        enriched = {
+            "assemblies": [
+                {
+                    "rcsb_struct_symmetry": [
+                        {
+                            "oligomeric_state": "Monomer",
+                            "stoichiometry": ["A1"],
+                            "kind": "Global Symmetry",
+                        }
+                    ]
+                }
+            ]
+        }
+        data = {
+            "receptor_info": {
+                "oligomeric_state": {"evidence": {"quote_or_path": "Monomer, [A1], Global"}}
+            }
+        }
+        assert _ai_state_lacks_independent_evidence(data, enriched) is True
+
+    def test_quote_with_publication_content_reads_as_independent(self) -> None:
+        enriched = {
+            "assemblies": [
+                {
+                    "rcsb_struct_symmetry": [
+                        {
+                            "oligomeric_state": "Monomer",
+                            "stoichiometry": ["A1"],
+                            "kind": "Global Symmetry",
+                        }
+                    ]
+                }
+            ]
+        }
+        data = {
+            "receptor_info": {
+                "oligomeric_state": {
+                    "evidence": {"quote_or_path": "two molecules occupy the asymmetric unit"}
+                }
+            }
+        }
+        assert _ai_state_lacks_independent_evidence(data, enriched) is False
+
+
+class TestAssemblyReceptorIsSingle:
+    """The biological-assembly 'receptor is a single copy' predicate that gates the
+    OLIGOMER_DISAGREEMENT advisory downgrade."""
+
+    def test_stoich_copy_count_parses_trailing_int(self) -> None:
+        assert _stoich_copy_count("A2") == 2
+        assert _stoich_copy_count("B1") == 1
+        assert _stoich_copy_count("AA12") == 12
+
+    def test_stoich_copy_count_no_count_is_none(self) -> None:
+        # No trailing digit -> no signal (never silently treated as 1).
+        assert _stoich_copy_count("A") is None
+        assert _stoich_copy_count("") is None
+        assert _stoich_copy_count(None) is None
+        assert _stoich_copy_count(2) is None
+
+    def test_monomer_assembly_is_single(self) -> None:
+        info = {"kind": "Global Symmetry", "oligomeric_state": "Monomer", "stoichiometry": ["A1"]}
+        assert _assembly_receptor_is_single(info) is True
+
+    def test_all_single_hetero_is_single(self) -> None:
+        # A receptor + partner hetero-complex where every entity is present once:
+        # whichever token is the receptor, it is single.
+        info = {
+            "kind": "Global Symmetry",
+            "oligomeric_state": "Hetero 2-mer",
+            "stoichiometry": ["A1", "B1"],
+        }
+        # Three deposited chains against a two-subunit assembly: the assembly leaves
+        # a chain out, so the all-single reading is about a genuine sub-selection.
+        assert _assembly_receptor_is_single(info, 3) is True
+
+    def test_all_single_rejected_when_assembly_covers_every_chain(self) -> None:
+        # The realized proxy failure: four deposited chains (two receptor copies plus
+        # two partner chains) and a four-subunit assembly listing each as a single
+        # token. The assembly holds BOTH receptor copies, so "every token is single"
+        # is a labelling artefact and cannot corroborate a single receptor.
+        info = {
+            "kind": "Global Symmetry",
+            "oligomeric_state": "Hetero 4-mer",
+            "stoichiometry": ["A1", "B1", "C1", "D1"],
+        }
+        assert _assembly_receptor_is_single(info, 4) is False
+
+    def test_all_single_rejected_without_a_chain_total(self) -> None:
+        # Without the entry's chain total the proxy cannot be validated, so it is not
+        # trusted -- absence of evidence never downgrades.
+        info = {
+            "kind": "Global Symmetry",
+            "oligomeric_state": "Hetero 2-mer",
+            "stoichiometry": ["A1", "B1"],
+        }
+        assert _assembly_receptor_is_single(info, None) is False
+
+    def test_monomer_state_is_single_regardless_of_chain_total(self) -> None:
+        # The Monomer route is a direct statement about the whole biological unit,
+        # not a per-entity inference, so the arithmetic guard does not apply.
+        info = {
+            "kind": "Global Symmetry",
+            "oligomeric_state": "Monomer",
+            "stoichiometry": ["A1"],
+        }
+        assert _assembly_receptor_is_single(info, 4) is True
+
+    def test_doubled_receptor_hetero_is_not_single(self) -> None:
+        # A doubled entity means a receptor homo-oligomer is possible -> not single.
+        info = {
+            "kind": "Global Symmetry",
+            "oligomeric_state": "Hetero 4-mer",
+            "stoichiometry": ["A2", "B2"],
+        }
+        assert _assembly_receptor_is_single(info) is False
+
+    def test_mixed_stoichiometry_is_not_single(self) -> None:
+        # One doubled token is enough to keep gating: we cannot tell which token is
+        # the receptor, so a possibly-doubled receptor is treated conservatively.
+        info = {
+            "kind": "Global Symmetry",
+            "oligomeric_state": "Hetero 3-mer",
+            "stoichiometry": ["A2", "B1"],
+        }
+        assert _assembly_receptor_is_single(info) is False
+
+    def test_homo_dimer_assembly_is_not_single(self) -> None:
+        info = {
+            "kind": "Global Symmetry",
+            "oligomeric_state": "Homo 2-mer",
+            "stoichiometry": ["A2"],
+        }
+        assert _assembly_receptor_is_single(info) is False
+
+    def test_non_global_symmetry_is_not_single(self) -> None:
+        # A Local / Pseudo block describes a sub-component and can read single while
+        # the whole assembly doubles the receptor -> not trusted.
+        info = {
+            "kind": "Local Symmetry",
+            "oligomeric_state": "Monomer",
+            "stoichiometry": ["A1"],
+        }
+        assert _assembly_receptor_is_single(info) is False
+
+    def test_empty_assembly_is_not_single(self) -> None:
+        # Absence of assembly / symmetry data -> conservative False (never
+        # downgrades on absence of evidence).
+        assert _assembly_receptor_is_single({}) is False
+        assert _assembly_receptor_is_single({"kind": "Global Symmetry"}) is False
+        assert _assembly_receptor_is_single(None) is False  # type: ignore[arg-type]
+
 
 class TestAnalyzeOligomerAiCrossCheck:
     """End-to-end: the AI's receptor oligomeric state flows through analyze_oligomer
     and the receptor-level cross-check attaches (or withholds) a routing alert."""
 
-    def _data_with_ai_oligomer(self, chain_id: str, value: str) -> dict[str, Any]:
+    def _data_with_ai_oligomer(
+        self,
+        chain_id: str,
+        value: str,
+        quote: str = "the receptor elutes as a single species by SEC-MALS",
+    ) -> dict[str, Any]:
+        # The default quote is publication language, so the model reads as an
+        # independent witness unless a test deliberately supplies an assembly echo.
         return {
             "receptor_info": {
                 "chain_id": chain_id,
-                "oligomeric_state": {"value": value, "confidence": "High"},
+                "oligomeric_state": {
+                    "value": value,
+                    "confidence": "High",
+                    "evidence": {"quote_or_path": quote},
+                },
             }
         }
 
@@ -2365,15 +2968,165 @@ class TestAnalyzeOligomerAiCrossCheck:
         assert oligo["receptor_count"] == 2
         assert self._has_disagreement(oligo)
 
+    def _two_opsd_chains_with_assembly(
+        self, symmetry_block: dict[str, Any]
+    ) -> tuple[dict[str, Any], _FakePolymerFeaturesCache]:
+        # Two same-slug 7TM receptor chains (classifier HOMOMER count 2) plus a
+        # supplied RCSB biological-assembly symmetry block, so the AI-vs-classifier
+        # cross-check reaches its assembly-corroboration branch.
+        enriched = _make_enriched_with_entities(
+            [
+                _make_entity("opsd_bovin", "A", length=350),
+                _make_entity("opsd_bovin", "B", length=350),
+            ]
+        )
+        enriched["assemblies"] = [
+            {
+                "pdbx_struct_assembly": {"rcsb_candidate_assembly": "Y"},
+                "rcsb_assembly_info": {"modeled_polymer_monomer_count": 350},
+                "rcsb_struct_symmetry": [symmetry_block],
+            }
+        ]
+        cache = _FakePolymerFeaturesCache()
+        cache.preload(
+            "TEST",
+            {
+                "polymer_entities": [
+                    _gql_entity_with_tm("A", tm_count=7),
+                    _gql_entity_with_tm("B", tm_count=7),
+                ]
+            },
+        )
+        return enriched, cache
+
+    def _od_alert(self, oligo: dict[str, Any]) -> dict[str, Any]:
+        return next(a for a in oligo["alerts"] if a["type"] == ALERT_OLIGOMER_DISAGREEMENT)
+
+    def test_monomer_vs_copies_downgraded_when_assembly_single(self) -> None:
+        # Two same-slug chains, AI 'monomer', and RCSB's global biological assembly
+        # is a Monomer: the chains are crystallographic copies, the released monomer
+        # agrees with RCSB -> the disagreement is still emitted but stamped advisory.
+        enriched, cache = self._two_opsd_chains_with_assembly(
+            {"oligomeric_state": "Monomer", "stoichiometry": ["A1"], "kind": "Global Symmetry"}
+        )
+        data = self._data_with_ai_oligomer("A", AI_OLIGOMER_MONOMER)
+        analyze_oligomer("TEST", data, enriched, polymer_features_cache=cache)
+        oligo = data["oligomer_analysis"]
+        assert oligo["classification"] == OLIGOMER_HOMOMER
+        assert self._has_disagreement(oligo)
+        assert self._od_alert(oligo)["gating"] is False
+
+    def test_monomer_vs_copies_stays_gating_when_assembly_covers_every_chain(self) -> None:
+        # Both deposited chains ARE the receptor, and the two-subunit assembly lists
+        # them as two single tokens. "Every token is single" therefore describes how
+        # RCSB labelled two receptor copies, not a single receptor -- keep gating.
+        enriched, cache = self._two_opsd_chains_with_assembly(
+            {
+                "oligomeric_state": "Hetero 2-mer",
+                "stoichiometry": ["A1", "B1"],
+                "kind": "Global Symmetry",
+            }
+        )
+        data = self._data_with_ai_oligomer("A", AI_OLIGOMER_MONOMER)
+        analyze_oligomer("TEST", data, enriched, polymer_features_cache=cache)
+        oligo = data["oligomer_analysis"]
+        assert self._has_disagreement(oligo)
+        assert "gating" not in self._od_alert(oligo)
+
+    def test_monomer_vs_copies_stays_gating_when_a_sibling_assembly_says_homo(self) -> None:
+        # RCSB contradicting itself is not corroboration: the chosen assembly reads
+        # Monomer but another candidate assembly of the same entry records a Homo
+        # 2-mer, so the receptor-count disagreement keeps gating.
+        enriched, cache = self._two_opsd_chains_with_assembly(
+            {"oligomeric_state": "Monomer", "stoichiometry": ["A1"], "kind": "Global Symmetry"}
+        )
+        enriched["assemblies"].append(
+            {
+                "pdbx_struct_assembly": {"rcsb_candidate_assembly": "Y"},
+                "rcsb_struct_symmetry": [
+                    {
+                        "oligomeric_state": "Homo 2-mer",
+                        "stoichiometry": ["A2"],
+                        "kind": "Global Symmetry",
+                    }
+                ],
+            }
+        )
+        data = self._data_with_ai_oligomer("A", AI_OLIGOMER_MONOMER)
+        analyze_oligomer("TEST", data, enriched, polymer_features_cache=cache)
+        oligo = data["oligomer_analysis"]
+        assert self._has_disagreement(oligo)
+        assert "gating" not in self._od_alert(oligo)
+
+    def test_monomer_vs_copies_stays_gating_when_quote_echoes_the_assembly(self) -> None:
+        # The model's cited evidence recites the assembly line it was shown, so the
+        # apparent agreement between model and RCSB is one record read twice.
+        enriched, cache = self._two_opsd_chains_with_assembly(
+            {"oligomeric_state": "Monomer", "stoichiometry": ["A1"], "kind": "Global Symmetry"}
+        )
+        data = self._data_with_ai_oligomer(
+            "A", AI_OLIGOMER_MONOMER, quote="Monomer, [A1], Global Symmetry"
+        )
+        analyze_oligomer("TEST", data, enriched, polymer_features_cache=cache)
+        oligo = data["oligomer_analysis"]
+        assert self._has_disagreement(oligo)
+        assert "gating" not in self._od_alert(oligo)
+
+    def test_monomer_vs_copies_stays_gating_when_receptor_doubled(self) -> None:
+        # The must-fix corner: a Hetero N-mer whose stoichiometry DOUBLES an entity
+        # (a possible receptor homo-oligomer). has_homo_symmetry is False (global
+        # TYPE is Hetero) but the receptor is not corroborated single, so releasing
+        # 'monomer' would rest on AI-only trust -> the disagreement keeps gating.
+        enriched, cache = self._two_opsd_chains_with_assembly(
+            {
+                "oligomeric_state": "Hetero 4-mer",
+                "stoichiometry": ["A2", "B2"],
+                "kind": "Global Symmetry",
+            }
+        )
+        data = self._data_with_ai_oligomer("A", AI_OLIGOMER_MONOMER)
+        analyze_oligomer("TEST", data, enriched, polymer_features_cache=cache)
+        oligo = data["oligomer_analysis"]
+        assert self._has_disagreement(oligo)
+        assert "gating" not in self._od_alert(oligo)
+
+    def test_monomer_vs_copies_stays_gating_without_assembly(self) -> None:
+        # No assembly data at all: absence of evidence must not downgrade.
+        enriched = _make_enriched_with_entities(
+            [
+                _make_entity("opsd_bovin", "A", length=350),
+                _make_entity("opsd_bovin", "B", length=350),
+            ]
+        )
+        cache = _FakePolymerFeaturesCache()
+        cache.preload(
+            "TEST",
+            {
+                "polymer_entities": [
+                    _gql_entity_with_tm("A", tm_count=7),
+                    _gql_entity_with_tm("B", tm_count=7),
+                ]
+            },
+        )
+        data = self._data_with_ai_oligomer("A", AI_OLIGOMER_MONOMER)
+        analyze_oligomer("TEST", data, enriched, polymer_features_cache=cache)
+        oligo = data["oligomer_analysis"]
+        assert self._has_disagreement(oligo)
+        assert "gating" not in self._od_alert(oligo)
+
     def test_tm_data_unavailable_does_not_spuriously_route(self) -> None:
         # receptor + peptide (both slug-bearing); the TM fetch fails so the
         # classifier count is the unfiltered 2. The AI says 'monomer'. The count
         # is untrustworthy and already routes via TM_DATA_UNAVAILABLE, so the
         # cross-check must NOT add a second (spurious) disagreement.
+        # The peptide slug is deliberately NOT on the negative-prefix denylist, so
+        # both chains enter the roster and the unfiltered count is 2 (the point of
+        # this case). A denylisted peptide would be pruned upstream, dropping the
+        # count to 1 and making the assertion vacuous.
         enriched = _make_enriched_with_entities(
             [
                 _make_entity("pth1r_human", "A", length=420),
-                _make_entity("pthy_human", "P", length=34),
+                _make_entity("pep1_human", "P", length=34),
             ]
         )
         cache = _FakePolymerFeaturesCache()  # empty -> miss
@@ -2467,7 +3220,7 @@ class TestRelocateMisfiledGProteinFragments:
             "auxiliary_proteins": [{"name": "Gt C-terminal peptide", "chain_id": "B"}],
             "ligands": [],
         }
-        warnings = relocate_misfiled_g_protein_fragments(enriched, data)
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
 
         assert data["auxiliary_proteins"] == []  # removed from origin bucket
         alpha = data["signaling_partners"]["g_protein"]["alpha_subunit"]
@@ -2475,9 +3228,11 @@ class TestRelocateMisfiledGProteinFragments:
         assert alpha["chain_id"] == "B"
         # Alpha C-terminal / alpha5 fragment gets a fragment note.
         assert "fragment" in data["signaling_partners"]["g_protein"]["note"].lower()
-        assert len(warnings) == 1
-        assert ALERT_PREFIX_G_PROTEIN_RELOCATED in warnings[0]
-        assert "alpha_subunit" in warnings[0]
+        # A recovered ALPHA subunit rides the Galpha identity axis -> GATES.
+        assert advisory == []
+        assert len(gating) == 1
+        assert ALERT_PREFIX_G_PROTEIN_RELOCATED in gating[0]
+        assert "alpha_subunit" in gating[0]
 
     def test_full_length_alpha_by_description_gets_no_fragment_note(self) -> None:
         # A FULL-LENGTH G-alpha matched by description only (is_g_alpha_description,
@@ -2498,12 +3253,13 @@ class TestRelocateMisfiledGProteinFragments:
             "auxiliary_proteins": [{"name": "G-alpha", "chain_id": "B"}],
             "ligands": [],
         }
-        warnings = relocate_misfiled_g_protein_fragments(enriched, data)
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
         gp = data["signaling_partners"]["g_protein"]
         assert gp["alpha_subunit"]["chain_id"] == "B"
         assert "note" not in gp or "fragment" not in (gp.get("note") or "").lower()
-        assert len(warnings) == 1
-        assert ALERT_PREFIX_G_PROTEIN_RELOCATED in warnings[0]
+        assert advisory == []
+        assert len(gating) == 1
+        assert ALERT_PREFIX_G_PROTEIN_RELOCATED in gating[0]
 
     def test_beta_subunit_tag_named_routed_by_slug_not_name(self) -> None:
         # 8VHF / 8INR chain B: a G-beta subunit (slug gbb1_human) the model named
@@ -2519,16 +3275,62 @@ class TestRelocateMisfiledGProteinFragments:
                 )
             ]
         )
-        data: dict[str, Any] = {"auxiliary_proteins": [{"name": "HiBiT", "chain_id": "B"}]}
-        warnings = relocate_misfiled_g_protein_fragments(enriched, data)
+        data: dict[str, Any] = {
+            # A G-alpha is present, so the recovered beta completes a heterotrimer.
+            # Without one the recovery is an orphan and stays gating (covered by
+            # test_orphan_beta_without_alpha_stays_gating).
+            "signaling_partners": {
+                "g_protein": {
+                    "alpha_subunit": {"uniprot_entry_name": "gnas2_human", "chain_id": "A"}
+                }
+            },
+            "auxiliary_proteins": [{"name": "HiBiT", "chain_id": "B"}],
+        }
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
 
         gp = data["signaling_partners"]["g_protein"]
         assert "beta_subunit" in gp
         assert gp["beta_subunit"]["uniprot_entry_name"] == "gbb1_human"
-        assert "alpha_subunit" not in gp  # NOT routed to alpha despite unknown name
         assert data["auxiliary_proteins"] == []
-        assert ALERT_PREFIX_G_PROTEIN_RELOCATED in warnings[0]
-        assert "beta_subunit" in warnings[0]
+        # An authoritative beta recovery is off the Galpha identity axis -> ADVISORY,
+        # not gating: the correct subunit still ships, only the review signal downgrades.
+        assert gating == []
+        assert len(advisory) == 1
+        assert ALERT_PREFIX_G_PROTEIN_RELOCATED in advisory[0]
+        assert "beta_subunit" in advisory[0]
+
+    def test_gamma_subunit_relocation_is_advisory_not_gating(self) -> None:
+        # A G-gamma subunit (slug gbg2_bovin) misfiled under auxiliary_proteins is
+        # an authoritative slug fill off the Galpha identity axis -> its relocation
+        # is an ADVISORY note, not a gating warning: the correct subunit still ships
+        # in gamma_subunit, only the review signal is downgraded.
+        enriched = self._enriched(
+            [
+                _gp_poly(
+                    "G",
+                    description="Guanine nucleotide-binding protein G(I)/G(S)/G(O) subunit gamma-2",
+                    slugs=["gbg2_bovin"],
+                )
+            ]
+        )
+        data: dict[str, Any] = {
+            # An alpha is present, so the recovered gamma completes a heterotrimer.
+            "signaling_partners": {
+                "g_protein": {
+                    "alpha_subunit": {"uniprot_entry_name": "gnas2_human", "chain_id": "A"}
+                }
+            },
+            "auxiliary_proteins": [{"name": "gamma fragment", "chain_id": "G"}],
+        }
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
+
+        gp = data["signaling_partners"]["g_protein"]
+        assert gp["gamma_subunit"]["uniprot_entry_name"] == "gbg2_bovin"
+        assert data["auxiliary_proteins"] == []
+        assert gating == []
+        assert len(advisory) == 1
+        assert ALERT_PREFIX_G_PROTEIN_RELOCATED in advisory[0]
+        assert "gamma_subunit" in advisory[0]
 
     def test_no_slug_short_peptide_gated_not_relocated(self) -> None:
         # 6NWE chain B: a short GaCT peptide detected by its alpha5 motif but
@@ -2538,13 +3340,14 @@ class TestRelocateMisfiledGProteinFragments:
         )
         aux_entry = {"name": "CT2 peptide", "chain_id": "B"}
         data: dict[str, Any] = {"auxiliary_proteins": [aux_entry]}
-        warnings = relocate_misfiled_g_protein_fragments(enriched, data)
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
 
         assert data["auxiliary_proteins"] == [aux_entry]  # NOT moved
         assert "g_protein" not in data.get("signaling_partners", {})
-        assert len(warnings) == 1
-        assert ALERT_PREFIX_G_PROTEIN_MISFILED in warnings[0]
-        assert "no subunit slug" in warnings[0]
+        assert advisory == []
+        assert len(gating) == 1
+        assert ALERT_PREFIX_G_PROTEIN_MISFILED in gating[0]
+        assert "no subunit slug" in gating[0]
 
     def test_cross_role_fusion_gated_not_routed(self) -> None:
         # 8XGR chain G: one chain carrying BOTH a gamma (gbg2_bovin) and an alpha
@@ -2561,13 +3364,14 @@ class TestRelocateMisfiledGProteinFragments:
         )
         lig_entry = {"name": "eGt fusion", "chain_id": "G", "type": "protein"}
         data: dict[str, Any] = {"ligands": [lig_entry]}
-        warnings = relocate_misfiled_g_protein_fragments(enriched, data)
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
 
         assert data["ligands"] == [lig_entry]  # NOT moved
         assert "g_protein" not in data.get("signaling_partners", {})
-        assert len(warnings) == 1
-        assert ALERT_PREFIX_G_PROTEIN_MISFILED in warnings[0]
-        assert "two subunit identities" in warnings[0]
+        assert advisory == []
+        assert len(gating) == 1
+        assert ALERT_PREFIX_G_PROTEIN_MISFILED in gating[0]
+        assert "two subunit identities" in gating[0]
 
     def test_no_slug_engineered_mini_g_gated(self) -> None:
         # 7UM5 chain B: an engineered "miniGo protein" detected by description
@@ -2577,11 +3381,12 @@ class TestRelocateMisfiledGProteinFragments:
         )
         lig_entry = {"name": "miniGo", "chain_id": "B", "type": "protein"}
         data: dict[str, Any] = {"ligands": [lig_entry]}
-        warnings = relocate_misfiled_g_protein_fragments(enriched, data)
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
 
         assert data["ligands"] == [lig_entry]
         assert "g_protein" not in data.get("signaling_partners", {})
-        assert ALERT_PREFIX_G_PROTEIN_MISFILED in warnings[0]
+        assert advisory == []
+        assert ALERT_PREFIX_G_PROTEIN_MISFILED in gating[0]
 
     def test_gdp_nonpolymer_not_detected(self) -> None:
         # 5G53: GDP is a small molecule filed as a ligand (chem_comp_id GDP). Its
@@ -2604,11 +3409,12 @@ class TestRelocateMisfiledGProteinFragments:
             "chain_id": "C",
         }
         data: dict[str, Any] = {"ligands": [gdp]}
-        warnings = relocate_misfiled_g_protein_fragments(enriched, data)
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
 
         assert data["ligands"] == [gdp]  # untouched
         assert "g_protein" not in data.get("signaling_partners", {})
-        assert warnings == []
+        assert gating == []
+        assert advisory == []
 
     def test_curated_subunit_not_overwritten(self) -> None:
         # If the model already put a DIFFERENT subunit in the alpha column, this is a
@@ -2628,23 +3434,26 @@ class TestRelocateMisfiledGProteinFragments:
             },
             "auxiliary_proteins": [aux_entry],
         }
-        warnings = relocate_misfiled_g_protein_fragments(enriched, data)
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
         alpha = data["signaling_partners"]["g_protein"]["alpha_subunit"]
         assert alpha["uniprot_entry_name"] == "gnas2_human"  # curated value preserved
         assert alpha["chain_id"] == "A"
         # (i) the recovered entry is NOT removed from its origin bucket -> not lost.
         assert data["auxiliary_proteins"] == [aux_entry]
-        # (ii) a CONFLICT warning fires, not the plain RELOCATED one.
-        assert len(warnings) == 1
-        assert ALERT_PREFIX_G_PROTEIN_MISFILED in warnings[0]
-        assert ALERT_PREFIX_G_PROTEIN_RELOCATED not in warnings[0]
-        assert "gnas2_human" in warnings[0]  # names the existing (conflicting) value
+        # (ii) a CONFLICT warning fires, not the plain RELOCATED one. A conflict is an
+        # unresolved routing question -> GATES, never advisory.
+        assert advisory == []
+        assert len(gating) == 1
+        assert ALERT_PREFIX_G_PROTEIN_MISFILED in gating[0]
+        assert ALERT_PREFIX_G_PROTEIN_RELOCATED not in gating[0]
+        assert "gnas2_human" in gating[0]  # names the existing (conflicting) value
 
     def test_same_subunit_same_chain_is_idempotent_no_duplicate(self) -> None:
         # Not a conflict: the column already holds the SAME slug on the SAME chain
-        # the fragment recovers. The end state already carries the recovered value,
-        # so this is a pure no-op -- the duplicate origin entry is removed, chain_id
-        # is unchanged (no "B, B" double-listing), and a RELOCATED warning fires.
+        # the fragment "recovers". The end state already carried the value before the
+        # call, so nothing is recovered: chain_id is unchanged (no "B, B"
+        # double-listing), the origin entry stays put, and neither channel reports a
+        # move that did not happen.
         enriched = self._enriched(
             [_gp_poly("B", sequence="ILENLKDCGLF", description=_GACT_DESC, slugs=["gnat1_bovin"])]
         )
@@ -2656,13 +3465,46 @@ class TestRelocateMisfiledGProteinFragments:
             },
             "auxiliary_proteins": [{"name": "Gt C-terminal peptide", "chain_id": "B"}],
         }
-        warnings = relocate_misfiled_g_protein_fragments(enriched, data)
-        assert data["auxiliary_proteins"] == []  # duplicate origin entry removed
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
+        # ALPHA column: behaviour is unchanged -- the duplicate entry is removed and
+        # the review is kept. Only beta/gamma go silent on a no-op.
+        assert data["auxiliary_proteins"] == []
         alpha = data["signaling_partners"]["g_protein"]["alpha_subunit"]
         assert alpha["uniprot_entry_name"] == "gnat1_bovin"
         assert alpha["chain_id"] == "B"  # unchanged -- no double-listing
-        assert len(warnings) == 1
-        assert ALERT_PREFIX_G_PROTEIN_RELOCATED in warnings[0]
+        # An entry sharing the G-alpha's chain still gates: on the identity axis a
+        # receptor-Galpha fusion looks exactly like this, so the review is kept.
+        assert advisory == []
+        assert len(gating) == 1
+        assert ALERT_PREFIX_G_PROTEIN_RELOCATED in gating[0]
+
+    def test_beta_no_op_on_same_chain_is_silent(self) -> None:
+        # The beta counterpart of the alpha case above: the subunit is already
+        # recorded on this chain, so the bucket entry is a separate annotation (the
+        # reporter tag fused to G-beta), not a misfiled subunit. Off the identity
+        # axis, silence is right -- keep the entry, report nothing.
+        enriched = self._enriched(
+            [
+                _gp_poly(
+                    "B",
+                    description="Guanine nucleotide-binding protein G(I)/G(S)/G(T) subunit beta-1",
+                    slugs=["gbb1_human"],
+                )
+            ]
+        )
+        data: dict[str, Any] = {
+            "signaling_partners": {
+                "g_protein": {
+                    "alpha_subunit": {"uniprot_entry_name": "gnas2_human", "chain_id": "A"},
+                    "beta_subunit": {"uniprot_entry_name": "gbb1_human", "chain_id": "B"},
+                }
+            },
+            "auxiliary_proteins": [{"name": "HiBiT", "chain_id": "B"}],
+        }
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
+        assert data["auxiliary_proteins"] == [{"name": "HiBiT", "chain_id": "B"}]
+        assert gating == []
+        assert advisory == []
 
     def test_same_subunit_different_chain_merges_chain_ids(self) -> None:
         # Same slug, DIFFERENT chain: the column already names this subunit on chain
@@ -2682,19 +3524,22 @@ class TestRelocateMisfiledGProteinFragments:
             },
             "auxiliary_proteins": [{"name": "G-alpha fragment", "chain_id": "B"}],
         }
-        warnings = relocate_misfiled_g_protein_fragments(enriched, data)
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
         assert data["auxiliary_proteins"] == []  # merged out of the bucket
         alpha = data["signaling_partners"]["g_protein"]["alpha_subunit"]
         assert alpha["uniprot_entry_name"] == "gnas2_human"  # unchanged
         assert alpha["chain_id"] == "A, B"  # recovered chain merged in
-        assert len(warnings) == 1
-        assert ALERT_PREFIX_G_PROTEIN_RELOCATED in warnings[0]
-        assert "alpha_subunit" in warnings[0]
+        assert advisory == []
+        assert len(gating) == 1
+        assert ALERT_PREFIX_G_PROTEIN_RELOCATED in gating[0]
+        assert "alpha_subunit" in gating[0]
 
     def test_same_subunit_chain_already_in_list_is_no_op(self) -> None:
-        # Same slug and the recovered chain is ALREADY one of the listed chains
-        # ("A, B" already, recovered "B"): pure idempotent -- no double-listing, the
-        # duplicate aux entry is removed, and a RELOCATED warning fires.
+        # Same slug AND the chain is already listed ("A, B" already, matched "B"):
+        # chain_id is not double-listed. This is the ALPHA column, where behaviour is
+        # unchanged -- the review is kept, because an entry sharing the G-alpha's
+        # chain is what a receptor-Galpha fusion looks like. See
+        # test_beta_no_op_on_same_chain_is_silent for the off-axis counterpart.
         enriched = self._enriched(
             [_gp_poly("B", sequence="ILENLKDCGLF", description=_GACT_DESC, slugs=["gnas2_human"])]
         )
@@ -2706,12 +3551,35 @@ class TestRelocateMisfiledGProteinFragments:
             },
             "auxiliary_proteins": [{"name": "G-alpha fragment", "chain_id": "B"}],
         }
-        warnings = relocate_misfiled_g_protein_fragments(enriched, data)
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
         assert data["auxiliary_proteins"] == []
         alpha = data["signaling_partners"]["g_protein"]["alpha_subunit"]
         assert alpha["chain_id"] == "A, B"  # unchanged -- B not re-added
-        assert len(warnings) == 1
-        assert ALERT_PREFIX_G_PROTEIN_RELOCATED in warnings[0]
+        assert advisory == []
+        assert len(gating) == 1
+
+    def test_orphan_beta_without_alpha_stays_gating(self) -> None:
+        # A receptor can bind a G-beta that is not part of a heterotrimer at all --
+        # a G-beta-5 held by an RGS protein, where the paper states no G protein
+        # couples. Recovering that beta into an empty G protein record asserts a
+        # transducer rather than recovering one, and would emit a G protein row that
+        # would not otherwise exist, so it keeps gating rather than going advisory.
+        enriched = self._enriched(
+            [
+                _gp_poly(
+                    "D",
+                    description="Guanine nucleotide-binding protein subunit beta-5",
+                    slugs=["gnb5_mouse"],
+                )
+            ]
+        )
+        data: dict[str, Any] = {"auxiliary_proteins": [{"name": "G-beta 5", "chain_id": "D"}]}
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
+        gp = data["signaling_partners"]["g_protein"]
+        assert gp["beta_subunit"]["uniprot_entry_name"] == "gnb5_mouse"
+        assert advisory == []
+        assert len(gating) == 1
+        assert "does not complete a heterotrimer" in gating[0]
 
     def test_same_column_two_alpha_slugs_relocated_to_alpha(self) -> None:
         # 8INR-style mini-Gs/i chimera: a single chain carrying TWO alpha slugs
@@ -2732,16 +3600,17 @@ class TestRelocateMisfiledGProteinFragments:
             "auxiliary_proteins": [{"name": "Mini-Gs/i chimera", "chain_id": "A"}],
             "ligands": [],
         }
-        warnings = relocate_misfiled_g_protein_fragments(enriched, data)
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
         assert data["auxiliary_proteins"] == []  # relocated out of the bucket
         alpha = data["signaling_partners"]["g_protein"]["alpha_subunit"]
         assert alpha["chain_id"] == "A"
         assert alpha["uniprot_entry_name"] in ("gnas2_human", "gnai1_human")
-        assert len(warnings) == 1
-        assert ALERT_PREFIX_G_PROTEIN_RELOCATED in warnings[0]
-        assert "alpha_subunit" in warnings[0]
+        assert advisory == []
+        assert len(gating) == 1
+        assert ALERT_PREFIX_G_PROTEIN_RELOCATED in gating[0]
+        assert "alpha_subunit" in gating[0]
         # NOT the cross-role ambiguity path.
-        assert "two subunit identities" not in warnings[0]
+        assert "two subunit identities" not in gating[0]
 
     def test_non_g_protein_aux_left_alone(self) -> None:
         # A genuine auxiliary protein (nanobody, not a G protein chain) is not
@@ -2749,9 +3618,10 @@ class TestRelocateMisfiledGProteinFragments:
         enriched = self._enriched([_gp_poly("N", description="Nanobody35", sequence="QVQLQESGGG")])
         nanobody = {"name": "Nanobody35", "chain_id": "N", "type": {"value": "Nanobody"}}
         data: dict[str, Any] = {"auxiliary_proteins": [nanobody]}
-        warnings = relocate_misfiled_g_protein_fragments(enriched, data)
+        gating, advisory = relocate_misfiled_g_protein_fragments(enriched, data)
         assert data["auxiliary_proteins"] == [nanobody]
-        assert warnings == []
+        assert gating == []
+        assert advisory == []
 
     def test_relocation_warning_reaches_gating_channel(self) -> None:
         # The relocation warning must land in critical_warnings, the channel that
@@ -2768,6 +3638,37 @@ class TestRelocateMisfiledGProteinFragments:
         assert any(ALERT_PREFIX_G_PROTEIN_RELOCATED in w for w in report["critical_warnings"])
         # And the data was actually relocated in best_run_data.
         assert data["signaling_partners"]["g_protein"]["alpha_subunit"]["chain_id"] == "B"
+
+    def test_beta_relocation_reaches_advisory_channel_not_gating(self) -> None:
+        # A recovered beta subunit lands in detector_notes (advisory), NOT
+        # critical_warnings -- so it does not hold the PDB for review -- while the
+        # correct subunit is still filled into best_run_data.
+        from gpcr_tools.aggregator.runner import _build_validation_report
+
+        enriched = self._enriched(
+            [
+                _gp_poly(
+                    "B",
+                    description="Guanine nucleotide-binding protein G(I)/G(S)/G(T) "
+                    "subunit beta-1, HiBiT",
+                    slugs=["gbb1_human"],
+                )
+            ]
+        )
+        data: dict[str, Any] = {
+            # An alpha is present, so the recovered beta completes a heterotrimer.
+            "signaling_partners": {
+                "g_protein": {
+                    "alpha_subunit": {"uniprot_entry_name": "gnas2_human", "chain_id": "A"}
+                }
+            },
+            "auxiliary_proteins": [{"name": "HiBiT", "chain_id": "B"}],
+        }
+        report = _build_validation_report("TEST", data, enriched, [], {}, None)
+        assert any(ALERT_PREFIX_G_PROTEIN_RELOCATED in n for n in report["detector_notes"])
+        assert not any(ALERT_PREFIX_G_PROTEIN_RELOCATED in w for w in report["critical_warnings"])
+        # The correct subunit still ships.
+        assert data["signaling_partners"]["g_protein"]["beta_subunit"]["chain_id"] == "B"
 
 
 class TestIsGProteinFragmentChain:

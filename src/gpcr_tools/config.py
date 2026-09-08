@@ -1439,6 +1439,15 @@ TM_COVERAGE_THRESHOLD: float = 0.50
 # and are still surfaced by the SUSPICIOUS_7TM alert).
 GPCR_MIN_ANNOTATED_TM: int = 4
 
+# A chain whose every annotated TM helix is resolved counts as COMPLETE even when
+# fewer than six TMs were annotated, provided the annotation is substantial (at
+# least this many TMs). This covers receptors whose UniProt/RCSB mapping only
+# resolved five of the canonical seven helices: with resolved_tms == total_tms
+# no mapped TM is unmodeled, so the "incompleteness" is a mapping artifact, not
+# missing density. Kept above single-/few-pass partner slugs (total_tms small)
+# so those never wave through.
+TM_MIN_RECEPTOR_ANNOTATED: int = 5
+
 TM_ENTITY_FEATURE_TYPES: frozenset[str] = frozenset(
     {
         "TRANSMEMBRANE",
@@ -1503,6 +1512,132 @@ GPCR_SLUG_NEGATIVE_PREFIXES: tuple[str, ...] = (
     "rarr2",
     "a0a",
     "mtor",
+    # Non-receptor chains that carry a GPCRdb entry-name slug but are not 7TM
+    # receptors: peptide / protein agonists, chemokines, toxins, crystallization
+    # and expression partners, and signalling-pathway proteins. Without a
+    # transmembrane span they trip the SUSPICIOUS_7TM tripwire; denylisting their
+    # slug prefixes keeps them out of the receptor roster. Every prefix below was
+    # checked against the full GPCRdb real-receptor slug universe (all species)
+    # and filters zero real receptors. A trailing underscore is the safe form for
+    # a ligand stem that would otherwise be a prefix of its own receptor family
+    # (e.g. "npy_" matches the ligand npy_* but not the npy1r_* receptors).
+    # Adhesion receptors and the V2 receptor slug are deliberately NOT listed:
+    # their stems cannot be disambiguated from real receptors, so they remain
+    # covered by the SUSPICIOUS_7TM alert.
+    # Chemokine ligands
+    "ccl2",
+    "ccl5",
+    "ccl7",
+    "ccl15",
+    "ccl19",
+    "cxcl2",
+    "cxcl3",
+    "cxcl5",
+    "cxcl6",
+    "cxcl9",
+    "cxl10",
+    "cxl11",
+    "sdf1",
+    "il8",
+    "groa",
+    "x3cl1",
+    "xcl1",
+    # Peptide / protein-hormone ligands
+    "edn1",
+    "edn3",
+    "pthy",
+    "pthr",
+    "npy_",
+    "pyy",
+    "cckn",
+    "tkn1",
+    "tknk",
+    "sms",
+    "paca",
+    "gala",
+    "apel",
+    "angt",
+    "ucn1",
+    "kng1",
+    "penk",
+    "pdyn",
+    "pnoc",
+    "prrp",
+    "calca",
+    "calc_",
+    "adml",
+    "adm2",
+    "secr",
+    "gast",
+    "ghrl",
+    "nmu_",
+    "nmb_",
+    "nms",
+    "npff_",
+    "vip_",
+    "crh_",
+    "gip_",
+    "grp_",
+    "insl5",
+    "moti",
+    "orex",
+    "kiss1",
+    "cort",
+    "mch_",
+    "tip39",
+    "spxn",
+    "hunin",
+    "ela",
+    "slib",
+    "ndp",
+    "rspo1",
+    "rspo2",
+    "gp15l",
+    "paho",
+    "exe3",
+    "exe4",
+    # Toxin / venom peptides
+    "3si1a",
+    "3sim3",
+    "3sim7",
+    "srtx",
+    "maxa",
+    "crfa2",
+    # Non-receptor proteins (fusion tags, signalling-pathway, viral, other)
+    "thio",
+    "coli",
+    "luci",
+    "spg1",
+    "spa",
+    "gpa1",
+    "mfal1",
+    "hema",
+    "env",
+    "vmi2",
+    "da2d",
+    "cd4",
+    "co3",
+    "co5",
+    "neu1",
+    "neu2",
+    "neut",
+    "gnb5",
+    "rgs7",
+    "pp2ba",
+    "vgf",
+    "ox26",
+    "dvl2",
+    # Accession-named non-receptor chains
+    "b5xgr7",
+    "b5z8h1",
+    "f5gzd9",
+    "f6vl43",
+    "o87916",
+    "q5fwy2",
+    "q70145",
+    "q7z3y4",
+    "q92163",
+    "v9hw68",
 )
 
 # ---------------------------------------------------------------------------
@@ -1621,6 +1756,14 @@ ALERT_PREFIX_HALLUCINATION: str = "[HALLUCINATION ALERT]"
 ALERT_PREFIX_ALGO_WARNING: str = "[ALGO WARNING]"
 ALERT_PREFIX_API_UNAVAILABLE: str = "[API_UNAVAILABLE]"
 ALERT_PREFIX_CHIMERIC_REVIEW: str = "[CHIMERIC G PROTEIN]"
+# The alpha5 helix resolves only the coupling FAMILY; members with identical
+# alpha5 (e.g. gnai1/gnai2, gnaq/gna11, the transducins) cannot be split from
+# structure. When the family is verified and the record is otherwise a native,
+# family-consistent G protein this is advisory, not a chimera to resolve.
+ALERT_PREFIX_GALPHA_SUBTYPE_UNRESOLVED: str = "[G-ALPHA SUBTYPE UNRESOLVED]"
+# The alpha5 family matches but the candidate slugs are non-human orthologs, so
+# the species / GPCRdb mapping is unconfirmed -- gating.
+ALERT_PREFIX_GALPHA_SPECIES_UNVERIFIED: str = "[G-ALPHA SPECIES UNVERIFIED]"
 ALERT_PREFIX_MISSED_POLYMER: str = "[UNANNOTATED CHAIN]"
 ALERT_PREFIX_FUSION_NOTE: str = "[CRYSTALLIZATION FUSION]"
 ALERT_PREFIX_BINDER_RENAME: str = "[BINDER NAME CORRECTED]"

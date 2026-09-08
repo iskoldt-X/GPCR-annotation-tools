@@ -54,6 +54,7 @@ from gpcr_tools.config import (
     OLIGOMER_NO_GPCR,
     TM_COVERAGE_THRESHOLD,
     TM_ENTITY_FEATURE_TYPES,
+    TM_MIN_RECEPTOR_ANNOTATED,
     TM_STATUS_COMPLETE,
     TM_STATUS_INCOMPLETE,
     TM_STATUS_UNKNOWN,
@@ -221,7 +222,18 @@ def _analyze_tm_for_entity_instance(
             resolved_tms += 1
 
     total_tms = len(tm_regions)
-    status = TM_STATUS_COMPLETE if resolved_tms >= 6 else TM_STATUS_INCOMPLETE
+    # A chain is COMPLETE when at least six TM helices are resolved, OR when every
+    # annotated TM is resolved and the annotation is substantial (>= five helices).
+    # The second clause rescues receptors whose UniProt/RCSB mapping only exposed
+    # five of the canonical seven TMs: resolved_tms == total_tms means no mapped
+    # TM is unmodeled, so the shortfall is a mapping artifact rather than missing
+    # density. Chains with any unmodeled TM (resolved_tms < total_tms) or a small
+    # annotation (single-/few-pass partner slugs) stay INCOMPLETE.
+    fully_resolved_receptor = total_tms >= TM_MIN_RECEPTOR_ANNOTATED and resolved_tms == total_tms
+    if resolved_tms >= 6 or fully_resolved_receptor:
+        status = TM_STATUS_COMPLETE
+    else:
+        status = TM_STATUS_INCOMPLETE
     return {"resolved_tms": resolved_tms, "total_tms": total_tms, "status": status}
 
 
@@ -942,6 +954,27 @@ def _get_assembly_cross_check(
         for s in symmetry_blocks
     )
 
+    # A second, wider scan across EVERY candidate assembly, not just the chosen
+    # one. An entry can deposit several candidate assemblies that disagree -- an
+    # author-defined monomer alongside a software-predicted homo-dimer. The
+    # chosen-assembly flag above answers "does the assembly we display record a
+    # homo-oligomer"; this one answers "does ANY deposited assembly record one",
+    # which is the right question before waiving a receptor-count disagreement:
+    # RCSB contradicting itself is not corroboration. Kept as a separate key so
+    # ``has_homo_symmetry`` (and the ASSEMBLY_MISMATCH advisory that reads it)
+    # keeps its established meaning.
+    homo_symmetry_in_any_candidate = (
+        any(
+            isinstance(sym.get("oligomeric_state"), str)
+            and sym["oligomeric_state"].strip().lower().startswith("homo")
+            for asm in assemblies
+            if (asm.get("pdbx_struct_assembly") or {}).get("rcsb_candidate_assembly") == "Y"
+            for sym in (asm.get("rcsb_struct_symmetry") or [])
+            if isinstance(sym, dict)
+        )
+        or has_homo_symmetry
+    )
+
     first = symmetry_blocks[0]
     return {
         "oligomeric_state": first.get("oligomeric_state"),
@@ -949,6 +982,7 @@ def _get_assembly_cross_check(
         "kind": first.get("kind"),
         "type": first.get("type"),
         "has_homo_symmetry": has_homo_symmetry,
+        "homo_symmetry_in_any_candidate": homo_symmetry_in_any_candidate,
         "rcsb_candidate_assembly": (chosen.get("pdbx_struct_assembly") or {}).get(
             "rcsb_candidate_assembly"
         ),
@@ -983,6 +1017,114 @@ def _parse_oligomeric_count(oligomeric_state: Any) -> int | None:
     if match:
         return int(match.group(1))
     return None
+
+
+_STOICH_COPY_RE = re.compile(r"(\d+)\s*$")
+
+
+def _stoich_copy_count(entry: Any) -> int | None:
+    """Parse the copy count from one RCSB stoichiometry entry (e.g. ``"A2"`` -> 2).
+
+    RCSB records a symmetry block's stoichiometry as a list of ``<label><count>``
+    tokens -- ``["A2"]`` (two copies of entity A), ``["A1", "B1"]`` (one copy
+    each of A and B).  Returns the trailing integer, or ``None`` when the token
+    carries no count (treated as no signal, never as ``1``).
+    """
+    if not isinstance(entry, str):
+        return None
+    match = _STOICH_COPY_RE.search(entry.strip())
+    return int(match.group(1)) if match else None
+
+
+def _count_deposited_polymer_chains(enriched_entry: dict[str, Any]) -> int | None:
+    """How many polymer chains the entry deposits, across all polymer entities.
+
+    Used to sanity-check the "every stoichiometry token is a single copy" proxy in
+    :func:`_assembly_receptor_is_single`: an assembly that already accounts for
+    every deposited chain cannot be evidence that a receptor present in two chains
+    is single. Returns ``None`` when the entry exposes no polymer chain ids, so a
+    caller can tell "no chains" from "cannot tell".
+    """
+    entities = enriched_entry.get("polymer_entities")
+    if not isinstance(entities, list) or not entities:
+        return None
+    total = 0
+    seen_any = False
+    for entity in entities:
+        if not isinstance(entity, dict):
+            continue
+        ids = (entity.get("rcsb_polymer_entity_container_identifiers") or {}).get("auth_asym_ids")
+        if isinstance(ids, list):
+            seen_any = True
+            total += len(ids)
+    return total if seen_any else None
+
+
+def _assembly_subunit_count(assembly_info: dict[str, Any]) -> int | None:
+    """Total subunits the assembly's stoichiometry accounts for (``["A1","B1"]`` -> 2)."""
+    stoich = assembly_info.get("stoichiometry")
+    if not isinstance(stoich, list) or not stoich:
+        return None
+    counts = [_stoich_copy_count(tok) for tok in stoich]
+    if any(c is None for c in counts):
+        return None
+    return sum(c for c in counts if c is not None)
+
+
+def _assembly_receptor_is_single(
+    assembly_info: dict[str, Any],
+    deposited_polymer_chains: int | None = None,
+) -> bool:
+    """Whether RCSB's biological assembly records the receptor as a single copy.
+
+    Returns ``True`` only when the GLOBAL-symmetry block of RCSB's chosen
+    biological assembly positively corroborates a single receptor copy, in either
+    of two forms:
+
+    * ``oligomeric_state`` parses to ``Monomer`` -- the whole biological unit is
+      one chain, so the receptor is trivially single.
+    * every stoichiometry token is a single copy (``["A1", "B1", ...]``) -- each
+      entity, the receptor included, is present exactly once, so whichever token is
+      the receptor it is single. This is the conservative proxy for "the receptor
+      entity's copy count is 1": we cannot map a stoichiometry token back to the
+      receptor slug from this block alone, so we require ALL tokens to be single
+      rather than guess which one is the receptor. A block where any entity is
+      doubled (``["A2", "B2"]`` -- a doubled receptor is possible) returns
+      ``False`` and keeps the disagreement gating.
+
+    Only the ``Global Symmetry`` block is trusted: a ``Local`` / ``Pseudo`` block
+    describes a sub-component and can read single while the whole assembly doubles
+    the receptor. Absence of assembly / symmetry data returns ``False`` (the
+    conservative direction -- absence of evidence never downgrades). Pure and
+    None-safe; all fields already live in the enriched entry.
+    """
+    if not isinstance(assembly_info, dict):
+        return False
+    if assembly_info.get("kind") != "Global Symmetry":
+        return False
+    if _parse_oligomeric_count(assembly_info.get("oligomeric_state")) == 1:
+        return True
+    stoich = assembly_info.get("stoichiometry")
+    if not isinstance(stoich, list) or not stoich:
+        return False
+    if not all(_stoich_copy_count(tok) == 1 for tok in stoich):
+        return False
+
+    # Arithmetic check on the all-single proxy. The proxy assumes a doubled
+    # receptor would surface as a doubled token, but RCSB can instead list the two
+    # receptor instances as two separate single tokens -- ["A1","B1","C1","D1"] for
+    # an entry whose four deposited chains are two receptor copies plus two partner
+    # chains. When the assembly already accounts for every deposited chain, both
+    # receptor copies are inside it by construction, so "every token is single" is a
+    # labelling artefact and says nothing about the receptor's copy count. Only the
+    # caller-supplied chain total can tell the two apart; without it the proxy
+    # cannot be validated, so it is not trusted (absence of evidence never
+    # downgrades). The Monomer route above is unaffected: it is a direct statement
+    # about the whole biological unit, not a per-entity inference.
+    subunits = _assembly_subunit_count(assembly_info)
+    if deposited_polymer_chains is None or subunits is None:
+        return False
+    return subunits < deposited_polymer_chains
 
 
 def _reconcile_assembly_consistency(
@@ -1079,11 +1221,81 @@ def _classifier_receptor_level(
     return None
 
 
+# Function words that carry no evidential content, so their presence in a cited
+# quote does not make it an independent observation.
+_EVIDENCE_FILLER_WORDS: frozenset[str] = frozenset(
+    {"a", "an", "and", "as", "at", "by", "for", "from", "in", "is", "of", "or", "the", "to"}
+)
+
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+def _ai_state_lacks_independent_evidence(
+    best_run_data: dict[str, Any],
+    enriched_entry: dict[str, Any],
+) -> bool:
+    """Whether the model's oligomeric-state quote merely echoes the deposited assembly.
+
+    The annotation prompt hands the model every deposited biological assembly, so a
+    model answer that agrees with the assembly is not automatically a second,
+    independent witness -- it can be the same record read back. This detects that
+    case from the recorded citation: the quote is an echo when every content word in
+    it also occurs in the entry's own assembly records (oligomeric states,
+    stoichiometry tokens, symmetry kind/type, origin labels). A quote drawn from the
+    publication necessarily introduces words the assembly block does not contain.
+
+    A blank or missing quote counts as lacking independent evidence too: no citation
+    is not a stronger warrant than a recycled one.
+
+    Deliberately strict rather than clever: it detects verbatim and near-verbatim
+    recitation, not paraphrase. A model that restates the assembly in its own words
+    reads as independent here -- a known and accepted limitation, chosen because the
+    alternative (semantic similarity) would misclassify genuine paper quotes that
+    happen to share the assembly's vocabulary.
+    """
+    state = (best_run_data.get("receptor_info") or {}).get("oligomeric_state")
+    if not isinstance(state, dict):
+        return True
+    raw_quote = (state.get("evidence") or {}).get("quote_or_path")
+    quote = raw_quote.strip() if isinstance(raw_quote, str) else ""
+    if not quote:
+        return True
+
+    vocabulary: set[str] = set()
+    for assembly in enriched_entry.get("assemblies") or []:
+        if not isinstance(assembly, dict):
+            continue
+        struct_assembly = assembly.get("pdbx_struct_assembly") or {}
+        for value in (
+            struct_assembly.get("rcsb_details"),
+            struct_assembly.get("method_details"),
+        ):
+            if isinstance(value, str):
+                vocabulary.update(_WORD_RE.findall(value.lower()))
+        for symmetry in assembly.get("rcsb_struct_symmetry") or []:
+            if not isinstance(symmetry, dict):
+                continue
+            for key in ("oligomeric_state", "kind", "type"):
+                value = symmetry.get(key)
+                if isinstance(value, str):
+                    vocabulary.update(_WORD_RE.findall(value.lower()))
+            for token in symmetry.get("stoichiometry") or []:
+                vocabulary.update(_WORD_RE.findall(str(token).lower()))
+    if not vocabulary:
+        return False
+
+    quote_words = set(_WORD_RE.findall(quote.lower())) - _EVIDENCE_FILLER_WORDS
+    return bool(quote_words) and quote_words <= vocabulary
+
+
 def _reconcile_ai_oligomer(
     ai_value: Any,
     classification: str,
     receptor_count: int,
     tm_data_available: bool,
+    has_homo_symmetry: bool = True,
+    assembly_receptor_single: bool = False,
+    ai_evidence_is_independent: bool = False,
 ) -> dict[str, Any] | None:
     """Cross-check the AI's receptor oligomeric state against the classifier.
 
@@ -1111,6 +1323,54 @@ def _reconcile_ai_oligomer(
     ROUTES: AI ``monomer`` while the classifier resolved >=2 receptor chains
     (a possible crystallographic copy vs a true oligomer -- a real ambiguity a
     human should settle).
+
+    The routing alert is stamped ``gating=False`` (advisory, still emitted and
+    shown to the curator, but does not stop review) in exactly one corner, and only
+    when RCSB's biological assembly POSITIVELY corroborates the released state and
+    the model reached that state independently.  All FIVE conditions must hold: the
+    classifier read a HOMOMER, the AI RELEASED MONOMER, ``has_homo_symmetry`` is
+    ``False`` (no symmetry block of any candidate assembly records a receptor Homo
+    N-mer), ``assembly_receptor_single`` is ``True`` (RCSB's global biological
+    assembly records the receptor as a single copy -- either the whole assembly is a
+    ``Monomer`` or every entity in its stoichiometry, receptor included, is present
+    once, with the entry's chain total confirming the assembly does not simply
+    contain everything), AND ``ai_evidence_is_independent`` is ``True`` (the model
+    cited something the assembly record does not already say).  There the released
+    MONOMER is corroborated by RCSB's own assembly (the same-slug chains are
+    crystallographic copies, not a biological oligomer), so the discrepancy is the
+    already-non-gating ASSEMBLY_MISMATCH advisory in another guise, not a confident
+    error.
+
+    Note what the last condition is and is not. The annotation prompt shows the
+    model every deposited assembly, so a model answer matching the assembly may be
+    that record read back rather than a second observation. ``ai_evidence_is_
+    independent`` is a **recitation filter**: it removes the clearest read-backs, so
+    that the most obviously circular corroborations do not pass. It is NOT a proof
+    of independence -- a paraphrase, a bare JSON path, or a quote padded with
+    unrelated boilerplate still reads as independent, and a measurable fraction of
+    releases pass on exactly those. Do not restate this branch as "two independent
+    witnesses agree"; the honest claim is "RCSB's assembly corroborates, and the
+    model did not merely recite it".
+
+    Every other disagreement keeps gating (the reader defaults absent to ``True``):
+    an OVERCOUNT (the AI claims more copies -- the hallucination direction), a
+    lower-but-still-oligomer release (AI homo-dimer vs a larger homomer -- a
+    homo-oligomer RCSB does not corroborate), any entry RCSB corroborates as a
+    homo-oligomer, a HETEROMER undercount (a missed distinct partner), and -- the
+    corner the ``assembly_receptor_single`` guard closes -- a hetero-complex whose
+    biological assembly DOUBLES the receptor (a ``Hetero N-mer`` with an ``A2``
+    stoichiometry token: ``has_homo_symmetry`` is ``False`` there because the GLOBAL
+    symmetry TYPE is Hetero, yet RCSB does record a doubled receptor, so releasing
+    ``monomer`` would rest on AI-only trust).
+
+    All three corroboration parameters default to the conservative direction so a
+    caller that cannot supply the fact never triggers a silent downgrade:
+    ``has_homo_symmetry`` defaults to ``True`` (assume RCSB records a homo-oligomer),
+    ``assembly_receptor_single`` defaults to ``False`` (assume the assembly does not
+    corroborate a single receptor), and ``ai_evidence_is_independent`` defaults to
+    ``False`` (assume the model was reading the assembly back). The production caller
+    (:func:`analyze_oligomer`) resolves and passes all three from the enriched entry;
+    the defaults protect direct/unit callers, not production.
     """
     if not tm_data_available:
         return None
@@ -1135,7 +1395,7 @@ def _reconcile_ai_oligomer(
     if counts_match and kinds_match:
         return None
 
-    return {
+    alert: dict[str, Any] = {
         "type": ALERT_OLIGOMER_DISAGREEMENT,
         "message": (
             f"[{ALERT_OLIGOMER_DISAGREEMENT}] at 'receptor_info': the annotated receptor "
@@ -1146,6 +1406,48 @@ def _reconcile_ai_oligomer(
             f"oligomeric state manually."
         ),
     }
+    # Downgrade to advisory (non-gating) in exactly one corner: the classifier read
+    # a HOMOMER (>=2 same-slug chains) while the AI RELEASED MONOMER, and RCSB's own
+    # biological assembly POSITIVELY records the receptor as a single copy. There the
+    # released MONOMER agrees with BOTH the AI and RCSB's assembly (the same-slug
+    # chains are crystallographic copies, not a biological oligomer); the classifier's
+    # count is the lone dissenter and rests on its weakest signal -- a slug appearing
+    # more than once in the file. This is the already-non-gating ASSEMBLY_MISMATCH
+    # advisory in another guise, not a confident error.
+    #
+    # The guards are deliberately narrow so nothing confidently-wrong is released:
+    #   * ai_count == 1 (released monomer): a lower-but-still-oligomer release
+    #     (e.g. AI homo-dimer vs classifier homo-tetramer) asserts a homo-oligomer
+    #     RCSB does NOT corroborate, so it stays gating for human confirmation.
+    #   * classification == HOMOMER: the homo-oligomer story the assembly flags
+    #     actually speak to; a HETEROMER undercount (a missed distinct partner) is a
+    #     different claim the assembly signals cannot vouch for.
+    #   * not has_homo_symmetry: no symmetry block (Global or Local/Pseudo) records a
+    #     receptor Homo N-mer, so a real homodimer whose block is recorded late keeps
+    #     gating.
+    #   * assembly_receptor_single: RCSB's global biological assembly records the
+    #     receptor as one copy (a Monomer assembly, or an all-single stoichiometry).
+    #     This closes the hetero-complex hole: a "Hetero N-mer" that DOUBLES the
+    #     receptor ("A2" token) has has_homo_symmetry False (the global TYPE is
+    #     Hetero, not Homo) yet RCSB does record a doubled receptor, so releasing
+    #     "monomer" there would rest on AI-only trust -- it stays gating.
+    #   * ai_evidence_is_independent: the model's cited evidence is not a verbatim
+    #     read-back of the very assembly record being used to corroborate it. The
+    #     prompt hands the model every deposited assembly, so a recited assembly line
+    #     adds nothing to what the assembly already says. This is a recitation filter
+    #     and not a test of independence -- paraphrases and padded quotes pass it --
+    #     so it narrows the circular cases rather than eliminating them.
+    # An OVERCOUNT (the AI claims more copies -- the hallucination direction) never
+    # reaches this branch as a monomer release, so it keeps gating too.
+    if (
+        classification == OLIGOMER_HOMOMER
+        and ai_count == 1
+        and not has_homo_symmetry
+        and assembly_receptor_single
+        and ai_evidence_is_independent
+    ):
+        alert["gating"] = False
+    return alert
 
 
 # ---------------------------------------------------------------------------
@@ -1687,7 +1989,7 @@ def _fill_subunit_record(subunit_block: dict[str, Any], slug: str, chain_id: str
 def relocate_misfiled_g_protein_fragments(
     enriched_entry: dict[str, Any],
     best_run_data: dict[str, Any],
-) -> list[str]:
+) -> tuple[list[str], list[str]]:
     """Recover G protein subunit fragments the model misfiled in the wrong bucket.
 
     A G protein piece (a GaCT / alpha5 C-terminal peptide, or a beta/gamma
@@ -1717,12 +2019,22 @@ def relocate_misfiled_g_protein_fragments(
       e.g. a gamma-Galpha fusion) -> routing is ambiguous, so it raises a gating
       alert only and is NOT auto-routed.
 
-    Returns one gating warning string per detected fragment (relocated or gated).
-    Mutates *best_run_data* in place for the relocation cases.
+    Returns ``(gating_warnings, advisory_notes)``. A recovered **beta / gamma**
+    subunit is authoritative (an RCSB/UniProt-backed Gbeta / Ggamma slug, filled
+    without overwriting curated data), and it never touches the Galpha family /
+    chimera axis where the confidently-wrong danger lives -- so its relocation is
+    an *advisory* note, surfaced to the curator without holding the PDB for review.
+    A recovered **alpha** subunit rides the Galpha identity axis (family / chimera
+    calls, alpha5 fragments) and therefore stays *gating*. Every MISFILED variant
+    (curated-column conflict, cross-role fusion, no-slug fragment) stays *gating* --
+    those are genuine unresolved routing questions, not confirmed recoveries.
+    The data mutation (filling the subunit record) is identical in every case; only
+    the review signal for beta / gamma is downgraded. Mutates *best_run_data* in
+    place for the relocation cases.
     """
     chain_index = build_chain_identity_index(enriched_entry)
     if not chain_index:
-        return []
+        return [], []
 
     partners = best_run_data.get("signaling_partners")
     if not isinstance(partners, dict):
@@ -1732,7 +2044,11 @@ def relocate_misfiled_g_protein_fragments(
     if not isinstance(g_protein, dict):
         g_protein = {}
 
-    warnings: list[str] = []
+    # Two review channels: unresolved routing questions (conflicts, ambiguous or
+    # no-slug fragments, and recovered ALPHA subunits on the Galpha identity axis)
+    # GATE for a curator; an authoritative beta / gamma recovery is ADVISORY.
+    gating: list[str] = []
+    advisory: list[str] = []
 
     # Bucket name -> the mutable list in best_run_data. A tuple keeps a stable
     # iteration order (auxiliary first, then ligands) for deterministic output.
@@ -1811,7 +2127,7 @@ def relocate_misfiled_g_protein_fragments(
                 # chain_id below (a new chain) or is a pure no-op (already listed).
                 if existing_slug and existing_slug != slug:
                     kept.append(entry)  # keep the entry -- nothing was moved
-                    warnings.append(
+                    gating.append(
                         f"{ALERT_PREFIX_G_PROTEIN_MISFILED} at "
                         f"'signaling_partners.g_protein.{column}': '{name}' (chain "
                         f"{matched_chain}) recovered {slug} but the {column} already "
@@ -1830,7 +2146,27 @@ def relocate_misfiled_g_protein_fragments(
                     if matched_chain not in merged:
                         merged.append(matched_chain)
                         subunit_block["chain_id"] = _format_chain_ids(merged)
-                    # else: recovered chain already present -> chain_id unchanged.
+                    elif column != _SUBUNIT_ALPHA:
+                        # Nothing to recover: this subunit is already recorded on this
+                        # very chain. The bucket entry is therefore not a misfiled
+                        # subunit at all -- it is a SEPARATE annotation that happens to
+                        # sit on the same author chain, typically the experimental tag
+                        # fused to it (a HiBiT / SmBiT reporter peptide on G-beta). The
+                        # chain index keys on author chain id alone, so it cannot tell
+                        # the two apart. Removing the entry here would delete a correct
+                        # annotation, and reporting a move would describe something that
+                        # did not happen; leave both the record and the entry untouched
+                        # and say nothing.
+                        #
+                        # Restricted to beta/gamma on purpose. On the alpha column the
+                        # same silence would drop a real review: an entry sharing the
+                        # G-alpha's chain is what a receptor-Galpha fusion or a
+                        # dominant-negative chimera looks like, and that sits on the
+                        # identity axis where this module never trades a review for
+                        # tidiness. An alpha no-op therefore keeps its gating warning,
+                        # the same split this function already applies everywhere else.
+                        kept.append(entry)
+                        continue
                 else:
                     _fill_subunit_record(subunit_block, slug, matched_chain)
                 # The "only the alpha5 fragment is modelled" note is accurate ONLY
@@ -1851,13 +2187,21 @@ def relocate_misfiled_g_protein_fragments(
                             g_protein["note"] = f"{existing_note.rstrip()} {fragment_note}"
                     else:
                         g_protein["note"] = fragment_note
-                warnings.append(
+                message = (
                     f"{ALERT_PREFIX_G_PROTEIN_RELOCATED} at "
                     f"'signaling_partners.g_protein.{column}': '{name}' (chain "
                     f"{matched_chain}, slug {slug}) was filed under {bucket_name} but is a "
                     f"G protein {column.split('_')[0]} subunit; moved into the G protein "
                     f"record. Confirm the recovered subunit."
                 )
+                # A recovered ALPHA subunit rides the Galpha identity axis (family /
+                # chimera / alpha5 calls) where a confidently-wrong release can happen,
+                # so it GATES. A recovered beta / gamma is an authoritative slug fill
+                # off that axis -> advisory, surfaced without holding for review.
+                if column == _SUBUNIT_ALPHA:
+                    gating.append(message)
+                else:
+                    advisory.append(message)
                 # Removed from its original bucket (do not re-add to kept).
                 continue
 
@@ -1866,7 +2210,7 @@ def relocate_misfiled_g_protein_fragments(
                 # ambiguous, so surface it and leave it in place.
                 col_names = ", ".join(sorted(columns))
                 kept.append(entry)
-                warnings.append(
+                gating.append(
                     f"{ALERT_PREFIX_G_PROTEIN_MISFILED} at '{bucket_name}': '{name}' (chain "
                     f"{matched_chain}) is a G protein fragment carrying two subunit "
                     f"identities ({col_names}) -- routing is ambiguous. Assign the correct "
@@ -1877,7 +2221,7 @@ def relocate_misfiled_g_protein_fragments(
             # No usable subunit slug: detected by sequence / description only, so
             # the subunit column cannot be determined. Gate, do not move.
             kept.append(entry)
-            warnings.append(
+            gating.append(
                 f"{ALERT_PREFIX_G_PROTEIN_MISFILED} at '{bucket_name}': '{name}' (chain "
                 f"{matched_chain}, '{desc}') is a G protein-derived fragment filed under "
                 f"{bucket_name} but carries no subunit slug, so its subunit column cannot "
@@ -1886,7 +2230,30 @@ def relocate_misfiled_g_protein_fragments(
             )
         best_run_data[bucket_name] = kept
 
-    return warnings
+    # An orphan beta/gamma is not a heterotrimer. A relocation that leaves the G
+    # protein record carrying a beta or gamma but NO alpha has not recovered a
+    # transducer -- it has asserted one. Some receptors constitutively bind a
+    # G-beta that is not part of a heterotrimer at all (a G-beta-5 held by an RGS
+    # protein), and there the released record would claim a G protein the paper
+    # says is absent, and would emit a G protein CSV row that would otherwise not
+    # exist. The beta/gamma advisory route is safe only for a recovery INTO an
+    # existing heterotrimer, so when the alpha is missing the notes are promoted
+    # back to gating and a curator decides.
+    if advisory:
+        alpha_block = g_protein.get(_SUBUNIT_ALPHA)
+        alpha_slug = ""
+        if isinstance(alpha_block, dict):
+            alpha_slug = (alpha_block.get("uniprot_entry_name") or "").strip().lower()
+        if not alpha_slug or alpha_slug in EMPTY_VALUES:
+            gating.extend(
+                f"{note} No G-alpha subunit is recorded for this structure, so the "
+                f"recovered subunit does not complete a heterotrimer; confirm that a "
+                f"G protein is present at all."
+                for note in advisory
+            )
+            advisory = []
+
+    return gating, advisory
 
 
 # ---------------------------------------------------------------------------
@@ -2145,6 +2512,14 @@ def analyze_oligomer(
         classification,
         len(classify_roster),
         tm_data_available=not tm_fetch_failed,
+        has_homo_symmetry=bool(assembly_info.get("homo_symmetry_in_any_candidate")),
+        assembly_receptor_single=_assembly_receptor_is_single(
+            assembly_info,
+            _count_deposited_polymer_chains(enriched_entry),
+        ),
+        ai_evidence_is_independent=not _ai_state_lacks_independent_evidence(
+            best_run_data, enriched_entry
+        ),
     )
     if oligomer_disagreement:
         alerts.append(oligomer_disagreement)
