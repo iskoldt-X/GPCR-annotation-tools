@@ -35,7 +35,7 @@ def _stub_to_ligand_step(monkeypatch, recorder, cache_dir):
     monkeypatch.setattr(runner, "load_enriched_data", lambda pdb_id: {})
     monkeypatch.setattr(runner, "inject_ground_truth", lambda *a, **k: None)
 
-    def _spy(pdb_id, best_run_data, enriched, *, synonym_cache=None):
+    def _spy(pdb_id, best_run_data, enriched, *, synonym_cache=None, advisory_notes=None):
         recorder["called"] = True
         recorder["synonym_cache"] = synonym_cache
         raise _StopAfterLigandStepError

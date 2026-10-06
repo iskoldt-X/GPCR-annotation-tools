@@ -31,6 +31,7 @@ from gpcr_tools.config import (
     VALIDATION_MATCHED_POLYMER,
     VALIDATION_MATCHED_SMALL_MOLECULE,
     VALIDATION_SKIPPED_APO,
+    ligand_routed_to_aux,
 )
 from gpcr_tools.validator.api_clients import SynonymCache, check_pubchem_synonym_match
 from gpcr_tools.validator.chimera import (
@@ -99,12 +100,13 @@ def validate_and_enrich_ligands(
     enriched_entry: dict[str, Any],
     *,
     synonym_cache: SynonymCache | None = None,
+    advisory_notes: list[str] | None = None,
 ) -> list[str]:
     """Validate AI-reported ligands and inject chemical identifiers.
 
     Mutates *best_run_data* ligand dicts in-place.
-    Returns a list of warning strings (``GHOST_LIGAND`` detections, plus apo
-    placeholders that coexist with real ligands).
+    Returns a list of gating warning strings (``GHOST_LIGAND`` detections, plus
+    apo placeholders that coexist with a real, functional ligand).
 
     When *synonym_cache* is provided, a ligand that carries a model-supplied
     PubChem CID but matched no chemical component (no authoritative CID to copy)
@@ -112,10 +114,20 @@ def validate_and_enrich_ligands(
     different molecule is blanked and flagged.  Without a cache this step is
     skipped and the pass remains fully offline.
 
+    Some findings are advisory rather than gating: a PubChem CID that was already
+    blanked, and an apo placeholder whose only companions are structural
+    cofactors / ions / lipids. When *advisory_notes* is supplied those messages
+    are routed to it (the caller records them as detector notes, not gating
+    warnings); when it is omitted they fall back into the returned list so no
+    finding is lost for callers that do not separate the two channels.
+
     Warning format:
         ``f"GHOST_LIGAND at 'ligands[{label}]': '{name}' ({cid}) not found in API entities."``
     """
     warnings: list[str] = []
+    # Advisory findings route here when the caller opts in; otherwise they merge
+    # into the returned warnings list, preserving the single-channel behaviour.
+    advisory = advisory_notes if advisory_notes is not None else warnings
     ligands = best_run_data.get("ligands")
     if not isinstance(ligands, list) or not ligands:
         return warnings
@@ -187,8 +199,8 @@ def validate_and_enrich_ligands(
         )
 
     if synonym_cache is not None:
-        _gate_keyless_pubchem_ids(ligands, synonym_cache, warnings)
-    _warn_on_apo_with_real_ligands(ligands, warnings)
+        _gate_keyless_pubchem_ids(ligands, synonym_cache, warnings, advisory)
+    _warn_on_apo_with_real_ligands(ligands, warnings, advisory)
     _warn_on_role_site_mismatch(ligands, warnings)
     _warn_on_g_protein_peptide_as_ligand(ligands, api["poly_by_chain"], warnings)
     _warn_on_multiple_agonists(ligands, warnings)
@@ -199,6 +211,7 @@ def _gate_keyless_pubchem_ids(
     ligands: list[Any],
     synonym_cache: SynonymCache,
     warnings: list[str],
+    advisory: list[str],
 ) -> None:
     """Cross-check a model-supplied PubChem CID against the CID's own synonyms.
 
@@ -245,7 +258,11 @@ def _gate_keyless_pubchem_ids(
         if verdict is False:
             lig["pubchem_id"] = None
             display = name or lig.get("chem_comp_id") or "?"
-            warnings.append(
+            # The wrong CID is already blanked above, so the shipped record is
+            # correct. Gating on the fact that a now-removed CID was once wrong
+            # gates already-corrected data, so this is advisory: the curator sees
+            # what was cleared without the PDB being held for review over it.
+            advisory.append(
                 f"PubChem CID Mismatch at 'ligands': CID '{cid}' is not a known "
                 f"synonym of '{display}' -- the identifier appears to name a "
                 f"different compound and has been cleared."
@@ -377,11 +394,21 @@ def _warn_on_g_protein_peptide_as_ligand(
         )
 
 
-def _warn_on_apo_with_real_ligands(ligands: list[Any], warnings: list[str]) -> None:
+def _warn_on_apo_with_real_ligands(
+    ligands: list[Any], warnings: list[str], advisory: list[str]
+) -> None:
     """Flag (for the curator) an apo placeholder sitting alongside real ligands
     — a contradiction worth a human's eye.  Emits a warning only; the data is
     left untouched so the curator decides what is correct.  A buffer/solvent
     next to an apo entry is normal and does not warn.
+
+    Severity is role-aware. An apo placeholder next to nothing but structural
+    cofactors / ions / lipids (every coexisting molecule routes to the auxiliary
+    catalogue rather than ligands.csv) is a benign, common configuration, so the
+    finding is advisory. But if any coexisting molecule is a functional /
+    allosteric ligand, a ghost the validator could not place, or carries an
+    unknown / blank role -- anything that classifies as a real ligand row -- the
+    apo/ligand contradiction is genuine and stays gating.
     """
     real_statuses = {
         VALIDATION_MATCHED_SMALL_MOLECULE,
@@ -399,11 +426,17 @@ def _warn_on_apo_with_real_ligands(ligands: list[Any], warnings: list[str]) -> N
     ]
     if has_apo and real:
         names = ", ".join(str(lig.get("name") or lig.get("chem_comp_id") or "?") for lig in real)
-        warnings.append(
+        message = (
             f"APO_WITH_LIGANDS at 'ligands': an apo (ligand-free) placeholder "
             f"coexists with {len(real)} real ligand(s) [{names}] — verify whether "
             f"this structure is truly apo."
         )
+        # Downgrade to advisory ONLY when every coexisting molecule is a structural
+        # cofactor / ion / lipid (routes to the auxiliary catalogue). A ghost or a
+        # functional/allosteric/unknown-role molecule classifies as a real ligand
+        # row and keeps the finding gating.
+        exclusively_structural = all(ligand_routed_to_aux(lig) for lig in real)
+        (advisory if exclusively_structural else warnings).append(message)
 
 
 def _warn_on_multiple_agonists(ligands: list[Any], warnings: list[str]) -> None:

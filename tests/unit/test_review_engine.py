@@ -498,3 +498,104 @@ class TestLigandCopiesReviewable:
         )
         final_data = review_toplevel_blocks("XXXX", main_data, {}, {}, fix_mode=True)
         assert final_data["ligand_copies"] == block
+
+
+class TestMultiCopyLigandAlertOpensPerCopyBlock:
+    """A multi-copy ligand alert must stop the curator at the per-copy table.
+
+    The alert says one annotation row may hide copies at distinct binding sites,
+    but only the per-copy table records which copy sits where, so that is the block
+    where the assignment can be corrected. These tests drive the real review walker
+    with an oligomer analysis promoted through the real alert injector, so they
+    cover the whole route from the oligomer finding to the block that opens.
+    """
+
+    MESSAGE = (
+        "[MULTI_COPY_LIGAND] at 'ligands[CLR]': modelled in 2 copies (instances D, E); "
+        "one annotation row may hide copies at distinct sites or with distinct roles. "
+        "Human review recommended."
+    )
+
+    @pytest.fixture(autouse=True)
+    def _silence_audit(self, monkeypatch):
+        # Accepting a block writes an audit trail into the configured workspace;
+        # no-op it so these tests stay hermetic.
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.log_audit_trail",
+            lambda *a, **k: None,
+        )
+
+    def _validation_data(self, gating: bool) -> dict:
+        from gpcr_tools.config import ALERT_MULTI_COPY_LIGAND
+        from gpcr_tools.csv_generator.validation_display import inject_oligomer_alerts
+
+        oligo = {
+            "chain_id_override": {"applied": False},
+            "alerts": [
+                {
+                    "type": ALERT_MULTI_COPY_LIGAND,
+                    "message": self.MESSAGE,
+                    "gating": gating,
+                }
+            ],
+            "all_gpcr_chains": [],
+        }
+        validation_data: dict = {}
+        inject_oligomer_alerts(oligo, validation_data)
+        return validation_data
+
+    def test_gating_alert_stops_at_the_per_copy_block(self, monkeypatch):
+        # Copies at distinct sites: the per-copy table opens with its action menu.
+        # Requiring the scripted "a" to be consumed proves the menu really fired --
+        # an un-drained queue would mean the block slid past unreviewed.
+        block = [
+            {"copy_id": "R:601", "site_ref": "orthosteric"},
+            {"copy_id": "R:602", "site_ref": "lipid-facing"},
+        ]
+        main_data = {"ligand_copies": [dict(row) for row in block]}
+        prompts = _ScriptedResponses(["a"])  # accept the block as shown
+        monkeypatch.setattr("gpcr_tools.csv_generator.review_engine.Prompt.ask", prompts)
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Confirm.ask",
+            _ScriptedResponses([]),
+        )
+        final_data = review_toplevel_blocks(
+            "XXXX", main_data, {}, self._validation_data(gating=True)
+        )
+        assert prompts._responses == []
+        assert final_data["ligand_copies"] == block
+
+    def test_advisory_alert_leaves_the_per_copy_block_silent(self, monkeypatch):
+        # Copies sharing one binding site: no per-copy decision to make, so the
+        # derived table still passes through with no prompt at all.
+        block = [{"copy_id": "R:601", "site_ref": "orthosteric"}]
+        main_data = {"ligand_copies": [dict(block[0])]}
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Prompt.ask",
+            _ScriptedResponses([]),
+        )
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Confirm.ask",
+            _ScriptedResponses([]),
+        )
+        final_data = review_toplevel_blocks(
+            "XXXX", main_data, {}, self._validation_data(gating=False)
+        )
+        assert final_data["ligand_copies"] == block
+
+    def test_compound_block_still_opens_too(self, monkeypatch):
+        # The compound-level ligands block keeps its own alert: the per-copy mirror
+        # is additional, so both blocks stop for review rather than one replacing
+        # the other.
+        main_data = {
+            "ligands": [{"chem_comp_id": "CLR", "name": "cholesterol"}],
+            "ligand_copies": [{"copy_id": "R:601", "site_ref": "orthosteric"}],
+        }
+        prompts = _ScriptedResponses(["a", "a"])  # accept ligands, then ligand_copies
+        monkeypatch.setattr("gpcr_tools.csv_generator.review_engine.Prompt.ask", prompts)
+        monkeypatch.setattr(
+            "gpcr_tools.csv_generator.review_engine.Confirm.ask",
+            _ScriptedResponses([]),
+        )
+        review_toplevel_blocks("XXXX", main_data, {}, self._validation_data(gating=True))
+        assert prompts._responses == []

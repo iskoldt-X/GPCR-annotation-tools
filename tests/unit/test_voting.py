@@ -15,10 +15,12 @@ from gpcr_tools.aggregator.voting import (
     _first_list_entry,
     extract_ai_g_protein,
     find_discrepancies,
+    flag_low_confidence_consensus,
     get_majority_votes,
     score_run,
     select_best_run,
 )
+from gpcr_tools.config import LOW_CONFIDENCE_LEVELS
 
 # ===================================================================
 # Helpers / fixtures
@@ -1268,3 +1270,84 @@ class TestObjectListScoring:
         ]
         idx, _ = select_best_run(runs, majority)
         assert idx == 1
+
+
+class TestSiteRefControversyGating:
+    """A binding-site vote controversy is advisory only on the apo placeholder or a
+    shipped 'unknown' value; a real site conflict keeps gating.
+    """
+
+    def _site_ref_record(self, discs: list, path: str) -> dict:
+        matches = [d for d in discs if d["path"] == path]
+        assert len(matches) == 1, f"expected one record at {path}, got {matches}"
+        return matches[0]
+
+    def test_apo_placeholder_site_ref_is_advisory(self) -> None:
+        best = {"ligands": [{"chem_comp_id": "None", "name": "apo", "site_ref": "orthosteric"}]}
+        majority = {"ligands": [{"chem_comp_id": "None", "name": "apo", "site_ref": "unknown"}]}
+        discs = find_discrepancies(best, majority, {})
+        rec = self._site_ref_record(discs, "ligands[__keyless__:apo].site_ref")
+        assert rec.get("gating") is False
+
+    def test_per_copy_shipped_unknown_site_ref_is_advisory(self) -> None:
+        best = {"ligand_copies": [{"copy_id": "A:401", "site_ref": "unknown", "role": "x"}]}
+        majority = {
+            "ligand_copies": [{"copy_id": "A:401", "site_ref": "intracellular", "role": "x"}]
+        }
+        discs = find_discrepancies(best, majority, {})
+        rec = self._site_ref_record(discs, "ligand_copies[A:401].site_ref")
+        assert rec["best_run_value"] == "unknown"
+        assert rec.get("gating") is False
+
+    def test_per_copy_near_tie_shipped_unknown_is_advisory(self) -> None:
+        best = {"ligand_copies": [{"copy_id": "A:401", "site_ref": "unknown", "role": "x"}]}
+        majority = {"ligand_copies": [{"copy_id": "A:401", "site_ref": "unknown", "role": "x"}]}
+        votes = {"ligand_copies": [{"site_ref": {"unknown": 3, "intracellular": 3}}]}
+        discs = find_discrepancies(best, majority, votes)
+        rec = self._site_ref_record(discs, "ligand_copies[A:401].site_ref")
+        assert rec.get("needs_review") is True
+        assert rec.get("gating") is False
+
+    def test_real_site_conflict_keeps_gating(self) -> None:
+        # A shipped real site (orthosteric) disagreeing with the majority is a
+        # genuine conflict: no gating downgrade (defaults to gating).
+        best = {"ligand_copies": [{"copy_id": "A:401", "site_ref": "orthosteric", "role": "x"}]}
+        majority = {
+            "ligand_copies": [{"copy_id": "A:401", "site_ref": "intracellular", "role": "x"}]
+        }
+        discs = find_discrepancies(best, majority, {})
+        rec = self._site_ref_record(discs, "ligand_copies[A:401].site_ref")
+        assert rec.get("gating", True) is True
+
+    def test_unknown_among_votes_but_real_shipped_keeps_gating(self) -> None:
+        # 'unknown' merely appearing among the votes, while a real site is shipped,
+        # is not a downgrade trigger.
+        best = {"ligand_copies": [{"copy_id": "A:401", "site_ref": "orthosteric", "role": "x"}]}
+        majority = {"ligand_copies": [{"copy_id": "A:401", "site_ref": "orthosteric", "role": "x"}]}
+        votes = {"ligand_copies": [{"site_ref": {"orthosteric": 3, "unknown": 3}}]}
+        discs = find_discrepancies(best, majority, votes)
+        rec = self._site_ref_record(discs, "ligand_copies[A:401].site_ref")
+        assert rec.get("gating", True) is True
+
+
+class TestPerCopyRoleLowConfidenceAdvisory:
+    """A per-copy ROLE low-confidence flag is advisory (the CSV Role comes from the
+    compound-level ligand); the per-copy site_ref low-confidence flag keeps gating.
+    """
+
+    def test_per_copy_role_advisory_site_ref_gating(self) -> None:
+        low = next(iter(LOW_CONFIDENCE_LEVELS))
+        data = {
+            "ligand_copies": [
+                {
+                    "copy_id": "A:401",
+                    "site_ref": "orthosteric",
+                    "role": "agonist",
+                    "confidence": low,
+                }
+            ]
+        }
+        flags = flag_low_confidence_consensus(data, LOW_CONFIDENCE_LEVELS)
+        by_path = {f["path"]: f for f in flags}
+        assert by_path["ligand_copies[A:401].role"].get("gating") is False
+        assert "gating" not in by_path["ligand_copies[A:401].site_ref"]

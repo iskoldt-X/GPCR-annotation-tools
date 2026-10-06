@@ -80,11 +80,13 @@ class TestResolvePartnerProtomer:
         assert not oligo.get("alerts")
 
     def test_non_receptor_partner_evicted_with_alert(self) -> None:
-        # 8XGR-style: endothelin receptor (7TM, chain A primary) + endothelin-1, a
-        # short peptide ligand that carries a receptor-ish slug but 0 TMs. The
-        # peptide must NOT land in the additional-receptor column, and the eviction
-        # is surfaced as a curator alert.
-        oligo = _oligo_tm(("A", "ednrb_human", 7), ("B", "edn1_human", 0))
+        # A 7TM receptor (chain A primary) plus a short peptide ligand (chain B, 0
+        # TMs) that carries a receptor-ish slug NOT on the roster denylist -- i.e. an
+        # un-catalogued peptide that slipped past the roster build. This TM-count
+        # gate is the independent safety net for exactly that case: the peptide must
+        # NOT land in the additional-receptor column, and the eviction is surfaced as
+        # a curator alert.
+        oligo = _oligo_tm(("A", "ednrb_human", 7), ("B", "pep1_human", 0))
         partner_uniprot, partner_chains = resolve_partner_protomer(oligo, "A")
         assert partner_uniprot == ""
         assert partner_chains == ""
@@ -94,14 +96,14 @@ class TestResolvePartnerProtomer:
         assert "chain B" in alerts[0]["message"]
 
     def test_single_pass_coreceptor_evicted(self) -> None:
-        # 8XFS-style: a 7TM receptor (chain A) plus a single-pass (1 TM) co-receptor
-        # (ZNRF3) and a 0-TM soluble agonist (R-spondin-2), both mis-mapped to a
-        # GPCR slug. Neither is a 7TM protomer, so the partner column stays empty
-        # and one alert covers both evicted chains.
+        # A 7TM receptor (chain A) plus a single-pass (1 TM) co-receptor and a 0-TM
+        # soluble agonist, both mis-mapped to a GPCR slug that is NOT on the roster
+        # denylist. Neither is a 7TM protomer, so the partner column stays empty and
+        # one alert covers both evicted chains.
         oligo = _oligo_tm(
             ("A", "lgr4_human", 7),
             ("C", "znrf3_human", 1),
-            ("D", "rspo2_human", 0),
+            ("D", "pep2_human", 0),
         )
         partner_uniprot, partner_chains = resolve_partner_protomer(oligo, "A")
         assert partner_uniprot == ""
